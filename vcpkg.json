@@ -1,0 +1,22 @@
+{
+    "name": "hyper-engine",
+    "version": "0.1.0",
+    "builtin-baseline": "522253caf47268c1724f486a035e927a42a90092",
+    "dependencies": [
+        "glfw3",
+        "spdlog",
+        "vulkan-memory-allocator",
+        "shader-slang",
+        "glm",
+        "nlohmann-json",
+        "stb",
+        "tinygltf",
+        "basisu",
+        "python3",
+        "pybind11",
+        "joltphysics"
+    ],
+    "overrides": [
+        { "name": "python3", "version": "3.12.13#1" }
+    ]
+}

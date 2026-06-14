@@ -1,0 +1,18 @@
+﻿{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "vcpkg",
+            "displayName": "Vcpkg Toolchain Preset",
+            "description": "使用 vcpkg 工具链的通用配置",
+            "binaryDir": "${sourceDir}/Build",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "type": "FILEPATH",
+                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                },
+                "X_VCPKG_APPLOCAL_DEPS_INSTALL": "ON"
+            }
+        }
+    ]
+}
