@@ -10,40 +10,46 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-Sampler2D TransmittanceLutTexture;
+SamplerState LutSampler;
 
 [[vk::binding(2, 2)]]
-Sampler2D MultiScatteringLutTexture;
+Texture2D<float4> TransmittanceLutTexture;
 
 [[vk::binding(3, 2)]]
-RWTexture2DArray<float4> SkyCubemapImage;
+Texture2D<float4> MultiScatteringLutTexture;
 
-// struct PushConstants
-// {
-//     uint cubeResolution;
-//     uint instanceIndex;
-// };
+[[vk::binding(4, 2)]]
+[format("rgba16f")]
+WTexture2DArray<float4> SkyCubemapImage;
 
-// [[vk::push_constant]]
-// PushConstants PC;
+struct PushConstants
+{
+    WorldCoord captureOrigin;
+};
+[[vk::push_constant]]
+PushConstants PC;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void ComputeMain(uint3 globalID : SV_DispatchThreadID)
 {
-    float2 uv = float2(globalID.xy + 0.5) / 512;
+    uint width, height, layers;
+    SkyCubemapImage.GetDimensions(width, height, layers);
 
-    //const InstanceData instanceData = sInstanceData[PC.instanceIndex];
-    //float3 worldPos = getWorldPos(Atmosphere, instanceData.localToWorld.getTranslation());
+    if (globalID.x >= width || globalID.y >= height || globalID.z >= layers)
+        return;
+
+    float2 uv = float2(globalID.xy + 0.5) / float2(width, height);
+
     float3 worldDir = faceUVToCubemapDir(globalID.z, uv);
 
-    float3 worldPos = getWorldPos(Atmosphere, sViewData[0].cameraOrigin);
+    float3 worldPos = getWorldPos(Atmosphere, PC.captureOrigin);
     if (!moveToTopAtmosphere(Atmosphere, worldPos, worldDir))
     {
-        SkyCubemapImage[globalID] = float4(0.0, 0.0, 0.0, 1.0);
+        SkyCubemapImage.Store(globalID, float4(0.0, 0.0, 0.0, 1.0));
         return;
     }
     float3 lum, fms, trans;
-    rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, Atmosphere.sun0Direction, 0.3, 30.0, 9000000.0, lum, fms, trans);
-    SkyCubemapImage[globalID] = float4(lum, 1.0);
+    rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, Atmosphere.sun0Direction, 0.3, 30.0, 9000000.0, lum, fms, trans);
+    SkyCubemapImage.Store(globalID, float4(lum, 1.0));
 }

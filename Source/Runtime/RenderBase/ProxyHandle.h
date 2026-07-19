@@ -17,6 +17,7 @@ namespace hyp
         Mesh_Render,
         Directional_Light,
         Atmosphere,
+        Sky_Light,
 
         GSplat_Render,
 
@@ -95,6 +96,8 @@ namespace hyp
     using DirectionalLightProxyHandle = TProxyHandle<ProxyType::Directional_Light>;
 
     using AtmosphereProxyHandle = TProxyHandle<ProxyType::Atmosphere>;
+
+    using SkyLightProxyHandle = TProxyHandle<ProxyType::Sky_Light>;
 
     using GSplatRenderProxyHandle = TProxyHandle<ProxyType::GSplat_Render>;
 

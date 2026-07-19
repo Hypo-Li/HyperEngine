@@ -1,60 +1,76 @@
 #include "DirectLightingPass.h"
 #include "RenderPassUtils.h"
 
+#include <RenderBase/RenderBackend.h>
+
+#include <DirectLighting.generated.h>
+
+#include <vector>
+
 namespace hyp
 {
     struct DirectLightingData
     {
-        SceneRendererContext* rendererContext;
         const SceneProxy* scene;
+        uint32_t sceneId;
         uint32_t viewId;
         float4 viewport;
+        bool hasAtmosphere;
         rg::TextureHandle sceneColor;
         rg::TextureHandle gbufferA;
         rg::TextureHandle gbufferB;
         rg::TextureHandle gbufferC;
         rg::TextureHandle sceneDepthD;
+        rg::TextureHandle transmittanceLut;
     };
 
     struct DirectLightingStorage
     {
         std::shared_ptr<PassShader> shader;
-        TRef<vk::Pipeline> pipeline;
-        std::vector<DescriptorCache<4>> perViewCaches;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<7>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void DirectLightingPass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
-        const SceneView& view
+        const SceneView& view,
+        const AtmosphereProxy* atmosphere
     )
     {
         renderGraph.addGraphicsPass<DirectLightingData>(
             "DirectLighting"_hs,
             [&](rg::RenderGraph::Builder& builder, DirectLightingData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.scene = &scene;
-                uint32_t viewId = view.getViewId();
-                data.viewId = viewId;
+                data.sceneId = scene.getSceneId();
+                data.viewId = view.getViewId();
                 data.viewport = view.getViewport();
+                data.hasAtmosphere = atmosphere != nullptr;
                 auto& blackboard = builder.getBlackboard();
-                rg::TextureHandle sceneColor = blackboard.get<rg::TextureHandle>("SceneColor"_hs(viewId));
-                rg::TextureHandle gbufferA = blackboard.get<rg::TextureHandle>("GBufferA"_hs(viewId));
-                rg::TextureHandle gbufferB = blackboard.get<rg::TextureHandle>("GBufferB"_hs(viewId));
-                rg::TextureHandle gbufferC = blackboard.get<rg::TextureHandle>("GBufferC"_hs(viewId));
-                rg::TextureHandle sceneDepthD = blackboard.get<rg::TextureHandle>("SceneDepthD"_hs(viewId));
-                data.sceneColor = builder.addColorAttachment(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD);
+                rg::TextureHandle sceneColor = blackboard.get<rg::TextureHandle>("SceneColor"_hs(data.viewId));
+                data.sceneColor = builder.addColorAttachment(sceneColor, rhi::AttachmentLoadOp::Load);
+                blackboard.put("SceneColor"_hs(data.viewId), data.sceneColor);
+                rg::TextureHandle gbufferA = blackboard.get<rg::TextureHandle>("GBufferA"_hs(data.viewId));
                 data.gbufferA = builder.sample(gbufferA);
+                rg::TextureHandle gbufferB = blackboard.get<rg::TextureHandle>("GBufferB"_hs(data.viewId));
                 data.gbufferB = builder.sample(gbufferB);
+                rg::TextureHandle gbufferC = blackboard.get<rg::TextureHandle>("GBufferC"_hs(data.viewId));
                 data.gbufferC = builder.sample(gbufferC);
+                rg::TextureHandle sceneDepthD = blackboard.get<rg::TextureHandle>("SceneDepthD"_hs(data.viewId));
                 data.sceneDepthD = builder.sample(sceneDepthD);
-                blackboard.put("SceneColor"_hs(viewId), data.sceneColor);
+
+                if (data.hasAtmosphere)
+                {
+                    auto transmittanceLut = blackboard.get<rg::TextureHandle>("TransmittanceLut"_hs(data.sceneId));
+                    data.transmittanceLut = builder.sample(transmittanceLut);
+                }
             },
-            [](rg::ExecuteContext& context, DirectLightingData& data)
+            [&rendererContext, atmosphere](rg::ExecuteContext& context, DirectLightingData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<DirectLightingPass, DirectLightingStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<DirectLightingPass, DirectLightingStorage>();
 
                 auto& renderBackend = context.getRenderBackend();
 
@@ -62,110 +78,118 @@ namespace hyp
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
-
-                VkImageView gbufferA = context.getTexture(data.gbufferA)->getHandle();
-                VkImageView gbufferB = context.getTexture(data.gbufferB)->getHandle();
-                VkImageView gbufferC = context.getTexture(data.gbufferC)->getHandle();
-                VkImageView sceneDepthD = context.getTexture(data.sceneDepthD)->getHandle();
-                if (descriptorCache.needUpdate(gbufferA, gbufferB, gbufferC, sceneDepthD))
-                {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
-                        { 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
-                        { 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
-                        { 3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }
-                    };
-                    descriptorCache.update(
-                        renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
-                        {
-                            writer.writeImage(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, gbufferA, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, gbufferB, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, gbufferC, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, sceneDepthD, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                        }
-                    );
-                }
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
 
                 if (!storage.shader)
                 {
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "DirectLighting",
-                        SHADER_DIR "/Material/DirectLighting.slang"
+                        makeVertexFragmentBytecode(
+                            renderBackend.getRHIBackend(),
+                            GET_PASS_SHADER_BYTECODE(DirectLighting, Vertex),
+                            GET_PASS_SHADER_BYTECODE(DirectLighting, Fragment)
+                        )
+                    );
+                }
+
+                const rhi::TextureView* gbufferA = context.getTexture(data.gbufferA);
+                const rhi::TextureView* gbufferB = context.getTexture(data.gbufferB);
+                const rhi::TextureView* gbufferC = context.getTexture(data.gbufferC);
+                const rhi::TextureView* sceneDepthD = context.getTexture(data.sceneDepthD);
+
+                // 场景没有大气时绑 DefaultResources 的通用占位资源(全零 buffer + 全白纹理)。
+                // DirectLighting.slang 里靠 topRadiusKm <= bottomRadiusKm(全零时天然成立)判断
+                // 出"没有真实大气", 整段透过率计算直接跳过、transmittance 恒为 1, 不依赖占位 buffer
+                // 里有什么具体内容
+
+                auto& defaultResources = renderBackend.getDefaultResources();
+                rhi::Buffer* atmosphereParameters = data.hasAtmosphere
+                    ? &atmosphere->getParametersBuffer()
+                    : &defaultResources.getDummyUniformBuffer();
+                const rhi::TextureView* transmittanceLut = data.hasAtmosphere
+                    ? context.getTexture(data.transmittanceLut)
+                    : &defaultResources.getWhiteTextureView();
+                rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
+
+                if (bindGroupCache.needUpdate(gbufferA, gbufferB, gbufferC, sceneDepthD, atmosphereParameters, transmittanceLut, linearClampNoMipSampler))
+                {
+                    if (!storage.bindGroupLayout)
+                    {
+                        storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kDirectLighting_Bindings);
+                    }
+
+                    bindGroupCache.update(
+                        renderBackend,
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
+                        {
+                            PassBindGroupWriter writer(generated::kDirectLighting_Bindings);
+                            writer.setTexture("GbufferAImage", gbufferA);
+                            writer.setTexture("GbufferBImage", gbufferB);
+                            writer.setTexture("GbufferCImage", gbufferC);
+                            writer.setTexture("SceneDepthImage", sceneDepthD);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setTexture("TransmittanceLutTexture", transmittanceLut);
+                            writer.setSampler("LutSampler", linearClampNoMipSampler);
+                            writer.apply(bindGroup);
+                        }
                     );
                 }
 
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createPipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
-                auto& cmd = context.getCommandBuffer();
+
+                auto& cmd = context.getCommandList();
+
+                context.beginPass();
 
                 setViewportAndScissor(cmd, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                cmd.bindPipeline(storage.pipeline.get());
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Graphics,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
 
-                auto directionalLightProxies = data.scene->getDirectionalLightProxies();
-                for (auto directionalLightProxy : directionalLightProxies)
+                for (auto directionalLightProxy : data.scene->getDirectionalLightProxies())
                 {
                     uint32_t lightIndex = directionalLightProxy->getLightIndex();
-                    cmd.pushConstants(
-                        storage.pipeline->getLayout().getHandle(),
-                        VK_SHADER_STAGE_ALL,
-                        0,
-                        sizeof(uint32_t),
-                        &lightIndex
-                    );
+                    cmd.setImmediateData(&storage.pipeline->getLayout(), 0, std::span((const uint8_t*)&lightIndex, sizeof(lightIndex)));
                     cmd.draw(3, 1, 0, 0);
                 }
-            }
+            },
+            rg::PassFlags::Skip_Begin_Pass
         );
     }
 
-    vk::Pipeline* DirectLightingPass::createPipeline(
-        SceneRendererContext& rendererContext,
+    rhi::Pipeline* DirectLightingPass::createPipeline(
+        RendererContext& rendererContext,
         ShaderVariant shaderVariant,
-        const vk::DescriptorSetLayout& descriptorSetLayout
+        const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, descriptorSetLayout.getHandle());
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
         PipelineCache::GraphicsKey pipelineKey;
+        pipelineKey.pipelineState = PipelineStatePresets::fullscreenTriangle();
         pipelineKey.pipelineState.shader = shaderVariant;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_List);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 0;
-        pipelineKey.pipelineState.depthWriteEnable = 0;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
         pipelineKey.pipelineState.colorBlendState = ColorBlendState::get<
-            AttachmentBlendState{ VK_TRUE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, vk::kColorComponentAll }
+            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::One, rhi::BlendFactor::One, rhi::BlendOp::Add, rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add, 0xF }
         >();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_UNDEFINED,
-            VK_FORMAT_R16G16B16A16_SFLOAT
+            rhi::TextureFormat::Undefined,
+            rhi::TextureFormat::RGBA16_SFLOAT
         >();
         pipelineKey.pipelineLayout = pipelineLayout;
         return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);

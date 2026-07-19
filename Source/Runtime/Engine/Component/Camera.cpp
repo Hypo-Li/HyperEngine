@@ -3,7 +3,7 @@
 #include "../Context.h"
 
 #include <RenderBase/RenderFrontend.h>
-#include <Renderer/SceneRendererContext.h>
+#include <Renderer/RendererContext.h>
 #include <Renderer/SceneView.h>
 #include <Renderer/CameraProxy.h>
 #include <Renderer/SceneProxy.h>
@@ -47,7 +47,7 @@ namespace hyp
             projectionType = mProjectionType,
             projectionAxis = mProjectionAxis,
             fov = mFov, orthoSize = mOrthoSize,
-            nearPlane = mNearPlane, farPlane = mFarPlane](RenderFrameContext& context)
+            nearPlane = mNearPlane, farPlane = mFarPlane](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 TextureProxy* renderTargetProxy = nullptr;
@@ -58,7 +58,7 @@ namespace hyp
                     outputRouting = OutputRouting::Copy_Resolve;
                 }
                 
-                auto& rendererContext = Context::get().getSceneRendererContext();
+                auto& rendererContext = Context::get().getRendererContext();
                 uint32_t viewId = rendererContext.getViewDataManager().acquireViewId();
                 CameraProxy* cameraProxy = proxyManager.createProxy(
                     proxyHandle,
@@ -97,11 +97,11 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle = mProxyHandle,
-            sceneProxyHandle](RenderFrameContext& context)
+            sceneProxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 CameraProxy* cameraProxy = proxyManager.getProxy(proxyHandle);
-                auto& rendererContext = Context::get().getSceneRendererContext();
+                auto& rendererContext = Context::get().getRendererContext();
                 rendererContext.getViewDataManager().releaseViewId(cameraProxy->getViewId());
 
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
@@ -125,7 +125,7 @@ namespace hyp
 
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
-            eye, forward, up](RenderFrameContext& context)
+            eye, forward, up](FrameContext& context)
             {
                 CameraProxy* cameraProxy = context.getProxyManager().getProxy(proxyHandle);
                 cameraProxy->setViewMatrix(eye, forward, up);
@@ -184,7 +184,7 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle = mProxyHandle,
-            rect = mOutputRect](RenderFrameContext& context)
+            rect = mOutputRect](FrameContext& context)
             {
                 CameraProxy* proxy = context.getProxyManager().getProxy(proxyHandle);
                 proxy->setOutputRect(rect);
@@ -212,7 +212,7 @@ namespace hyp
             fov = mFov,
             orthoSize = mOrthoSize,
             nearPlane = mNearPlane,
-            farPlane = mFarPlane](RenderFrameContext& context)
+            farPlane = mFarPlane](FrameContext& context)
             {
                 CameraProxy* proxy = context.getProxyManager().getProxy(proxyHandle);
                 if (projectionType == ProjectionType::Perspective)

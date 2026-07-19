@@ -1,5 +1,4 @@
 #pragma once
-#include <thread>
 #include "RenderFrontend.h"
 #include "RenderBackend.h"
 
@@ -8,8 +7,8 @@ namespace hyp
     class RenderSystem
     {
     public:
-        RenderSystem(vk::Instance& instance, vk::Device& device, const Window& window) :
-            mBackend(instance, device, window),
+        RenderSystem(const Window& window) :
+            mBackend(window),
             mFrontend(mBackend)
         {
         }
@@ -19,7 +18,7 @@ namespace hyp
 
 
     private:
-        RenderFrontend mFrontend;
         RenderBackend mBackend;
+        RenderFrontend mFrontend;
     };
 }

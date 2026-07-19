@@ -3,289 +3,303 @@
 
 namespace hyp
 {
-    GlobalBindings::GlobalBindings(const vk::Device& device, BindlessRegistry& bindlessRegistry) :
-        mDevice(device)
+    static constexpr uint32_t kBindlessBindingOffset = 1; // FrameData
+    static constexpr uint32_t kTexture2DBinding = uint32_t(BindlessBinding::Texture2D) + kBindlessBindingOffset;
+    static constexpr uint32_t kTexture2DArrayBinding = uint32_t(BindlessBinding::Texture2DArray) + kBindlessBindingOffset;
+    static constexpr uint32_t kTexture3DBinding = uint32_t(BindlessBinding::Texture3D) + kBindlessBindingOffset;
+    static constexpr uint32_t kTextureCubeBinding = uint32_t(BindlessBinding::TextureCube) + kBindlessBindingOffset;
+    static constexpr uint32_t kSamplerBinding = uint32_t(BindlessBinding::Sampler) + kBindlessBindingOffset;
+
+    GlobalBindings::GlobalBindings(RenderBackend& renderBackend) :
+        mRenderBackend(renderBackend),
+        mBindlessEnabled(renderBackend.getDevice().getFeatures().bindless)
     {
-        bindlessRegistry.setGlobalBindings(this);
-        initBindlessDefaultResources();
-        initGlobalDataDescriptorSet(bindlessRegistry);
+        if (mBindlessEnabled)
+        {
+            initBindlessDefaultResources();
+            renderBackend.getBindlessRegistry().setGlobalBindings(this);
+        }
+        initGlobalDataBindGroup(mRenderBackend.getBindlessRegistry().getConfig());
     }
 
-    void GlobalBindings::writeTexture2D(uint32_t index, VkImageView imageView)
+    void GlobalBindings::writeTexture2D(uint32_t index, rhi::TextureView* view)
     {
-        vk::DescriptorWriter writer;
-        imageView = imageView == VK_NULL_HANDLE ? mDefaultTexture2DImageView->getHandle() : imageView;
-        writer.writeImage(uint32_t(BindlessBinding::Texture2D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, index);
-        writer.update(*mGlobalDataDescriptorSet);
+        assert(mBindlessEnabled);
+        rhi::TextureView* actualView = view ? view : mDefaultTexture2DView.get();
+
+        rhi::BindGroupEntry entry;
+        entry.binding = kTexture2DBinding;
+        entry.type = rhi::BindingType::Sampled_Texture;
+        entry.index = index;
+        entry.textures = { &actualView, 1 };
+
+        mGlobalDataBindGroup->update({ &entry, 1 });
     }
 
-    void GlobalBindings::writeTexture2DArray(uint32_t index, VkImageView imageView)
+    void GlobalBindings::writeTexture2DArray(uint32_t index, rhi::TextureView* view)
     {
-        vk::DescriptorWriter writer;
-        imageView = imageView == VK_NULL_HANDLE ? mDefaultTexture2DArrayImageView->getHandle() : imageView;
-        writer.writeImage(uint32_t(BindlessBinding::Texture2DArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, index);
-        writer.update(*mGlobalDataDescriptorSet);
+        assert(mBindlessEnabled);
+        rhi::TextureView* actualView = view ? view : mDefaultTexture2DArrayView.get();
+
+        rhi::BindGroupEntry entry;
+        entry.binding = kTexture2DArrayBinding;
+        entry.type = rhi::BindingType::Sampled_Texture;
+        entry.index = index;
+        entry.textures = { &actualView, 1 };
+
+        mGlobalDataBindGroup->update({ &entry, 1 });
     }
 
-    void GlobalBindings::writeTextureCube(uint32_t index, VkImageView imageView)
+    void GlobalBindings::writeTexture3D(uint32_t index, rhi::TextureView* view)
     {
-        vk::DescriptorWriter writer;
-        imageView = imageView == VK_NULL_HANDLE ? mDefaultTextureCubeImageView->getHandle() : imageView;
-        writer.writeImage(uint32_t(BindlessBinding::TextureCube), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, index);
-        writer.update(*mGlobalDataDescriptorSet);
+        assert(mBindlessEnabled);
+        rhi::TextureView* actualView = view ? view : mDefaultTexture3DView.get();
+
+        rhi::BindGroupEntry entry;
+        entry.binding = kTexture3DBinding;
+        entry.type = rhi::BindingType::Sampled_Texture;
+        entry.index = index;
+        entry.textures = { &actualView, 1 };
+
+        mGlobalDataBindGroup->update({ &entry, 1 });
     }
 
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-    void GlobalBindings::writeTextureCubeArray(uint32_t index, VkImageView imageView)
+    void GlobalBindings::writeTextureCube(uint32_t index, rhi::TextureView* view)
     {
-        vk::DescriptorWriter writer;
-        imageView = imageView == VK_NULL_HANDLE ? mDefaultTextureCubeArrayImageView->getHandle() : imageView;
-        writer.writeImage(uint32_t(BindlessBinding::TextureCubeArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, index);
-        writer.update(*mGlobalDataDescriptorSet);
-    }
-#endif
+        assert(mBindlessEnabled);
+        rhi::TextureView* actualView = view ? view : mDefaultTextureCubeView.get();
 
-    void GlobalBindings::writeTexture3D(uint32_t index, VkImageView imageView)
-    {
-        vk::DescriptorWriter writer;
-        imageView = imageView == VK_NULL_HANDLE ? mDefaultTexture3DImageView->getHandle() : imageView;
-        writer.writeImage(uint32_t(BindlessBinding::Texture3D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, index);
-        writer.update(*mGlobalDataDescriptorSet);
+        rhi::BindGroupEntry entry;
+        entry.binding = kTextureCubeBinding;
+        entry.type = rhi::BindingType::Sampled_Texture;
+        entry.index = index;
+        entry.textures = { &actualView, 1 };
+
+        mGlobalDataBindGroup->update({ &entry, 1 });
     }
 
-    void GlobalBindings::writeSampler(uint32_t index, VkSampler sampler)
+    void GlobalBindings::writeSampler(uint32_t index, rhi::Sampler* sampler)
     {
-        vk::DescriptorWriter writer;
-        sampler = sampler == VK_NULL_HANDLE ? mDefaultSampler->getHandle() : sampler;
-        writer.writeImage(uint32_t(BindlessBinding::Sampler), VK_DESCRIPTOR_TYPE_SAMPLER, sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, index);
-        writer.update(*mGlobalDataDescriptorSet);
+        assert(mBindlessEnabled);
+        rhi::Sampler* actualSampler = sampler ? sampler : mDefaultSampler.get();
+
+        rhi::BindGroupEntry entry;
+        entry.binding = kSamplerBinding;
+        entry.type = rhi::BindingType::Sampler;
+        entry.index = index;
+        entry.samplers = { &actualSampler, 1 };
+        mGlobalDataBindGroup->update({ &entry, 1 });
     }
 
-    void GlobalBindings::updateFrameData(vk::CommandBuffer& cmd, const FrameData& frameData)
+    void GlobalBindings::updateFrameData(rhi::CommandList& cmdList, const FrameData& frameData)
     {
-        cmd.updateBuffer(mFrameDataUniformBuffer->getHandle(), 0, sizeof(FrameData), &frameData);
+        rhi::BufferBarrier preBarrier;
+        preBarrier.buffer = mFrameDataUniformBuffer.get();
+        preBarrier.offset = 0;
+        preBarrier.size = sizeof(FrameData);
+        preBarrier.oldState = rhi::ResourceState::Shader_Uniform;
+        preBarrier.newState = rhi::ResourceState::Transfer_Dst;
+        cmdList.insertBarriers({ &preBarrier, 1 });
 
-        VkBufferMemoryBarrier2 barrier = {};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-        barrier.dstAccessMask = VK_ACCESS_2_UNIFORM_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = mFrameDataUniformBuffer->getHandle();
-        barrier.offset = 0;
-        barrier.size = sizeof(FrameData);
-        cmd.pipelineBarrier2({ &barrier, 1 });
+        auto allocation = mRenderBackend.getStagingAllocator().forceAllocate(sizeof(FrameData));
+        std::memcpy(allocation.mappedData, &frameData, sizeof(FrameData));
+        rhi::BufferCopyRegion region;
+        region.srcOffset = allocation.offset;
+        region.dstOffset = 0;
+        region.size = sizeof(FrameData);
+        cmdList.copyBuffer(allocation.buffer, mFrameDataUniformBuffer.get(), { &region, 1 });
+
+        rhi::BufferBarrier postBarrier;
+        postBarrier.buffer = mFrameDataUniformBuffer.get();
+        postBarrier.offset = 0;
+        postBarrier.size = sizeof(FrameData);
+        postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+        postBarrier.newState = rhi::ResourceState::Shader_Uniform;
+        cmdList.insertBarriers({ &postBarrier, 1 });
     }
 
     void GlobalBindings::initBindlessDefaultResources()
     {
-        vk::Image::CreateInfo imageInfo;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        imageInfo.extent = { 1, 1, 1 };
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 6;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        imageInfo.isCube = true;
+        auto& device = mRenderBackend.getDevice();
 
-        mDefaultTextureImage2D = new vk::Image(mDevice, imageInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+        rhi::TextureDesc textureDesc;
+        textureDesc.type = rhi::TextureType::Texture_2D;
+        textureDesc.format = rhi::TextureFormat::RGBA8_UNORM;
+        textureDesc.extent = uint3(1, 1, 1);
+        textureDesc.mipCount = 1;
+        textureDesc.layerCount = 1;
+        textureDesc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Transfer_Dst;
+
+        mDefaultTexture2D = device.createTexture(textureDesc, rhi::MemoryType::Gpu_Only);
 
         {
-            vk::Image::ViewInfo imageViewInfo;
-            imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            imageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = 0;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.layerCount = 1;
-            mDefaultTexture2DImageView = mDefaultTextureImage2D->createView(imageViewInfo);
+            rhi::TextureViewDesc viewDesc = rhi::makeTextureDefaultViewDesc(mDefaultTexture2D->getDesc());
+            viewDesc.type = rhi::TextureViewType::Texture_View_2D;
+            viewDesc.range.layerCount = 1;
+            mDefaultTexture2DView = mDefaultTexture2D->createView(viewDesc);
         }
 
         {
-            vk::Image::ViewInfo imageViewInfo;
-            imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-            imageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = 0;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.layerCount = 6;
-            mDefaultTexture2DArrayImageView = mDefaultTextureImage2D->createView(imageViewInfo);
+            rhi::TextureViewDesc viewDesc = rhi::makeTextureDefaultViewDesc(mDefaultTexture2D->getDesc());
+            viewDesc.type = rhi::TextureViewType::Texture_View_2D_Array;
+            mDefaultTexture2DArrayView = mDefaultTexture2D->createView(viewDesc);
         }
+
+        textureDesc.type = rhi::TextureType::Texture_3D;
+        textureDesc.layerCount = 1;
+        mDefaultTexture3D = device.createTexture(textureDesc, rhi::MemoryType::Gpu_Only);
 
         {
-            vk::Image::ViewInfo imageViewInfo;
-            imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-            imageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = 0;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.layerCount = 6;
-            mDefaultTextureCubeImageView = mDefaultTextureImage2D->createView(imageViewInfo);
+            rhi::TextureViewDesc viewDesc = rhi::makeTextureDefaultViewDesc(mDefaultTexture3D->getDesc());
+            viewDesc.type = rhi::TextureViewType::Texture_View_3D;
+            viewDesc.range.layerCount = 1;
+            mDefaultTexture3DView = mDefaultTexture3D->createView(viewDesc);
         }
 
-#if SUPPORT_TEXTURE_CUBE_ARRAY
+        textureDesc.type = rhi::TextureType::Texture_Cube;
+        textureDesc.layerCount = 6;
+        mDefaultTextureCube = device.createTexture(textureDesc, rhi::MemoryType::Gpu_Only);
         {
-            vk::Image::ViewInfo imageViewInfo;
-            imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-            imageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = 0;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.layerCount = 6;
-            mDefaultTextureCubeArrayImageView = mDefaultTextureImage2D->createView(imageViewInfo);
-        }
-#endif
-
-        imageInfo.imageType = VK_IMAGE_TYPE_3D;
-        imageInfo.arrayLayers = 1;
-        imageInfo.isCube = false;
-        mDefaultTextureImage3D = new vk::Image(mDevice, imageInfo, VMA_MEMORY_USAGE_GPU_ONLY);
-
-        {
-            vk::Image::ViewInfo imageViewInfo;
-            imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
-            imageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            imageViewInfo.subresourceRange.baseMipLevel = 0;
-            imageViewInfo.subresourceRange.baseArrayLayer = 0;
-            imageViewInfo.subresourceRange.levelCount = 1;
-            imageViewInfo.subresourceRange.layerCount = 1;
-            mDefaultTexture3DImageView = mDefaultTextureImage3D->createView(imageViewInfo);
+            rhi::TextureViewDesc viewDesc = rhi::makeTextureDefaultViewDesc(mDefaultTextureCube->getDesc());
+            viewDesc.type = rhi::TextureViewType::Texture_View_Cube;
+            mDefaultTextureCubeView = mDefaultTextureCube->createView(viewDesc);
         }
 
-        vk::Sampler::CreateInfo samplerInfo;
-        mDefaultSampler = new vk::Sampler(mDevice, samplerInfo);
+        rhi::SamplerDesc samplerDesc;
+        mDefaultSampler = device.createSampler(samplerDesc);
     }
 
-    void GlobalBindings::initGlobalDataDescriptorSet(const BindlessRegistry& bindlessRegistry)
+    void GlobalBindings::initGlobalDataBindGroup(const BindlessConfig& bindlessConfig)
     {
-        auto& bindlessConfig = bindlessRegistry.getBindlessConfig();
-        VkDescriptorSetLayoutBinding bindings[] =
-        {
-            { uint32_t(BindlessBinding::Texture2D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessConfig.maxTexture2DCount, VK_SHADER_STAGE_ALL, nullptr },
-            { uint32_t(BindlessBinding::Texture2DArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessConfig.maxTexture2DArrayCount, VK_SHADER_STAGE_ALL, nullptr },
-            { uint32_t(BindlessBinding::TextureCube), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessConfig.maxTextureCubeCount, VK_SHADER_STAGE_ALL, nullptr },
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-            { uint32_t(BindlessBinding::TextureCubeArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessConfig.maxTextureCubeArrayCount, VK_SHADER_STAGE_ALL, nullptr},
-#endif
-            { uint32_t(BindlessBinding::Texture3D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessConfig.maxTexture3DCount, VK_SHADER_STAGE_ALL, nullptr},
-            { uint32_t(BindlessBinding::Sampler), VK_DESCRIPTOR_TYPE_SAMPLER, bindlessConfig.maxSamplerCount, VK_SHADER_STAGE_ALL, nullptr},
-            { 6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr }
-        };
-        VkDescriptorBindingFlags flags[] =
-        {
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-#endif
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
-            0
-        };
-        mGlobalDataDescriptorSet = mDevice.getDescriptorAllocator().allocate(bindings, flags);
+        std::vector<rhi::BindGroupLayoutEntry> entries;
 
-        std::vector<VkSampler> samplers;
-        std::vector<VkImageView> imageViews;
-        std::vector<VkImageLayout> imageLayouts;
+        auto& frameDataEntry = entries.emplace_back();
+        frameDataEntry.binding = 0;
+        frameDataEntry.type = rhi::BindingType::Uniform_Buffer;
+        frameDataEntry.access = rhi::BindingAccess::Read_Only;
+        frameDataEntry.count = 1;
+        frameDataEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
 
-        vk::DescriptorWriter writer;
-
-        samplers.resize(bindlessConfig.maxTexture2DCount);
-        imageViews.resize(bindlessConfig.maxTexture2DCount);
-        imageLayouts.resize(bindlessConfig.maxTexture2DCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxTexture2DCount; ++i)
+        if (mBindlessEnabled)
         {
-            samplers[i] = VK_NULL_HANDLE;
-            imageViews[i] = mDefaultTexture2DImageView->getHandle();
-            imageLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            auto& texture2DEntry = entries.emplace_back();
+            texture2DEntry.binding = kTexture2DBinding;
+            texture2DEntry.type = rhi::BindingType::Sampled_Texture;
+            texture2DEntry.access = rhi::BindingAccess::Read_Only;
+            texture2DEntry.count = bindlessConfig.maxTexture2DCount;
+            texture2DEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
+            texture2DEntry.bindless = true;
+
+            auto& texture2DArrayEntry = entries.emplace_back();
+            texture2DArrayEntry.binding = kTexture2DArrayBinding;
+            texture2DArrayEntry.type = rhi::BindingType::Sampled_Texture;
+            texture2DArrayEntry.access = rhi::BindingAccess::Read_Only;
+            texture2DArrayEntry.count = bindlessConfig.maxTexture2DArrayCount;
+            texture2DArrayEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
+            texture2DArrayEntry.bindless = true;
+
+            auto& texture3DEntry = entries.emplace_back();
+            texture3DEntry.binding = kTexture3DBinding;
+            texture3DEntry.type = rhi::BindingType::Sampled_Texture;
+            texture3DEntry.access = rhi::BindingAccess::Read_Only;
+            texture3DEntry.count = bindlessConfig.maxTexture3DCount;
+            texture3DEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
+            texture3DEntry.bindless = true;
+
+            auto& textureCubeEntry = entries.emplace_back();
+            textureCubeEntry.binding = kTextureCubeBinding;
+            textureCubeEntry.type = rhi::BindingType::Sampled_Texture;
+            textureCubeEntry.access = rhi::BindingAccess::Read_Only;
+            textureCubeEntry.count = bindlessConfig.maxTextureCubeCount;
+            textureCubeEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
+            textureCubeEntry.bindless = true;
+
+            auto& samplerEntry = entries.emplace_back();
+            samplerEntry.binding = kSamplerBinding;
+            samplerEntry.type = rhi::BindingType::Sampler;
+            samplerEntry.access = rhi::BindingAccess::Read_Only;
+            samplerEntry.count = bindlessConfig.maxSamplerCount;
+            samplerEntry.samplerBindingType = rhi::SamplerBindingType::Filtering;
+            samplerEntry.stageFlags = rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute;
+            samplerEntry.bindless = true;
         }
-        writer.writeImages(uint32_t(BindlessBinding::Texture2D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, samplers, imageViews, imageLayouts);
 
-        samplers.resize(bindlessConfig.maxTexture2DArrayCount);
-        imageViews.resize(bindlessConfig.maxTexture2DArrayCount);
-        imageLayouts.resize(bindlessConfig.maxTexture2DArrayCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxTexture2DArrayCount; ++i)
+        mGlobalDataBindGroupLayout = mRenderBackend.getBindGroupLayoutCache().getOrCreate(entries);
+        auto& device = mRenderBackend.getDevice();
+        mGlobalDataBindGroup = device.createBindGroup(*mGlobalDataBindGroupLayout);
+
         {
-            samplers[i] = VK_NULL_HANDLE;
-            imageViews[i] = mDefaultTexture2DArrayImageView->getHandle();
-            imageLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = sizeof(FrameData);
+            bufferDesc.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Transfer_Dst;
+            mFrameDataUniformBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
-        writer.writeImages(uint32_t(BindlessBinding::Texture2DArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, samplers, imageViews, imageLayouts);
 
-        samplers.resize(bindlessConfig.maxTextureCubeCount);
-        imageViews.resize(bindlessConfig.maxTextureCubeCount);
-        imageLayouts.resize(bindlessConfig.maxTextureCubeCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxTextureCubeCount; ++i)
+        std::vector<rhi::BindGroupEntry> initialEntries;
+
+        rhi::BufferBindingInfo frameDataInfo;
+        frameDataInfo.buffer = mFrameDataUniformBuffer.get();
+        frameDataInfo.offset = 0;
+        frameDataInfo.range = sizeof(FrameData);
+
+        initialEntries.push_back({ 0, rhi::BindingType::Uniform_Buffer, 0, { &frameDataInfo, 1 }, {}, {} });
+        mGlobalDataBindGroup->update(initialEntries);
+
+        if (mBindlessEnabled)
         {
-            samplers[i] = VK_NULL_HANDLE;
-            imageViews[i] = mDefaultTextureCubeImageView->getHandle();
-            imageLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            initialEntries.clear();
+
+            std::vector<rhi::TextureView*> texture2Ds(bindlessConfig.maxTexture2DCount);
+            for (uint32_t i = 0; i < bindlessConfig.maxTexture2DCount; ++i)
+                texture2Ds[i] = mDefaultTexture2DView.get();
+            auto& texture2DEntry = initialEntries.emplace_back();
+            texture2DEntry.binding = kTexture2DBinding;
+            texture2DEntry.type = rhi::BindingType::Sampled_Texture;
+            texture2DEntry.index = 0;
+            texture2DEntry.textures = texture2Ds;
+
+            std::vector<rhi::TextureView*> texture2DArrays(bindlessConfig.maxTexture2DArrayCount);
+            for (uint32_t i = 0; i < bindlessConfig.maxTexture2DArrayCount; ++i)
+                texture2DArrays[i] = mDefaultTexture2DArrayView.get();
+            auto& texture2DArrayEntry = initialEntries.emplace_back();
+            texture2DArrayEntry.binding = kTexture2DArrayBinding;
+            texture2DArrayEntry.type = rhi::BindingType::Sampled_Texture;
+            texture2DArrayEntry.index = 0;
+            texture2DArrayEntry.textures = texture2DArrays;
+
+            std::vector<rhi::TextureView*> texture3Ds(bindlessConfig.maxTexture3DCount);
+            for (uint32_t i = 0; i < bindlessConfig.maxTexture3DCount; ++i)
+                texture3Ds[i] = mDefaultTexture3DView.get();
+            auto& texture3DEntry = initialEntries.emplace_back();
+            texture3DEntry.binding = kTexture3DBinding;
+            texture3DEntry.type = rhi::BindingType::Sampled_Texture;
+            texture3DEntry.index = 0;
+            texture3DEntry.textures = texture3Ds;
+
+            std::vector<rhi::TextureView*> textureCubes(bindlessConfig.maxTextureCubeCount);
+            for (uint32_t i = 0; i < bindlessConfig.maxTextureCubeCount; ++i)
+                textureCubes[i] = mDefaultTextureCubeView.get();
+            auto& textureCubeEntry = initialEntries.emplace_back();
+            textureCubeEntry.binding = kTextureCubeBinding;
+            textureCubeEntry.type = rhi::BindingType::Sampled_Texture;
+            textureCubeEntry.index = 0;
+            textureCubeEntry.textures = textureCubes;
+
+            std::vector<rhi::Sampler*> samplers(bindlessConfig.maxSamplerCount);
+            for (uint32_t i = 0; i < bindlessConfig.maxSamplerCount; ++i)
+                samplers[i] = mDefaultSampler.get();
+            auto& samplerEntry = initialEntries.emplace_back();
+            samplerEntry.binding = kSamplerBinding;
+            samplerEntry.type = rhi::BindingType::Sampler;
+            samplerEntry.index = 0;
+            samplerEntry.samplers = samplers;
+
+            mGlobalDataBindGroup->update(initialEntries);
         }
-        writer.writeImages(uint32_t(BindlessBinding::TextureCube), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, samplers, imageViews, imageLayouts);
 
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        samplers.resize(bindlessConfig.maxTextureCubeArrayCount);
-        imageViews.resize(bindlessConfig.maxTextureCubeArrayCount);
-        imageLayouts.resize(bindlessConfig.maxTextureCubeArrayCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxTextureCubeArrayCount; ++i)
-        {
-            samplers[i] = VK_NULL_HANDLE;
-            imageViews[i] = mDefaultTextureCubeArrayImageView->getHandle();
-            imageLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        }
-        writer.writeImages(uint32_t(BindlessBinding::TextureCubeArray), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, samplers, imageViews, imageLayouts);
-#endif
-
-        samplers.resize(bindlessConfig.maxTexture3DCount);
-        imageViews.resize(bindlessConfig.maxTexture3DCount);
-        imageLayouts.resize(bindlessConfig.maxTexture3DCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxTexture3DCount; ++i)
-        {
-            samplers[i] = VK_NULL_HANDLE;
-            imageViews[i] = mDefaultTexture3DImageView->getHandle();
-            imageLayouts[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        }
-        writer.writeImages(uint32_t(BindlessBinding::Texture3D), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, samplers, imageViews, imageLayouts);
-
-        samplers.resize(bindlessConfig.maxSamplerCount);
-        imageViews.resize(bindlessConfig.maxSamplerCount);
-        imageLayouts.resize(bindlessConfig.maxSamplerCount);
-        for (uint32_t i = 0; i < bindlessConfig.maxSamplerCount; ++i)
-        {
-            samplers[i] = mDefaultSampler->getHandle();
-            imageViews[i] = VK_NULL_HANDLE;
-            imageLayouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-        }
-        writer.writeImages(uint32_t(BindlessBinding::Sampler), VK_DESCRIPTOR_TYPE_SAMPLER, samplers, imageViews, imageLayouts);
-
-        vk::Buffer::CreateInfo bufferInfo;
-        bufferInfo.size = sizeof(FrameData);
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        mFrameDataUniformBuffer = new vk::Buffer(mDevice, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
-
-        writer.writeBuffer(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, mFrameDataUniformBuffer->getHandle(), 0, sizeof(FrameData));
-
-        writer.update(*mGlobalDataDescriptorSet);
-
-        VkDescriptorSetLayout setLayouts[] = {
-            mGlobalDataDescriptorSet->getLayout().getHandle()
-        };
-        VkPushConstantRange pushConstantRange = {
-            VK_SHADER_STAGE_ALL, 0, 128
-        };
-        mPipelineLayout = new vk::PipelineLayout(mDevice, setLayouts, { &pushConstantRange, 1 });
+        rhi::PipelineLayoutDesc pipelineLayoutDesc;
+        pipelineLayoutDesc.bindGroupLayouts[0] = mGlobalDataBindGroupLayout;
+        mPipelineLayout = device.createPipelineLayout(pipelineLayoutDesc);
     }
 
 }

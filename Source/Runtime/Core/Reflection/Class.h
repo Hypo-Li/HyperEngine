@@ -24,14 +24,14 @@ namespace hyp
 
         virtual bool isAbstract() const noexcept = 0;
 
-        Class* getBaseClass()
+        Class* getBaseClass() const noexcept
         {
             return mBaseClass;
         }
 
         Property* getProperty(HString name) const;
 
-        std::span<Property* const> getProperties() const
+        std::span<Property* const> getProperties() const noexcept
         {
             return mProperties;
         }
@@ -45,9 +45,19 @@ namespace hyp
 
         bool isBaseOf(Class* clazz) const;
 
-        std::span<Class* const> getDerivedClasses() const
+        std::span<Class* const> getDerivedClasses() const noexcept
         {
             return mDerivedClasses;
+        }
+
+        void setVersion(uint32_t version) noexcept
+        {
+            mVersion = version;
+        }
+
+        uint32_t getVersion() const noexcept
+        {
+            return mVersion;
         }
 
     protected:
@@ -61,6 +71,7 @@ namespace hyp
         Class* mBaseClass;
         std::vector<Class*> mDerivedClasses;
         TRef<Object> mDefaultObject;
+        uint32_t mVersion = 0;
     };
 
     template <ObjectType T, ObjectType Base = Object, AllocateFrequency ALLOC_FREQ = AllocateFrequency::Medium>

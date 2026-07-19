@@ -1,5 +1,8 @@
 #pragma once
+#include <memory>
+#ifndef HYP_SINGLE_THREADED_RENDERING
 #include <semaphore>
+#endif
 
 #include "RenderCommandQueue.h"
 #include "GlobalBindings.h"
@@ -9,19 +12,19 @@
 #include "RenderTagRegistry.h"
 #include "Shader.h"
 #include "PipelineCache.h"
+#include "BindGroupLayoutCache.h"
+#include "SamplerCache.h"
+#include "DefaultResources.h"
 
 #include <Platform/Window.h>
+#include <RHI/Context.h>
 
 namespace hyp
 {
     class RenderBackend
     {
     public:
-        RenderBackend(
-            vk::Instance& instance,
-            vk::Device& device,
-            const Window& window
-        );
+        RenderBackend(const Window& window);
 
         ~RenderBackend();
 
@@ -29,14 +32,14 @@ namespace hyp
 
         void finishRenderThread();
 
-        vk::Instance& getInstance() const noexcept
+        rhi::Backend getRHIBackend() const noexcept
         {
-            return mInstance;
+            return mRHIContext->getBackend();
         }
 
-        vk::Device& getDevice() const noexcept
+        const rhi::Device& getDevice() const noexcept
         {
-            return mDevice;
+            return mRHIContext->getDevice();
         }
 
         const Window& getWindow() const noexcept
@@ -49,6 +52,26 @@ namespace hyp
             return mCommandQueue;
         }
 
+        BindGroupLayoutCache& getBindGroupLayoutCache() noexcept
+        {
+            return mBindGroupLayoutCache;
+        }
+
+        SamplerCache& getSamplerCache() noexcept
+        {
+            return mSamplerCache;
+        }
+
+        DefaultResources& getDefaultResources() noexcept
+        {
+            return mDefaultResources;
+        }
+
+        PipelineCache& getPipelineCache() noexcept
+        {
+            return mPipelineCache;
+        }
+
         ProxyManager& getProxyManager() noexcept
         {
             return mProxyManager;
@@ -59,14 +82,14 @@ namespace hyp
             return mDeferredTaskQueue;
         }
 
-        GlobalBindings& getGlobalBindings() noexcept
-        {
-            return mGlobalBindings;
-        }
-
         BindlessRegistry& getBindlessRegistry() noexcept
         {
             return mBindlessRegistry;
+        }
+
+        GlobalBindings& getGlobalBindings() noexcept
+        {
+            return mGlobalBindings;
         }
 
         StagingAllocator& getStagingAllocator() noexcept
@@ -84,24 +107,32 @@ namespace hyp
             return mMaterialShaderManager;
         }
 
-        PipelineCache& getPipelineCache() noexcept
+        FrameContext& getFrameContext() noexcept
         {
-            return mPipelineCache;
+            return mFrameContext;
         }
 
     private:
+#ifndef HYP_SINGLE_THREADED_RENDERING
         void renderLoop();
+#endif
 
     private:
-        vk::Instance& mInstance;
-        vk::Device& mDevice;
         const Window& mWindow;
 
-        RenderCommandQueue mCommandQueue;
-        std::thread mRenderThread;
-        std::atomic_bool mRunning;
-        std::binary_semaphore mWakeUpSignal{ 0 };
+        std::unique_ptr<rhi::Context> mRHIContext;
 
+        RenderCommandQueue mCommandQueue;
+#ifndef HYP_SINGLE_THREADED_RENDERING
+        std::thread mRenderThread;
+        std::atomic_bool mRenderThreadRunning;
+        std::binary_semaphore mWakeUpSignal{ 0 };
+#endif
+
+        BindGroupLayoutCache mBindGroupLayoutCache;
+        SamplerCache mSamplerCache;
+        DefaultResources mDefaultResources;
+        PipelineCache mPipelineCache;
         ProxyManager mProxyManager;
         DeferredTaskQueue mDeferredTaskQueue;
         BindlessRegistry mBindlessRegistry;
@@ -109,8 +140,7 @@ namespace hyp
         StagingAllocator mStagingAllocator;
         RenderTagRegistry mRenderTagRegistry;
         MaterialShaderManager mMaterialShaderManager;
-        PipelineCache mPipelineCache;
 
-        RenderFrameContext mContext;
+        FrameContext mFrameContext;
     };
 }

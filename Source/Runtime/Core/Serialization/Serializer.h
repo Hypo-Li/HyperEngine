@@ -1,0 +1,109 @@
+#pragma once
+#include "Archive.h"
+#include "SerializeContext.h"
+
+namespace hyp
+{
+    class Serializer
+    {
+    public:
+        Serializer(Archive& archive, SerializeContext& context);
+
+        void serializeObject(Object*& object);
+
+    private:
+        void serializeType(Type* type, void* instance, size_t count = 1);
+        
+        void serializeFundamental(Fundamental* fundamental, void* instance, size_t count);
+
+        void serializeEnumeration(Enumeration* enumeration, void* instance, size_t count);
+
+        void saveEnumeration(Enumeration* enumeration, void* instance, size_t count);
+
+        void loadEnumeration(Enumeration* enumeration, void* instance, size_t count);
+
+        void serializeStructure(Structure* structure, void* instance, size_t count);
+
+        void saveStructure(Structure* structure, void* instance, size_t count);
+
+        void loadStructure(Structure* structure, void* instance, size_t count);
+
+        void serializeClass(Class* clazz, void* instance, size_t count);
+
+        void saveClass(Class* clazz, void* instance, size_t count);
+
+        void loadClass(Class* clazz, void* instance, size_t count);
+
+        void serializeSpecial(Special* special, void* instance, size_t count);
+
+        void serializeStdArray(StdArray* stdArray, void* instance, size_t count);
+
+        void saveStdArray(StdArray* stdArray, void* instance, size_t count);
+
+        void loadStdArray(StdArray* stdArray, void* instance, size_t count);
+
+        void serializeStdList(StdList* stdList, void* instance, size_t count);
+
+        void saveStdList(StdList* stdList, void* instance, size_t count);
+
+        void loadStdList(StdList* stdList, void* instance, size_t count);
+
+        void serializeStdMap(StdMap* stdMap, void* instance, size_t count);
+
+        void saveStdMap(StdMap* stdMap, void* instance, size_t count);
+
+        void loadStdMap(StdMap* stdMap, void* instance, size_t count);
+
+        void serializeStdOptional(StdOptional* stdOptional, void* instance, size_t count);
+
+        void saveStdOptional(StdOptional* stdOptional, void* instance, size_t count);
+
+        void loadStdOptional(StdOptional* stdOptional, void* instance, size_t count);
+
+        void serializeStdPair(StdPair* stdPair, void* instance, size_t count);
+
+        void saveStdPair(StdPair* stdPair, void* instance, size_t count);
+
+        void loadStdPair(StdPair* stdPair, void* instance, size_t count);
+
+        void serializeStdSet(StdSet* stdSet, void* instance, size_t count);
+
+        void saveStdSet(StdSet* stdSet, void* instance, size_t count);
+
+        void loadStdSet(StdSet* stdSet, void* instance, size_t count);
+
+        void serializeStdString(StdString* stdString, void* instance, size_t count);
+
+        void serializeStdUnorderedMap(StdUnorderedMap* stdUnorderedMap, void* instance, size_t count);
+
+        void saveStdUnorderedMap(StdUnorderedMap* stdUnorderedMap, void* instance, size_t count);
+
+        void loadStdUnorderedMap(StdUnorderedMap* stdUnorderedMap, void* instance, size_t count);
+
+        void serializeStdUnorderedSet(StdUnorderedSet* stdUnorderedSet, void* instance, size_t count);
+
+        void saveStdUnorderedSet(StdUnorderedSet* stdUnorderedSet, void* instance, size_t count);
+
+        void loadStdUnorderedSet(StdUnorderedSet* stdUnorderedSet, void* instance, size_t count);
+
+        void serializeStdVariant(StdVariant* stdVariant, void* instance, size_t count);
+
+        void saveStdVariant(StdVariant* stdVariant, void* instance, size_t count);
+
+        void loadStdVariant(StdVariant* stdVariant, void* instance, size_t count);
+
+        void serializeStdVector(StdVector* stdVector, void* instance, size_t count);
+
+        void saveStdVector(StdVector* stdVector, void* instance, size_t count);
+
+        void loadStdVector(StdVector* stdVector, void* instance, size_t count);
+
+        void serializeHypHString(HypHString* hypHString, void* instance, size_t count);
+
+        void serializeBulkData(HypBulkData* hypBulkData, void* instance, size_t count);
+
+    private:
+        Archive& mArchive;
+        SerializeContext& mContext;
+    };
+}

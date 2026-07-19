@@ -20,13 +20,20 @@ struct DrawIndirectCommand
     uint firstVertex;
     uint firstInstance;
 };
+struct DrawIndirectCommandAtomic
+{
+    uint vertexCount;
+    Atomic<uint> instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
 [[vk::binding(2, 2)]]
-RWStructuredBuffer<DrawIndirectCommand> DrawIndirectCommandBuffer;
+RWStructuredBuffer<DrawIndirectCommandAtomic> DrawIndirectCommandBuffer;
 
 [[vk::binding(3, 2)]]
 RWStructuredBuffer<uint> VisibleSplatDistanceBuffer;
 
-[[push_constant]]
+[[vk::push_constant]]
 uint kSplatCount;
 
 #define GROUP_THREAD_COUNT 256
@@ -182,8 +189,7 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID, uint groupLocalIndex : SV
             running += gWaveCount[i];
         }
 
-        uint base = 0;
-        InterlockedAdd(DrawIndirectCommandBuffer[0].instanceCount, running, base);
+        uint base = DrawIndirectCommandBuffer[0].instanceCount.add(running);
         gGroupBaseOffset = base;
     }
 

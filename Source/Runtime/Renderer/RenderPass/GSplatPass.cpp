@@ -1,27 +1,113 @@
 #include "GSplatPass.h"
 #include "RenderPassUtils.h"
-#define VRDX_IMPLEMENTATION
-#include <vk_radix_sort.h>
+
+#include <algorithm>
+
+#include <Culling.generated.h>
+#include <GSplat.generated.h>
+#include <GSplatDepth.generated.h>
+#include <RadixSortUpsweep.generated.h>
+#include <RadixSortSpine.generated.h>
+#include <RadixSortDownsweep.generated.h>
 
 namespace hyp
 {
+    namespace
+    {
+        // 256 基数(8 bit/pass),32 位 key 需要 4 个 pass,和 Shader/Common/RadixSort/Constants.slang 保持一致
+        constexpr uint32_t kRadixSortRadix = 256;
+        constexpr uint32_t kRadixSortWorkgroupSize = 256;
+        constexpr uint32_t kRadixSortPartitionDivision = 8;
+        constexpr uint32_t kRadixSortPartitionSize = kRadixSortPartitionDivision * kRadixSortWorkgroupSize;
+        constexpr uint32_t kRadixSortPassCount = 4;
+
+        void setRadixSortPass(rhi::CommandList& cmd, const rhi::PipelineLayout& layout, uint32_t pass)
+        {
+            cmd.setImmediateData(&layout, 0, std::span(reinterpret_cast<const uint8_t*>(&pass), sizeof(pass)));
+        }
+
+        // 和 createComputePipeline(RenderPassUtils.h)不同,这里不套全局的 group0(GlobalData)/
+        // group1(SceneAndView)——Downsweep 自己就要 7 个 storage buffer,再加上全局那两组会超过
+        // WebGPU 单 stage 8 个 storage buffer 的限制,而 Downsweep 其实也用不到全局那两组,所以只
+        // 给它自己的 BindGroupLayout 建一个精简的 PipelineLayout,放在 group 0
+        rhi::Pipeline* createStandaloneComputePipeline(
+            RendererContext& rendererContext,
+            ShaderVariant shaderVariant,
+            const rhi::BindGroupLayout& passLayout)
+        {
+            auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
+
+            PipelineCache::PipelineLayoutKey layoutKey{};
+            layoutKey.bindGroupLayouts[0] = &passLayout;
+            layoutKey.bindGroupLayouts[1] = nullptr;
+            layoutKey.bindGroupLayouts[2] = nullptr;
+            layoutKey.bindGroupLayouts[3] = nullptr;
+            rhi::PipelineLayout* pipelineLayout = pipelineCache.getOrCreate(layoutKey);
+
+            PipelineCache::ComputeKey key;
+            key.shader = shaderVariant;
+            key.pipelineLayout = pipelineLayout;
+            return pipelineCache.getOrCreateComputePipeline(key);
+        }
+
+        // Downsweep 用的精简 PipelineLayout 只有一个 BindGroupLayout(放在 group 0),和其它 pass
+        // 用的"group0=全局数据、group1=场景视图、group2=pass 自己"这套不兼容。绑定 Downsweep 的
+        // pipeline 会让驱动认为 group0/1 上原来绑的内容不再兼容,必须在切回其它 pipeline(下一轮
+        // Upsweep,或者 GSplatSort 结束后的 GSplatRender)之前重新绑定,否则后面的 pass 会因为
+        // group0/1 没有有效绑定而出错
+        void rebindGlobalBindGroups(
+            rg::ExecuteContext& context,
+            RendererContext& rendererContext,
+            const SceneProxy& scene,
+            uint32_t viewId)
+        {
+            auto& renderBackend = context.getRenderBackend();
+            auto& cmd = context.getCommandList();
+            auto& globalBindings = renderBackend.getGlobalBindings();
+
+            cmd.setBindGroup(
+                0,
+                rhi::PipelineBindPoint::Compute,
+                &globalBindings.getPipelineLayout(),
+                &globalBindings.getGlobalDataBindGroup(),
+                {}
+            );
+
+            const rhi::BindGroup& sceneAndViewBindGroup = scene.getSceneAndViewBindGroup();
+            uint32_t dynamicOffset = rendererContext.getViewDataManager().getViewDataDynamicOffset(viewId);
+            cmd.setBindGroup(
+                1,
+                rhi::PipelineBindPoint::Compute,
+                &rendererContext.getGlobalPipelineLayout(),
+                &sceneAndViewBindGroup,
+                { &dynamicOffset, 1 }
+            );
+        }
+    }
+    struct DrawIndirectCommand
+    {
+        uint32_t vertexCount;
+        uint32_t instanceCount;
+        uint32_t firstVertex;
+        uint32_t firstInstance;
+    };
+
     void GSplatPass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
+        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
     {
         addGSplatCullingPass(renderGraph, rendererContext, view, gsplatScene);
-        addGSplatSortPass(renderGraph, rendererContext, view, gsplatScene);
+        addGSplatSortPass(renderGraph, rendererContext, scene, view, gsplatScene);
         addGSplatRenderPass(renderGraph, rendererContext, view, gsplatScene);
         //addGSplatDepthPass(renderGraph, rendererContext, view, gsplatScene);
-        //addGSplatRelightingPass(renderGraph, rendererContext, view, gsplatScene);
     }
 
     struct GSplatCullingData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         const GSplatScene* gsplatScene;
         rg::BufferHandle gsplatDrawIndirect;
@@ -32,13 +118,14 @@ namespace hyp
     struct GSplatCullingStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<4>> descriptorCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<4>> descriptorCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void GSplatPass::addGSplatCullingPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -47,47 +134,46 @@ namespace hyp
             "GSplatCulling"_hs,
             [&](rg::RenderGraph::Builder& builder, GSplatCullingData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.gsplatScene = &gsplatScene;
                 auto& blackboard = builder.getBlackboard();
 
                 auto splatIndices = builder.createBuffer(
                     "SplatIndices"_hs(data.viewId),
-                    rg::BufferDescription{ sizeof(uint32_t) * gsplatScene.getTotalSplatCount() }
+                    rhi::BufferDesc{ sizeof(uint32_t) * gsplatScene.getTotalSplatCount(), rhi::BufferUsage::Storage }
                 );
                 data.splatIndices = builder.accessBuffer(
                     splatIndices,
-                    rg::BufferUsage::Storage,
+                    rhi::BufferUsage::Storage,
                     rg::AccessType::Write_Only
                 );
                 blackboard.put("SplatIndices"_hs(data.viewId), data.splatIndices);
 
                 auto gsplatDrawIndirect = builder.createBuffer(
                     "GSplatDrawIndirect"_hs(data.viewId),
-                    rg::BufferDescription{ sizeof(VkDrawIndirectCommand), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT }
+                    rhi::BufferDesc{ sizeof(DrawIndirectCommand), rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect | rhi::BufferUsage::Transfer_Dst }
                 );
                 data.gsplatDrawIndirect = builder.accessBuffer(
                     gsplatDrawIndirect,
-                    rg::BufferUsage::Storage,
+                    rhi::BufferUsage::Storage,
                     rg::AccessType::Write_Only
                 );
                 blackboard.put("GSplatDrawIndirect"_hs(data.viewId), data.gsplatDrawIndirect);
 
                 auto splatDistances = builder.createBuffer(
                     "SplatDistances"_hs(data.viewId),
-                    rg::BufferDescription{ sizeof(float) * gsplatScene.getTotalSplatCount() }
+                    rhi::BufferDesc{ sizeof(float) * gsplatScene.getTotalSplatCount(), rhi::BufferUsage::Storage }
                 );
                 data.splatDistances = builder.accessBuffer(
                     splatDistances,
-                    rg::BufferUsage::Storage,
+                    rhi::BufferUsage::Storage,
                     rg::AccessType::Write_Only
                 );
                 blackboard.put("SplatDistances"_hs(data.viewId), data.splatDistances);
             },
-            [](rg::ExecuteContext& context, GSplatCullingData& data)
+            [&rendererContext](rg::ExecuteContext& context, GSplatCullingData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<GSplatPass, GSplatCullingStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatCullingStorage>();
 
                 auto& renderBackend = context.getRenderBackend();
 
@@ -97,37 +183,38 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "GSplatCulling",
-                        SHADER_DIR "/GSplat/Culling.slang"
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(Culling, Compute))
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kCulling_Bindings);
                 }
 
                 if (storage.descriptorCaches.size() <= data.viewId)
                 {
                     storage.descriptorCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.descriptorCaches[data.viewId];
+                auto& bindGroupCache = storage.descriptorCaches[data.viewId];
 
-                VkBuffer splatData = data.gsplatScene->getSplatDataBuffer().getHandle();
-                VkBuffer splatIndices = context.getBuffer(data.splatIndices)->getHandle();
-                VkBuffer gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect)->getHandle();
-                VkBuffer splatDistances = context.getBuffer(data.splatDistances)->getHandle();
-                if (descriptorCache.needUpdate(splatData, splatIndices, gsplatDrawIndirect, splatDistances))
+                const rhi::Buffer* splatData = &data.gsplatScene->getSplatDataBuffer();
+                const rhi::Buffer* splatIndices = context.getBuffer(data.splatIndices);
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
+                const rhi::Buffer* splatDistances = context.getBuffer(data.splatDistances);
+                if (bindGroupCache.needUpdate(splatData, splatIndices, gsplatDrawIndirect, splatDistances))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-                        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-                        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-                        {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatData, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatIndices, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, gsplatDrawIndirect, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatDistances, 0, VK_WHOLE_SIZE);
+                            PassBindGroupWriter writer(generated::kCulling_Bindings);
+                            writer.setBuffer("GPUSplatDataBuffer", splatData);
+                            writer.setBuffer("VisibleSplatIndexBuffer", splatIndices);
+                            writer.setBuffer("DrawIndirectCommandBuffer", gsplatDrawIndirect);
+                            writer.setBuffer("VisibleSplatDistanceBuffer", splatDistances);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -135,178 +222,510 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createComputePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        bindGroupCache.getBindGroup()->getLayout()
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
 
                 if (firstCulling)
                 {
-                    cmd.fillBuffer(gsplatDrawIndirect, offsetof(VkDrawIndirectCommand, vertexCount), sizeof(uint32_t), 4);
+                    auto allocation = renderBackend.getStagingAllocator().forceAllocate(sizeof(uint32_t));
+                    *static_cast<uint32_t*>(allocation.mappedData) = 4;
+                    rhi::BufferCopyRegion region;
+                    region.srcOffset = allocation.offset;
+                    region.dstOffset = offsetof(DrawIndirectCommand, vertexCount);
+                    region.size = sizeof(uint32_t);
+                    cmd.copyBuffer(allocation.buffer, gsplatDrawIndirect, { &region, 1 });
                 }
-                cmd.fillBuffer(gsplatDrawIndirect, offsetof(VkDrawIndirectCommand, instanceCount), sizeof(uint32_t), 0);
-                VkBufferMemoryBarrier2 bufferBarrier = {};
-                bufferBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-                bufferBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-                bufferBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                bufferBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                bufferBarrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
-                bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bufferBarrier.buffer = gsplatDrawIndirect;
-                bufferBarrier.offset = 0;
-                bufferBarrier.size = VK_WHOLE_SIZE;
-                VkBufferMemoryBarrier2 barriers[] = { bufferBarrier };
-                cmd.pipelineBarrier2(barriers, {});
+                cmd.clearBuffer(gsplatDrawIndirect, offsetof(DrawIndirectCommand, instanceCount), sizeof(uint32_t));
 
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                rhi::BufferBarrier barrier;
+                barrier.buffer = gsplatDrawIndirect;
+                barrier.offset = 0;
+                barrier.size = rhi::kWholeBuffer;
+                barrier.oldState = rhi::ResourceState::Transfer_Dst;
+                barrier.newState = rhi::ResourceState::Compute_Shader_Storage;
+                cmd.insertBarriers({ &barrier, 1 });
+
+                context.beginPass();
+
+                cmd.bindPipeline(storage.pipeline.get());
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Compute,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 uint32_t splatCount = data.gsplatScene->getTotalSplatCount();
-                cmd.pushConstants(
-                    storage.pipeline->getLayout().getHandle(),
-                    VK_SHADER_STAGE_ALL,
-                    0,
-                    sizeof(uint32_t),
-                    &splatCount
-                );
+                cmd.setImmediateData(&storage.pipeline->getLayout(), 0, std::span(reinterpret_cast<const uint8_t*>(&splatCount), sizeof(splatCount)));
                 cmd.dispatch(uint32_t(std::ceil(splatCount / 256.0f)), 1, 1);
-            }
+            },
+            rg::PassFlags::Skip_Begin_Pass
         );
     }
 
-    struct GSplatSortData
-    {
-        SceneRendererContext* rendererContext;
-        uint32_t viewId;
-        const GSplatScene* gsplatScene;
-        rg::BufferHandle gsplatDrawIndirect;
-        rg::BufferHandle splatDistances;
-        rg::BufferHandle splatIndices;
-        rg::BufferHandle splatSorterStorage;
-    };
-
-    class Sorter
-    {
-    public:
-        Sorter(const vk::Device& device) :
-            mDevice(device)
-        {
-            VrdxSorterCreateInfo sorterInfo = {};
-            sorterInfo.physicalDevice = device.getPhysicalDevice().getHandle();
-            sorterInfo.device = device.getHandle();
-            sorterInfo.pipelineCache = VK_NULL_HANDLE;
-            vrdxCreateSorter(&sorterInfo, &mSorter);
-        }
-
-        ~Sorter()
-        {
-            vrdxDestroySorter(mSorter);
-        }
-
-        VrdxSorter getHandle() const noexcept
-        {
-            return mSorter;
-        }
-
-        VrdxSorterStorageRequirements getSorterKeyValueStorageRequirements(uint32_t numElements)
-        {
-            VrdxSorterStorageRequirements requirements = {};
-            vrdxGetSorterKeyValueStorageRequirements(mSorter, numElements, &requirements);
-            return requirements;
-        }
-
-    private:
-        const vk::Device& mDevice;
-        VrdxSorter mSorter = VK_NULL_HANDLE;
-    };
-
     struct GSplatSortStorage
     {
-        std::shared_ptr<PassShader> shader;
-        TRef<vk::Pipeline> pipeline;
-        std::shared_ptr<Sorter> sorter;
+        std::shared_ptr<PassShader> upsweepShader;
+        std::shared_ptr<PassShader> spineShader;
+        std::shared_ptr<PassShader> downsweepShader;
+
+        TRef<rhi::BindGroupLayout> upsweepLayout;
+        TRef<rhi::BindGroupLayout> spineLayout;
+        TRef<rhi::BindGroupLayout> downsweepLayout;
+
+        TRef<rhi::Pipeline> upsweepPipeline;
+        TRef<rhi::Pipeline> spinePipeline;
+        TRef<rhi::Pipeline> downsweepPipeline;
+
+        struct PerView
+        {
+            // keysIn 只有两种可能(splatDistances 或 keysTemp),按 pass 号奇偶复用
+            std::array<BindGroupCache<4>, 2> upsweepCaches;
+            // Spine 不涉及 key/value ping-pong,4 个 pass 共用一份
+            BindGroupCache<3> spineCache;
+            // Downsweep 的 in/out 每个 pass 都不一样,4 个 pass 各留一份
+            std::array<BindGroupCache<7>, kRadixSortPassCount> downsweepCaches;
+        };
+        std::vector<PerView> perViewCaches;
     };
+
+    struct GSplatRadixSortUpsweepData
+    {
+        uint32_t viewId;
+        uint32_t partitionCount;
+        uint32_t pass;
+        rg::BufferHandle gsplatDrawIndirect;
+        rg::BufferHandle keysIn;
+        rg::BufferHandle globalHistogram;
+        rg::BufferHandle partitionHistogram;
+    };
+
+    // GSplatSort 拆成的 12 个独立 RenderGraph pass 之一(4 个 radix pass * Upsweep/Spine/Downsweep 三步)。
+    // globalHistogram/partitionHistogram 用引用传入/传出:pass==0 时这两个 buffer 在这里第一次被创建
+    // (只能在某个 pass 的 builder 里 createBuffer,选第一个摸到它们的 pass);pass>0 时用调用方传入的
+    // 上一轮 Downsweep 更新过的 handle 继续声明访问,写完之后把新 handle 传回去给下一步(Spine)用
+    void GSplatPass::addRadixSortUpsweepPass(
+        rg::RenderGraph& renderGraph,
+        RendererContext& rendererContext,
+        uint32_t viewId,
+        uint32_t partitionCount,
+        uint32_t pass,
+        rg::BufferHandle gsplatDrawIndirect,
+        rg::BufferHandle keysIn,
+        rg::BufferHandle& globalHistogram,
+        rg::BufferHandle& partitionHistogram
+    )
+    {
+        bool firstPass = (pass == 0);
+        static const HString passNames[kRadixSortPassCount] = {
+            "GSplatSortUpsweep0",
+            "GSplatSortUpsweep1",
+            "GSplatSortUpsweep2",
+            "GSplatSortUpsweep3",
+        };
+        auto& computePass = renderGraph.addComputePass<GSplatRadixSortUpsweepData>(
+            passNames[pass](viewId),
+            [&](rg::RenderGraph::Builder& builder, GSplatRadixSortUpsweepData& data)
+            {
+                data.viewId = viewId;
+                data.partitionCount = partitionCount;
+                data.pass = pass;
+
+                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.keysIn = builder.accessBuffer(keysIn, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+
+                if (firstPass)
+                {
+                    auto globalHistogramHandle = builder.createBuffer(
+                        "GSplatSortGlobalHistogram"_hs(viewId),
+                        rhi::BufferDesc{ sizeof(uint32_t) * kRadixSortRadix * kRadixSortPassCount, rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst }
+                    );
+                    data.globalHistogram = builder.accessBuffer(globalHistogramHandle, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+
+                    auto partitionHistogramHandle = builder.createBuffer(
+                        "GSplatSortPartitionHistogram"_hs(viewId),
+                        rhi::BufferDesc{ sizeof(uint32_t) * kRadixSortRadix * partitionCount, rhi::BufferUsage::Storage }
+                    );
+                    data.partitionHistogram = builder.accessBuffer(partitionHistogramHandle, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                }
+                else
+                {
+                    // Upsweep 是原子累加,GlobalHistogram 读写都有;PartitionHistogram 每趟都是整份覆盖写
+                    data.globalHistogram = builder.accessBuffer(globalHistogram, rhi::BufferUsage::Storage, rg::AccessType::Read_Write);
+                    data.partitionHistogram = builder.accessBuffer(partitionHistogram, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                }
+            },
+            [&rendererContext](rg::ExecuteContext& context, GSplatRadixSortUpsweepData& data)
+            {
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatSortStorage>();
+                auto& renderBackend = context.getRenderBackend();
+
+                if (!storage.upsweepShader)
+                {
+                    storage.upsweepShader = std::make_shared<PassShader>(
+                        renderBackend.getDevice(), "RadixSortUpsweep",
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(RadixSortUpsweep, Compute))
+                    );
+                }
+                if (!storage.upsweepLayout)
+                {
+                    storage.upsweepLayout = createPassBindGroupLayout(renderBackend, generated::kRadixSortUpsweep_Bindings);
+                }
+                if (!storage.upsweepPipeline)
+                {
+                    // 完全用不到全局的 group0(GlobalData)/group1(SceneAndView),用不含这两组的精简
+                    // PipelineLayout(见 createStandaloneComputePipeline 的注释),自己的 BindGroupLayout 放在 group 0
+                    storage.upsweepPipeline = createStandaloneComputePipeline(rendererContext, storage.upsweepShader->getVariant(), *storage.upsweepLayout);
+                }
+
+                if (storage.perViewCaches.size() <= data.viewId)
+                {
+                    storage.perViewCaches.resize(data.viewId + 1);
+                }
+                auto& perView = storage.perViewCaches[data.viewId];
+
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
+                const rhi::Buffer* keysIn = context.getBuffer(data.keysIn);
+                const rhi::Buffer* globalHistogram = context.getBuffer(data.globalHistogram);
+                const rhi::Buffer* partitionHistogram = context.getBuffer(data.partitionHistogram);
+
+                uint32_t side = data.pass % 2;
+                auto& cache = perView.upsweepCaches[side];
+                if (cache.needUpdate(gsplatDrawIndirect, globalHistogram, partitionHistogram, keysIn))
+                {
+                    cache.update(renderBackend, *storage.upsweepLayout, [&](rhi::BindGroup& bindGroup)
+                    {
+                        // ElementCounts 直接借用 gsplatDrawIndirect 里 Culling 已经算好的可见 splat 数(instanceCount
+                        // 字段),不需要单独维护一份 element count buffer,shader 侧读 ElementCounts[1]
+                        PassBindGroupWriter writer(generated::kRadixSortUpsweep_Bindings);
+                        writer.setBuffer("ElementCounts", gsplatDrawIndirect);
+                        writer.setBuffer("GlobalHistogram", globalHistogram);
+                        writer.setBuffer("PartitionHistogram", partitionHistogram);
+                        writer.setBuffer("Keys", keysIn);
+                        writer.apply(bindGroup);
+                    });
+                }
+
+                auto& cmd = context.getCommandList();
+
+                if (data.pass == 0)
+                {
+                    // 整趟排序开始前清零 GlobalHistogram 一次(Upsweep 是原子累加,不是覆盖写)。
+                    // clearBuffer 底层是 vkCmdFillBuffer,属于 transfer 写,RenderGraph 声明的 access 是
+                    // Write_Only(compute),覆盖不到这次 transfer 写,所以这个屏障必须手动插,不能指望自动推导;
+                    // 不清零的话 GlobalHistogram 里会残留上一帧(瞬态 buffer 池复用)的前缀和值,导致每个 radix
+                    // 的基准偏移全错、scatter 到错误的高位偏移
+                    rhi::BufferBarrier clearBarrier;
+                    clearBarrier.buffer = globalHistogram;
+                    clearBarrier.offset = 0;
+                    clearBarrier.size = rhi::kWholeBuffer;
+                    clearBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+                    clearBarrier.newState = rhi::ResourceState::Compute_Shader_Storage;
+                    cmd.clearBuffer(globalHistogram, 0, rhi::kWholeBuffer);
+                    cmd.insertBarriers({ &clearBarrier, 1 });
+                    context.beginPass();
+                }
+
+                cmd.bindPipeline(storage.upsweepPipeline.get());
+                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.upsweepPipeline->getLayout(), cache.getBindGroup(), {});
+                setRadixSortPass(cmd, storage.upsweepPipeline->getLayout(), data.pass);
+                cmd.dispatch(data.partitionCount, 1, 1);
+            },
+            firstPass ? rg::PassFlags::Skip_Begin_Pass : rg::PassFlags::None
+        );
+        globalHistogram = computePass.getData().globalHistogram;
+        partitionHistogram = computePass.getData().partitionHistogram;
+    }
+
+    struct GSplatRadixSortSpineData
+    {
+        uint32_t viewId;
+        uint32_t pass;
+        rg::BufferHandle gsplatDrawIndirect;
+        rg::BufferHandle globalHistogram;
+        rg::BufferHandle partitionHistogram;
+    };
+
+    void GSplatPass::addRadixSortSpinePass(
+        rg::RenderGraph& renderGraph,
+        RendererContext& rendererContext,
+        uint32_t viewId,
+        uint32_t pass,
+        rg::BufferHandle gsplatDrawIndirect,
+        rg::BufferHandle& globalHistogram,
+        rg::BufferHandle& partitionHistogram
+    )
+    {
+        static const HString passNames[kRadixSortPassCount] = {
+            "GSplatSortSpine0",
+            "GSplatSortSpine1",
+            "GSplatSortSpine2",
+            "GSplatSortSpine3",
+        };
+        auto& computePass = renderGraph.addComputePass<GSplatRadixSortSpineData>(
+            passNames[pass](viewId),
+            [&](rg::RenderGraph::Builder& builder, GSplatRadixSortSpineData& data)
+            {
+                data.viewId = viewId;
+                data.pass = pass;
+
+                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.globalHistogram = builder.accessBuffer(globalHistogram, rhi::BufferUsage::Storage, rg::AccessType::Read_Write);
+                data.partitionHistogram = builder.accessBuffer(partitionHistogram, rhi::BufferUsage::Storage, rg::AccessType::Read_Write);
+            },
+            [&rendererContext](rg::ExecuteContext& context, GSplatRadixSortSpineData& data)
+            {
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatSortStorage>();
+                auto& renderBackend = context.getRenderBackend();
+
+                if (!storage.spineShader)
+                {
+                    storage.spineShader = std::make_shared<PassShader>(
+                        renderBackend.getDevice(), "RadixSortSpine",
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(RadixSortSpine, Compute))
+                    );
+                }
+                if (!storage.spineLayout)
+                {
+                    storage.spineLayout = createPassBindGroupLayout(renderBackend, generated::kRadixSortSpine_Bindings);
+                }
+                if (!storage.spinePipeline)
+                {
+                    storage.spinePipeline = createStandaloneComputePipeline(rendererContext, storage.spineShader->getVariant(), *storage.spineLayout);
+                }
+
+                if (storage.perViewCaches.size() <= data.viewId)
+                {
+                    storage.perViewCaches.resize(data.viewId + 1);
+                }
+                auto& perView = storage.perViewCaches[data.viewId];
+
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
+                const rhi::Buffer* globalHistogram = context.getBuffer(data.globalHistogram);
+                const rhi::Buffer* partitionHistogram = context.getBuffer(data.partitionHistogram);
+
+                if (perView.spineCache.needUpdate(gsplatDrawIndirect, globalHistogram, partitionHistogram))
+                {
+                    perView.spineCache.update(renderBackend, *storage.spineLayout, [&](rhi::BindGroup& bindGroup)
+                    {
+                        PassBindGroupWriter writer(generated::kRadixSortSpine_Bindings);
+                        writer.setBuffer("ElementCounts", gsplatDrawIndirect);
+                        writer.setBuffer("GlobalHistogram", globalHistogram);
+                        writer.setBuffer("PartitionHistogram", partitionHistogram);
+                        writer.apply(bindGroup);
+                    });
+                }
+
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.spinePipeline.get());
+                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.spinePipeline->getLayout(), perView.spineCache.getBindGroup(), {});
+                setRadixSortPass(cmd, storage.spinePipeline->getLayout(), data.pass);
+                cmd.dispatch(kRadixSortRadix, 1, 1);
+            }
+        );
+        globalHistogram = computePass.getData().globalHistogram;
+        partitionHistogram = computePass.getData().partitionHistogram;
+    }
+
+    struct GSplatRadixSortDownsweepData
+    {
+        const SceneProxy* scene;
+        uint32_t viewId;
+        uint32_t partitionCount;
+        uint32_t pass;
+        rg::BufferHandle gsplatDrawIndirect;
+        rg::BufferHandle globalHistogram;
+        rg::BufferHandle partitionHistogram;
+        rg::BufferHandle keysIn;
+        rg::BufferHandle keysOut;
+        rg::BufferHandle valuesIn;
+        rg::BufferHandle valuesOut;
+    };
+
+    void GSplatPass::addRadixSortDownsweepPass(
+        rg::RenderGraph& renderGraph,
+        RendererContext& rendererContext,
+        const SceneProxy& scene,
+        uint32_t viewId,
+        uint32_t splatCount,
+        uint32_t partitionCount,
+        uint32_t pass,
+        rg::BufferHandle gsplatDrawIndirect,
+        rg::BufferHandle globalHistogram,
+        rg::BufferHandle partitionHistogram,
+        rg::BufferHandle keysIn,
+        rg::BufferHandle& keysOut,
+        rg::BufferHandle valuesIn,
+        rg::BufferHandle& valuesOut
+    )
+    {
+        // keysOut/valuesOut(keyBuffers[1]/valueBuffers[1],即 GSplatSortKeysTemp/ValuesTemp)在整趟排序里
+        // 第一次被写,是 pass==0 这一趟(outSide==1),要在这里 createBuffer;pass==2 outSide 同样是 1,
+        // 但那时已经不是"第一次"了,直接对已有 handle 声明 Write_Only 即可(不需要再 create)
+        bool createOutBuffers = (pass == 0);
+        static const HString passNames[kRadixSortPassCount] = {
+            "GSplatSortDownsweep0",
+            "GSplatSortDownsweep1",
+            "GSplatSortDownsweep2",
+            "GSplatSortDownsweep3",
+        };
+        auto& computePass = renderGraph.addComputePass<GSplatRadixSortDownsweepData>(
+            passNames[pass](viewId),
+            [&](rg::RenderGraph::Builder& builder, GSplatRadixSortDownsweepData& data)
+            {
+                data.scene = &scene;
+                data.viewId = viewId;
+                data.partitionCount = partitionCount;
+                data.pass = pass;
+
+                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                // Spine 已经把 GlobalHistogram/PartitionHistogram 都变成最终的前缀和了,Downsweep 只读
+                data.globalHistogram = builder.accessBuffer(globalHistogram, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.partitionHistogram = builder.accessBuffer(partitionHistogram, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.keysIn = builder.accessBuffer(keysIn, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.valuesIn = builder.accessBuffer(valuesIn, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+
+                if (createOutBuffers)
+                {
+                    auto keysOutHandle = builder.createBuffer(
+                        "GSplatSortKeysTemp"_hs(viewId),
+                        rhi::BufferDesc{ sizeof(uint32_t) * std::max(1u, splatCount), rhi::BufferUsage::Storage }
+                    );
+                    data.keysOut = builder.accessBuffer(keysOutHandle, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+
+                    auto valuesOutHandle = builder.createBuffer(
+                        "GSplatSortValuesTemp"_hs(viewId),
+                        rhi::BufferDesc{ sizeof(uint32_t) * std::max(1u, splatCount), rhi::BufferUsage::Storage }
+                    );
+                    data.valuesOut = builder.accessBuffer(valuesOutHandle, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                }
+                else
+                {
+                    data.keysOut = builder.accessBuffer(keysOut, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                    data.valuesOut = builder.accessBuffer(valuesOut, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                }
+            },
+            [&rendererContext](rg::ExecuteContext& context, GSplatRadixSortDownsweepData& data)
+            {
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatSortStorage>();
+                auto& renderBackend = context.getRenderBackend();
+
+                if (!storage.downsweepShader)
+                {
+                    storage.downsweepShader = std::make_shared<PassShader>(
+                        renderBackend.getDevice(), "RadixSortDownsweep",
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(RadixSortDownsweep, Compute))
+                    );
+                }
+                if (!storage.downsweepLayout)
+                {
+                    storage.downsweepLayout = createPassBindGroupLayout(renderBackend, generated::kRadixSortDownsweep_Bindings);
+                }
+                if (!storage.downsweepPipeline)
+                {
+                    storage.downsweepPipeline = createStandaloneComputePipeline(rendererContext, storage.downsweepShader->getVariant(), *storage.downsweepLayout);
+                }
+
+                if (storage.perViewCaches.size() <= data.viewId)
+                {
+                    storage.perViewCaches.resize(data.viewId + 1);
+                }
+                auto& perView = storage.perViewCaches[data.viewId];
+
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
+                const rhi::Buffer* globalHistogram = context.getBuffer(data.globalHistogram);
+                const rhi::Buffer* partitionHistogram = context.getBuffer(data.partitionHistogram);
+                const rhi::Buffer* keysIn = context.getBuffer(data.keysIn);
+                const rhi::Buffer* keysOut = context.getBuffer(data.keysOut);
+                const rhi::Buffer* valuesIn = context.getBuffer(data.valuesIn);
+                const rhi::Buffer* valuesOut = context.getBuffer(data.valuesOut);
+
+                auto& cache = perView.downsweepCaches[data.pass];
+                if (cache.needUpdate(gsplatDrawIndirect, globalHistogram, partitionHistogram, keysIn, keysOut, valuesIn, valuesOut))
+                {
+                    cache.update(renderBackend, *storage.downsweepLayout, [&](rhi::BindGroup& bindGroup)
+                    {
+                        PassBindGroupWriter writer(generated::kRadixSortDownsweep_Bindings);
+                        writer.setBuffer("ElementCounts", gsplatDrawIndirect);
+                        writer.setBuffer("GlobalHistogram", globalHistogram);
+                        writer.setBuffer("PartitionHistogram", partitionHistogram);
+                        writer.setBuffer("KeysIn", keysIn);
+                        writer.setBuffer("KeysOut", keysOut);
+                        writer.setBuffer("ValuesIn", valuesIn);
+                        writer.setBuffer("ValuesOut", valuesOut);
+                        writer.apply(bindGroup);
+                    });
+                }
+
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.downsweepPipeline.get());
+                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.downsweepPipeline->getLayout(), cache.getBindGroup(), {});
+                setRadixSortPass(cmd, storage.downsweepPipeline->getLayout(), data.pass);
+                cmd.dispatch(data.partitionCount, 1, 1);
+
+                if (data.pass == kRadixSortPassCount - 1)
+                {
+                    // 整趟排序期间 Upsweep/Spine/Downsweep 用的都是不含全局 group0(GlobalData)/group1
+                    // (SceneAndView)的精简 PipelineLayout,紧接着的 GSplatRender pass(以及后面帧里其它
+                    // 任何 pass)还是用正常的 group0/1/2 布局、并且不会自己重新绑定 group0/1(它们假设这
+                    // 两组从帧开始就一直有效绑定),所以最后一趟 Downsweep 结束前必须重新绑一次,不能遗漏
+                    rebindGlobalBindGroups(context, rendererContext, *data.scene, data.viewId);
+                }
+            }
+        );
+        keysOut = computePass.getData().keysOut;
+        valuesOut = computePass.getData().valuesOut;
+    }
 
     void GSplatPass::addGSplatSortPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
+        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
     {
-        renderGraph.addComputePass<GSplatSortData>(
-            "GSplatSort"_hs,
-            [&](rg::RenderGraph::Builder& builder, GSplatSortData& data)
-            {
-                data.rendererContext = &rendererContext;
-                data.viewId = view.getViewId();
-                data.gsplatScene = &gsplatScene;
+        uint32_t viewId = view.getViewId();
+        uint32_t splatCount = gsplatScene.getTotalSplatCount();
+        uint32_t partitionCount = std::max(1u, (splatCount + kRadixSortPartitionSize - 1) / kRadixSortPartitionSize);
 
-                auto& blackboard = builder.getBlackboard();
+        auto& blackboard = renderGraph.getBlackboard();
 
-                auto gsplatDrawIndirect = blackboard.get<rg::BufferHandle>("GSplatDrawIndirect"_hs(data.viewId));
-                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rg::BufferUsage::Storage, rg::AccessType::Read_Only);
+        // keyBuffers[0]/valueBuffers[0] = splatDistances/splatIndices(Culling 阶段产出的那一对);
+        // keyBuffers[1]/valueBuffers[1] = keysTemp/valuesTemp(排序过程里用来 ping-pong 的临时 buffer,
+        // 直到 Downsweep pass==0 才第一次创建)。pass 是偶数时 keysIn 是 0 号那一对,奇数时是 1 号那一对;
+        // 4 个 pass(偶数个)排完之后,最终结果正好落回 0 号,也就是下游 GSplatRenderPass 已经在读的那两个 buffer
+        rg::BufferHandle keyBuffers[2];
+        keyBuffers[0] = blackboard.get<rg::BufferHandle>("SplatDistances"_hs(viewId));
+        rg::BufferHandle valueBuffers[2];
+        valueBuffers[0] = blackboard.get<rg::BufferHandle>("SplatIndices"_hs(viewId));
+        rg::BufferHandle gsplatDrawIndirect = blackboard.get<rg::BufferHandle>("GSplatDrawIndirect"_hs(viewId));
 
-                auto splatDistances = blackboard.get<rg::BufferHandle>("SplatDistances"_hs(data.viewId));
-                data.splatDistances = builder.accessBuffer(splatDistances, rg::BufferUsage::Storage, rg::AccessType::Read_Write);
+        rg::BufferHandle globalHistogram;
+        rg::BufferHandle partitionHistogram;
 
-                auto splatIndices = blackboard.get<rg::BufferHandle>("SplatIndices"_hs(data.viewId));
-                data.splatIndices = builder.accessBuffer(splatIndices, rg::BufferUsage::Storage, rg::AccessType::Read_Write);
-                blackboard.put("SplatIndices"_hs(data.viewId), data.splatIndices);
+        for (uint32_t pass = 0; pass < kRadixSortPassCount; ++pass)
+        {
+            uint32_t inSide = pass % 2;
+            uint32_t outSide = 1 - inSide;
 
-                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatSortStorage>();
-                if (!storage.sorter)
-                {
-                    auto& device = rendererContext.getRenderBackend().getDevice();
-                    storage.sorter = std::make_shared<Sorter>(device);
-                }
+            addRadixSortUpsweepPass(renderGraph, rendererContext, viewId, partitionCount, pass, gsplatDrawIndirect, keyBuffers[inSide], globalHistogram, partitionHistogram);
+            addRadixSortSpinePass(renderGraph, rendererContext, viewId, pass, gsplatDrawIndirect, globalHistogram, partitionHistogram);
+            addRadixSortDownsweepPass(renderGraph, rendererContext, scene, viewId, splatCount, partitionCount, pass, gsplatDrawIndirect, globalHistogram, partitionHistogram, keyBuffers[inSide], keyBuffers[outSide], valueBuffers[inSide], valueBuffers[outSide]);
+        }
 
-                uint32_t splatCount = gsplatScene.getTotalSplatCount();
-                auto requirements = storage.sorter->getSorterKeyValueStorageRequirements(splatCount);
-
-                auto splatSorterStorage = builder.createBuffer("SplatSorterStorage"_hs(data.viewId), rg::BufferDescription{ requirements.size, requirements.usage });
-                data.splatSorterStorage = builder.accessBuffer(splatSorterStorage, rg::BufferUsage::Storage, rg::AccessType::Write_Only);
-
-            },
-            [](rg::ExecuteContext& context, GSplatSortData& data)
-            {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<GSplatPass, GSplatSortStorage>();
-                auto& cmd = context.getCommandBuffer();
-                uint32_t splatCount = data.gsplatScene->getTotalSplatCount();
-                vrdxCmdSortKeyValueIndirect(
-                    cmd.getHandle(),
-                    storage.sorter->getHandle(),
-                    splatCount,
-                    context.getBuffer(data.gsplatDrawIndirect)->getHandle(),
-                    offsetof(VkDrawIndirectCommand, instanceCount),
-                    context.getBuffer(data.splatDistances)->getHandle(),
-                    0,
-                    context.getBuffer(data.splatIndices)->getHandle(),
-                    0,
-                    context.getBuffer(data.splatSorterStorage)->getHandle(),
-                    0,
-                    VK_NULL_HANDLE,
-                    0
-                );
-            }
-        );
+        blackboard.put("SplatDistances"_hs(viewId), keyBuffers[0]);
+        blackboard.put("SplatIndices"_hs(viewId), valueBuffers[0]);
+        blackboard.put("GSplatDrawIndirect"_hs(viewId), gsplatDrawIndirect);
     }
 
     struct GSplatRenderData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         float4 viewport;
         const GSplatScene* gsplatScene;
@@ -319,13 +738,14 @@ namespace hyp
     struct GSplatRenderStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<2>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<2>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void GSplatPass::addGSplatRenderPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -334,35 +754,34 @@ namespace hyp
             "GSplatRender"_hs,
             [&](rg::RenderGraph::Builder& builder, GSplatRenderData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.viewport = view.getViewport();
                 data.gsplatScene = &gsplatScene;
 
                 auto& blackboard = builder.getBlackboard();
                 auto sceneColor = blackboard.get<rg::TextureHandle>("SceneColor"_hs(data.viewId));
-                data.sceneColor = builder.addColorAttachment(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD);
+                data.sceneColor = builder.addColorAttachment(sceneColor, rhi::AttachmentLoadOp::Load);
                 blackboard.put("SceneColor"_hs(data.viewId), data.sceneColor);
 
                 auto sceneDepth = blackboard.get<rg::TextureHandle>("SceneDepth"_hs(data.viewId));
                 data.sceneDepth = builder.addDepthStencilAttachment(
                     sceneDepth,
-                    VK_ATTACHMENT_LOAD_OP_LOAD,
+                    rhi::AttachmentLoadOp::Load,
                     false,
-                    VK_ATTACHMENT_LOAD_OP_LOAD,
+                    rhi::AttachmentLoadOp::Load,
                     false
                 );
                 blackboard.put("SceneDepth"_hs(data.viewId), data.sceneDepth);
 
                 auto splatIndices = blackboard.get<rg::BufferHandle>("SplatIndices"_hs(data.viewId));
-                data.splatIndices = builder.accessBuffer(splatIndices, rg::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.splatIndices = builder.accessBuffer(splatIndices, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
 
                 auto gsplatDrawIndirect = blackboard.get<rg::BufferHandle>("GSplatDrawIndirect"_hs(data.viewId));
-                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rg::BufferUsage::Indirect, rg::AccessType::Read_Only);
+                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rhi::BufferUsage::Indirect, rg::AccessType::Read_Only);
             },
-            [](rg::ExecuteContext& context, GSplatRenderData& data)
+            [&rendererContext](rg::ExecuteContext& context, GSplatRenderData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<GSplatPass, GSplatRenderStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatRenderStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -370,31 +789,38 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "GSplat",
-                        SHADER_DIR "/GSplat/GSplat.slang"
+                        makeVertexFragmentBytecode(
+                            renderBackend.getRHIBackend(),
+                            GET_PASS_SHADER_BYTECODE(GSplat, Vertex),
+                            GET_PASS_SHADER_BYTECODE(GSplat, Fragment)
+                        )
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kGSplat_Bindings);
                 }
 
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
 
-                VkBuffer splatData = data.gsplatScene->getSplatDataBuffer().getHandle();
-                VkBuffer splatIndices = context.getBuffer(data.splatIndices)->getHandle();
-                if (descriptorCache.needUpdate(splatData, splatIndices))
+                const rhi::Buffer* splatData = &data.gsplatScene->getSplatDataBuffer();
+                const rhi::Buffer* splatIndices = context.getBuffer(data.splatIndices);
+                if (bindGroupCache.needUpdate(splatData, splatIndices))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
-                        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatData, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatIndices, 0, VK_WHOLE_SIZE);
+                            PassBindGroupWriter writer(generated::kGSplat_Bindings);
+                            writer.setBuffer("sGPUSplatDataBuffer", splatData);
+                            writer.setBuffer("VisibleSplatIndexBuffer", splatIndices);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -402,42 +828,42 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createGSplatRenderPipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        bindGroupCache.getBindGroup()->getLayout()
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
 
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
+                context.beginPass();
+
+                cmd.bindPipeline(storage.pipeline.get());
 
                 setViewportAndScissor(cmd, data.viewport);
 
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Graphics,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
 
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
                 cmd.drawIndirect(
-                    context.getBuffer(data.gsplatDrawIndirect)->getHandle(),
+                    gsplatDrawIndirect,
                     0,
                     1,
-                    sizeof(VkDrawIndirectCommand)
+                    sizeof(DrawIndirectCommand)
                 );
-            }
+            },
+            rg::PassFlags::Skip_Begin_Pass
         );
     }
 
     struct GSplatDepthData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         float4 viewport;
         const GSplatScene* gsplatScene;
@@ -449,13 +875,14 @@ namespace hyp
     struct GSplatDepthStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<3>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<3>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void GSplatPass::addGSplatDepthPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -465,7 +892,6 @@ namespace hyp
             [&](rg::RenderGraph::Builder& builder, GSplatDepthData& data)
             {
                 builder.markSideEffect();
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.viewport = view.getViewport();
                 data.gsplatScene = &gsplatScene;
@@ -475,27 +901,26 @@ namespace hyp
 
                 auto& blackboard = builder.getBlackboard();
 
-                auto gsplatDepth = builder.createTexture(
-                    "GSplatDepth"_hs(data.viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_R32G32B32A32_SFLOAT,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                data.gsplatDepth = builder.addColorAttachment(gsplatDepth, VK_ATTACHMENT_LOAD_OP_CLEAR);
+                rhi::TextureDesc gsplatDepthDesc;
+                gsplatDepthDesc.type = rhi::TextureType::Texture_2D;
+                gsplatDepthDesc.format = rhi::TextureFormat::RGBA32_SFLOAT;
+                gsplatDepthDesc.extent = { width, height, 1 };
+                gsplatDepthDesc.mipCount = 1;
+                gsplatDepthDesc.layerCount = 1;
+                gsplatDepthDesc.usage = rhi::TextureUsage::Color_Attachment | rhi::TextureUsage::Sampled;
+                auto gsplatDepth = builder.createTexture("GSplatDepth"_hs(data.viewId), gsplatDepthDesc);
+                data.gsplatDepth = builder.addColorAttachment(gsplatDepth, rhi::AttachmentLoadOp::Clear);
                 blackboard.put("GSplatDepth"_hs(data.viewId), data.gsplatDepth);
 
                 auto splatIndices = blackboard.get<rg::BufferHandle>("SplatIndices"_hs(data.viewId));
-                data.splatIndices = builder.accessBuffer(splatIndices, rg::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.splatIndices = builder.accessBuffer(splatIndices, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
 
                 auto gsplatDrawIndirect = blackboard.get<rg::BufferHandle>("GSplatDrawIndirect"_hs(data.viewId));
-                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rg::BufferUsage::Indirect | rg::BufferUsage::Storage, rg::AccessType::Read_Only);
+                data.gsplatDrawIndirect = builder.accessBuffer(gsplatDrawIndirect, rhi::BufferUsage::Indirect | rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
             },
-            [](rg::ExecuteContext& context, GSplatDepthData& data)
+            [&rendererContext](rg::ExecuteContext& context, GSplatDepthData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<GSplatPass, GSplatDepthStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<GSplatPass, GSplatDepthStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -503,34 +928,40 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "GSplatDepth",
-                        SHADER_DIR "/GSplat/GSplatDepth.slang"
+                        makeVertexFragmentBytecode(
+                            renderBackend.getRHIBackend(),
+                            GET_PASS_SHADER_BYTECODE(GSplatDepth, Vertex),
+                            GET_PASS_SHADER_BYTECODE(GSplatDepth, Fragment)
+                        )
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kGSplatDepth_Bindings);
                 }
 
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
 
-                VkBuffer splatData = data.gsplatScene->getSplatDataBuffer().getHandle();
-                VkBuffer splatIndices = context.getBuffer(data.splatIndices)->getHandle();
-                VkBuffer gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect)->getHandle();
-                if (descriptorCache.needUpdate(splatData, splatIndices, gsplatDrawIndirect))
+                const rhi::Buffer* splatData = &data.gsplatScene->getSplatDataBuffer();
+                const rhi::Buffer* splatIndices = context.getBuffer(data.splatIndices);
+                const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
+                if (bindGroupCache.needUpdate(splatData, splatIndices, gsplatDrawIndirect))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
-                        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
-                        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatData, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, splatIndices, 0, VK_WHOLE_SIZE);
-                            writer.writeBuffer(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, gsplatDrawIndirect, 0, VK_WHOLE_SIZE);
+                            PassBindGroupWriter writer(generated::kGSplatDepth_Bindings);
+                            writer.setBuffer("sGPUSplatDataBuffer", splatData);
+                            writer.setBuffer("VisibleSplatIndexBuffer", splatIndices);
+                            writer.setBuffer("DrawIndirectBuffer", gsplatDrawIndirect);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -538,25 +969,22 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createGSplatDepthPipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        bindGroupCache.getBindGroup()->getLayout()
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
 
                 setViewportAndScissor(cmd, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                cmd.bindPipeline(storage.pipeline.get());
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Graphics,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
 
@@ -564,212 +992,63 @@ namespace hyp
                     gsplatDrawIndirect,
                     0,
                     1,
-                    sizeof(VkDrawIndirectCommand)
+                    sizeof(DrawIndirectCommand)
                 );
             }
         );
     }
 
-    struct GSplatRelightingData
-    {
-        SceneRendererContext* rendererContext;
-        uint32_t viewId;
-        float4 viewport;
-        rg::TextureHandle sceneColor;
-        rg::TextureHandle gsplatDepth;
-    };
-
-    struct GSplatRelightingStorage
-    {
-        std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<1>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
-    };
-
-    void GSplatPass::addGSplatRelightingPass(
-        rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
-        const SceneView& view,
-        const GSplatScene& gsplatScene
-    )
-    {
-        renderGraph.addGraphicsPass<GSplatRelightingData>(
-            "Relighting"_hs,
-            [&](rg::RenderGraph::Builder& builder, GSplatRelightingData& data)
-            {
-                builder.markSideEffect();
-                data.rendererContext = &rendererContext;
-                data.viewId = view.getViewId();
-                data.viewport = view.getViewport();
-
-                auto& blackboard = builder.getBlackboard();
-                auto sceneColor = blackboard.get<rg::TextureHandle>("SceneColor"_hs(data.viewId));
-                data.sceneColor = builder.addColorAttachment(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD);
-                blackboard.put("SceneColor"_hs(data.viewId), data.sceneColor);
-
-                auto gsplatDepth = blackboard.get<rg::TextureHandle>("GSplatDepth"_hs(data.viewId));
-                data.gsplatDepth = builder.sample(gsplatDepth);
-            },
-            [](rg::ExecuteContext& context, GSplatRelightingData& data)
-            {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<GSplatPass, GSplatRelightingStorage>();
-
-                auto& renderBackend = context.getRenderBackend();
-
-                if (!storage.shader)
-                {
-                    storage.shader = std::make_shared<PassShader>(
-                        renderBackend.getDevice(),
-                        "GSplatRelighting",
-                        SHADER_DIR "/GSplat/Relighting.slang"
-                    );
-                }
-
-                if (storage.perViewCaches.size() <= data.viewId)
-                {
-                    storage.perViewCaches.resize(data.viewId + 1);
-                }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
-
-                VkImageView gsplatDepth = context.getTexture(data.gsplatDepth)->getHandle();
-                if (descriptorCache.needUpdate(gsplatDepth))
-                {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}
-                    };
-                    descriptorCache.update(
-                        renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
-                        {
-                            writer.writeImage(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, gsplatDepth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                        }
-                    );
-                }
-
-                if (!storage.pipeline)
-                {
-                    storage.pipeline = createGSplatRelightingPipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
-                    );
-                }
-
-                auto& cmd = context.getCommandBuffer();
-
-                setViewportAndScissor(cmd, data.viewport);
-
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
-                    2,
-                    descriptorSets,
-                    {}
-                );
-                cmd.draw(3, 1, 0, 0);
-            }
-        );
-    }
-
-    vk::Pipeline* GSplatPass::createGSplatRenderPipeline(
-        SceneRendererContext& rendererContext,
+    rhi::Pipeline* GSplatPass::createGSplatRenderPipeline(
+        RendererContext& rendererContext,
         ShaderVariant shaderVariant,
-        const vk::DescriptorSetLayout& descriptorSetLayout
+        const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, descriptorSetLayout.getHandle());
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
+        // 新 RHI 没有 Triangle_Fan(WebGPU 不支持),GSplat/GSplatDepth 顶点 shader 画的四边形改用
+        // Triangle_Strip + strip 顺序的 kQuadPositions(见对应 .slang 文件),不能用 Triangle_List——
+        // 4 个顶点按 list 只够凑 1 个三角形,会导致每个 splat 只画出四边形的一半
         PipelineCache::GraphicsKey pipelineKey;
+        pipelineKey.pipelineState = PipelineStatePresets::billboard();
         pipelineKey.pipelineState.shader = shaderVariant;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_Fan);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 1;
-        pipelineKey.pipelineState.depthWriteEnable = 0;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
         pipelineKey.pipelineState.colorBlendState = ColorBlendState::get <
-            AttachmentBlendState{ VK_TRUE, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, vk::kColorComponentAll }
+            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::Src_Alpha, rhi::BlendFactor::One_Minus_Src_Alpha, rhi::BlendOp::Add,
+            rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add, 0xF }
         > ();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_D32_SFLOAT_S8_UINT,
-            VK_FORMAT_R16G16B16A16_SFLOAT
+            rhi::TextureFormat::D32_SFLOAT_S8_UINT,
+            rhi::TextureFormat::RGBA16_SFLOAT
         >();
         pipelineKey.pipelineLayout = pipelineLayout;
         return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);
     }
 
-    vk::Pipeline* GSplatPass::createGSplatDepthPipeline(
-        SceneRendererContext& rendererContext,
+    rhi::Pipeline* GSplatPass::createGSplatDepthPipeline(
+        RendererContext& rendererContext,
         ShaderVariant shaderVariant,
-        const vk::DescriptorSetLayout& descriptorSetLayout
+        const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, descriptorSetLayout.getHandle());
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
+        // 新 RHI 没有 Triangle_Fan(WebGPU 不支持),GSplat/GSplatDepth 顶点 shader 画的四边形改用
+        // Triangle_Strip + strip 顺序的 kQuadPositions(见对应 .slang 文件),不能用 Triangle_List——
+        // 4 个顶点按 list 只够凑 1 个三角形,会导致每个 splat 只画出四边形的一半
         PipelineCache::GraphicsKey pipelineKey;
+        pipelineKey.pipelineState = PipelineStatePresets::billboard();
         pipelineKey.pipelineState.shader = shaderVariant;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_Fan);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 1;
-        pipelineKey.pipelineState.depthWriteEnable = 0;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
         pipelineKey.pipelineState.colorBlendState = ColorBlendState::get <
-            AttachmentBlendState{ VK_TRUE, VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_OP_ADD, vk::kColorComponentAll }
+            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::Dst_Alpha, rhi::BlendFactor::One, rhi::BlendOp::Add,
+            rhi::BlendFactor::Zero, rhi::BlendFactor::Src_Alpha, rhi::BlendOp::Add, 0xF }
         > ();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_UNDEFINED,
-            VK_FORMAT_R32G32B32A32_SFLOAT
-        >();
-        pipelineKey.pipelineLayout = pipelineLayout;
-        return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);
-    }
-
-    vk::Pipeline* GSplatPass::createGSplatRelightingPipeline(
-        SceneRendererContext& rendererContext,
-        ShaderVariant shaderVariant,
-        const vk::DescriptorSetLayout& descriptorSetLayout
-    )
-    {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, descriptorSetLayout.getHandle());
-        auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
-
-        PipelineCache::GraphicsKey pipelineKey;
-        pipelineKey.pipelineState.shader = shaderVariant;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_List);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 0;
-        pipelineKey.pipelineState.depthWriteEnable = 0;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
-        pipelineKey.pipelineState.colorBlendState = ColorBlendState::get <
-            AttachmentBlendState{ VK_TRUE, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, vk::kColorComponentAll }
-        > ();
-        pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_UNDEFINED,
-            VK_FORMAT_R16G16B16A16_SFLOAT
+            rhi::TextureFormat::Undefined,
+            rhi::TextureFormat::RGBA32_SFLOAT
         >();
         pipelineKey.pipelineLayout = pipelineLayout;
         return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);
     }
 }
-

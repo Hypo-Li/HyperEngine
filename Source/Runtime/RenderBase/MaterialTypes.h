@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
-
-#include <Core/Common/EnumBitwise.h>
+#include <Core/Reflection/Reflection.h>
 
 namespace hyp
 {
@@ -16,6 +15,8 @@ namespace hyp
         Count,
     };
 
+    template <> Type* Reflection::createType<MaterialDomain>();
+
     enum class BlendMode : uint8_t
     {
         Opaque,
@@ -27,6 +28,8 @@ namespace hyp
         Count,
     };
 
+    template <> Type* Reflection::createType<BlendMode>();
+
     enum class ShadingModel : uint8_t
     {
         Unlit,
@@ -36,6 +39,8 @@ namespace hyp
         Count,
     };
 
+    template <> Type* Reflection::createType<ShadingModel>();
+
     enum class MaterialParameterType : uint8_t
     {
         Bool,
@@ -44,20 +49,20 @@ namespace hyp
         Float2,
         Float3,
         Float4,
-        Texture2D,
-        Texture2DArray,
-        Texture3D,
-        TextureCube,
+        Texture_2D,
+        Texture_2D_Array,
+        Texture_3D,
+        Texture_Cube,
 
         Count,
     };
 
     inline bool isTextureParameterType(MaterialParameterType type) noexcept
     {
-        if (type == MaterialParameterType::Texture2D ||
-            type == MaterialParameterType::Texture2DArray ||
-            type == MaterialParameterType::Texture3D ||
-            type == MaterialParameterType::TextureCube)
+        if (type == MaterialParameterType::Texture_2D ||
+            type == MaterialParameterType::Texture_2D_Array ||
+            type == MaterialParameterType::Texture_3D ||
+            type == MaterialParameterType::Texture_Cube)
             return true;
         return false;
     }

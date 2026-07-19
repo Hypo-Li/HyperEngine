@@ -4,7 +4,8 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-RWTexture2D<float4> TransmittanceLutImage;
+[format("rgba16f")]
+WTexture2D<float4> TransmittanceLutImage;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -16,5 +17,5 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     float3 worldPos = float3(0, 0, viewHeight);
     float3 worldDir = float3(0, sqrt(1.0 - viewZenithCos * viewZenithCos), viewZenithCos);
     float3 transmittance = exp(-getOpticalDepth(Atmosphere, worldPos, worldDir, 10.0));
-    TransmittanceLutImage[globalID.xy] = float4(transmittance, 1);
+    TransmittanceLutImage.Store(globalID.xy, float4(transmittance, 1));
 }

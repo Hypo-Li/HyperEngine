@@ -8,19 +8,22 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-Sampler2D TransmittanceLutTexture;
+SamplerState LutSampler;
 
 [[vk::binding(2, 2)]]
-Sampler2D MultiScatteringLutTexture;
+Texture2D<float4> TransmittanceLutTexture;
 
 [[vk::binding(3, 2)]]
-Sampler2D SkyViewLutTexture;
+Texture2D<float4> MultiScatteringLutTexture;
 
 [[vk::binding(4, 2)]]
-Sampler3D AerialPerspectiveLutTexture;
+Texture2D<float4> SkyViewLutTexture;
 
 [[vk::binding(5, 2)]]
-Texture2D<float> SceneDepthImage;
+Texture3D<float4> AerialPerspectiveLutTexture;
+
+[[vk::binding(6, 2)]]
+DepthTexture2D SceneDepthImage;
 
 static constexpr float2 kPositions[3] = {
     float2(-1, -3),
@@ -29,9 +32,9 @@ static constexpr float2 kPositions[3] = {
 };
 
 [shader("vertex")]
-void VertexMain(in uint vertexID : SV_VertexID, out float4 oPosition : SV_Position)
+float4 VertexMain(in uint vertexID : SV_VertexID) : SV_Position
 {
-    oPosition = float4(kPositions[vertexID], 0, 1);
+    return float4(kPositions[vertexID], 0, 1);
 }
 
 static constexpr float kSunDiskRadius = 0.53;
@@ -45,7 +48,7 @@ float interleavedGradientNoise(float2 uv, float frameId)
 }
 
 [shader("fragment")]
-void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Target)
+float4 FragmentMain(in float4 svPosition : SV_Position) : SV_Target
 {
     float sceneDepth = SceneDepthImage[uint2(svPosition.xy)].r;
 
@@ -70,7 +73,7 @@ void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Tar
         if (!intersectGround && VoL > kCosHalfApex)
         {
             float viewZenithCos = max(dot(light0Dir, upVector), 0.0);
-            float3 trans = getTransmittance(Atmosphere, TransmittanceLutTexture, viewZenithCos, viewHeight);
+            float3 trans = getTransmittance(Atmosphere, TransmittanceLutTexture, LutSampler, viewZenithCos, viewHeight);
             float softEdge = clamp(2.0 * (VoL - kCosHalfApex) / (1.0 - kCosHalfApex), 0.0, 1.0);
             outLuminance += trans * softEdge;
         }
@@ -86,16 +89,14 @@ void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Tar
     
             float2 skyViewUV;
             skyViewLutParametersToUV(Atmosphere, intersectGround, viewZenithCos, lightViewCos, viewHeight, skyViewUV);
-            outLuminance += SkyViewLutTexture.SampleLevel(skyViewUV, 0.0).rgb;
-            oColor = float4(outLuminance, 1.0);
-            return;
+            outLuminance += SkyViewLutTexture.SampleLevel(LutSampler, skyViewUV, 0.0).rgb;
+            return float4(outLuminance, 1.0);
         }
     }
 
     if (!moveToTopAtmosphere(Atmosphere, worldPos, worldDir))
     {
-        oColor = float4(outLuminance, 1.0);
-        return;
+        return float4(outLuminance, 1.0);
     }
 
     clipSpace.z = sceneDepth;
@@ -115,13 +116,13 @@ void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Tar
             slice = 0.5;
         }
         float w = sqrt(slice / SLICE_COUNT);
-        float4 AP = weight * AerialPerspectiveLutTexture.SampleLevel(float3(uv, w), 0.0);
-        oColor = float4(AP.rgb * light0Color, 1.0 - AP.a);
+        float4 AP = weight * AerialPerspectiveLutTexture.SampleLevel(LutSampler, float3(uv, w), 0.0);
+        return float4(AP.rgb * light0Color, 1.0 - AP.a);
     }
     else
     {
         float3 lum, fms, trans;
-        rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, light0Dir, interleavedGradientNoise(svPosition.xy, 0 % 8), 0.0, 9000000, lum, fms, trans);
-        oColor = float4(lum * light0Color, dot(trans, float3(0.3333333)));
+        rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, light0Dir, interleavedGradientNoise(svPosition.xy, 0 % 8), 0.0, 9000000, lum, fms, trans);
+        return float4(lum * light0Color, dot(trans, float3(0.3333333)));
     }
 }

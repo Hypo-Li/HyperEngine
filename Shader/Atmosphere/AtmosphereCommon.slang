@@ -169,20 +169,20 @@ void skyViewLutParametersToUV(in AtmosphereParameters atmosphere, bool intersect
     uv.x = coord;
 }
 
-float3 getTransmittance(in AtmosphereParameters atmosphere, in Sampler2D transmittanceLut, float lightZenithCos, float height)
+float3 getTransmittance(in AtmosphereParameters atmosphere, in Texture2D transmittanceLut, in SamplerState sampler, float lightZenithCos, float height)
 {
     float2 uv;
     transmittanceLutParametersToUV(atmosphere, height, lightZenithCos, uv);
-    return transmittanceLut.SampleLevel(uv, 0.0).rgb;
+    return transmittanceLut.SampleLevel(sampler, uv, 0.0).rgb;
 }
 
-float3 getMultiScattering(in AtmosphereParameters atmosphere, in Sampler2D multiScatteringLut, float lightZenithCos, float height)
+float3 getMultiScattering(in AtmosphereParameters atmosphere, in Texture2D multiScatteringLut, in SamplerState sampler, float lightZenithCos, float height)
 {
     float2 uv = float2(
         lightZenithCos * 0.5 + 0.5,
         (height - atmosphere.bottomRadiusKm) / (atmosphere.topRadiusKm - atmosphere.bottomRadiusKm)
     );
-    return multiScatteringLut.SampleLevel(uv, 0.0).rgb * atmosphere.multiScatteringFactor;
+    return multiScatteringLut.SampleLevel(sampler, uv, 0.0).rgb * atmosphere.multiScatteringFactor;
 }
 
 float aerialPerspectiveDepthToSlice(float depth)
@@ -265,9 +265,10 @@ bool moveToTopAtmosphere(in AtmosphereParameters atmosphere, inout float3 worldP
 
 void rayMarchAtmosphere(
     in AtmosphereParameters atmosphere,
-    in Sampler2D transmittanceLut,
+    in SamplerState lutSampler,
+    in Texture2D transmittanceLut,
 #ifdef MULTI_SCATTERING_APPROX_SAMPLING_ENABLED
-    in Sampler2D multiScatteringLut,
+    in Texture2D multiScatteringLut,
 #endif
     float3 worldPos,
     float3 worldDir,
@@ -336,7 +337,7 @@ void rayMarchAtmosphere(
         float viewHeight = length(newPos);
         float3 upVector = newPos / viewHeight;
         float light0ZenithCos = dot(light0Dir, upVector);
-        float3 transmittanceToLight0 = getTransmittance(atmosphere, transmittanceLut, light0ZenithCos, viewHeight);
+        float3 transmittanceToLight0 = getTransmittance(atmosphere, transmittanceLut, lutSampler, light0ZenithCos, viewHeight);
 #ifdef MIE_RAYLEIGH_PHASE_ENABLED
         float3 phaseTimesScattering = mieScattering * miePhaseValueLight0 + rayleighScattering * rayleighPhaseValueLight0;
 #else
@@ -345,7 +346,7 @@ void rayMarchAtmosphere(
         float tEarth = rayIntersectSphere(newPos, light0Dir, float4(PLANET_RADIUS_OFFSET * upVector, atmosphere.bottomRadiusKm));
         float earthShadow = step(tEarth, 0.0);
 #ifdef MULTI_SCATTERING_APPROX_SAMPLING_ENABLED
-        float3 multiScattering = getMultiScattering(atmosphere, multiScatteringLut, light0ZenithCos, viewHeight);
+        float3 multiScattering = getMultiScattering(atmosphere, multiScatteringLut, lutSampler, light0ZenithCos, viewHeight);
 #else
         float3 multiScattering = float3(0);
 #endif
@@ -384,7 +385,7 @@ void rayMarchAtmosphere(
         float viewHeight = length(newPos);
         float3 upVector = newPos / viewHeight;
         float light0ZenithCos = dot(light0Dir, upVector);
-        float3 transmittanceToLight0 = getTransmittance(atmosphere, transmittanceLut, light0ZenithCos, viewHeight);
+        float3 transmittanceToLight0 = getTransmittance(atmosphere, transmittanceLut, lutSampler, light0ZenithCos, viewHeight);
         float NoL = max(light0ZenithCos, 0.0);
         lum += transmittanceToLight0 * trans * NoL * atmosphere.groundAlbedo / PI;
     }

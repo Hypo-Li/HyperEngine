@@ -3,8 +3,6 @@
 #include "Engine.h"
 #include "Context.h"
 
-#include <RenderBase/Vulkan/Context.h>
-
 namespace hyp
 {
     Engine::Engine()
@@ -13,27 +11,28 @@ namespace hyp
 
         auto& context = Context::get();
 
-        auto& instance = vk::Context::get().getInstance();
-        auto& device = vk::Context::get().getDevice();
         mInputSystem = std::make_unique<InputSystem>(*mWindow);
         mSampleStateManager = std::make_unique<SampleStateManager>();
-        mRenderSystem = std::make_unique<RenderSystem>(instance, device, *mWindow);
-        mSceneRendererContext = std::make_unique<SceneRendererContext>(mRenderSystem->getBackend());
+        mRenderSystem = std::make_unique<RenderSystem>(*mWindow);
+        mRendererContext = std::make_unique<RendererContext>(mRenderSystem->getBackend());
+        mAssetManager = std::make_unique<AssetManager>();
+        mAssetManager->initialize(ENGINE_ASSET_DIR, PROJECT_ASSET_DIR);
 
         context.setInputSystem(mInputSystem.get());
         context.setSampleStateManager(mSampleStateManager.get());
         context.setRenderFrontend(&mRenderSystem->getFrontend());
-        context.setSceneRendererContext(mSceneRendererContext.get());
-
-        mScene = createObject<Scene>(nullptr);
+        context.setRendererContext(mRendererContext.get());
+        context.setAssetManager(mAssetManager.get());
+        context.setRenderTagRegistry(&mRenderSystem->getBackend().getRenderTagRegistry());
     }
 
     Engine::~Engine()
     {
         mScene = nullptr;
+        mAssetManager = nullptr;
         mSampleStateManager = nullptr;
         mRenderSystem->getBackend().finishRenderThread();
-        mSceneRendererContext = nullptr;
+        mRendererContext = nullptr;
         mRenderSystem = nullptr;
     }
 
@@ -62,7 +61,10 @@ namespace hyp
             onPreTick(deltaTime);
         }
 
-        mScene->tick(deltaTime);
+        if (mScene)
+        {
+            mScene->tick(deltaTime);
+        }
 
         if (onPreRender)
         {

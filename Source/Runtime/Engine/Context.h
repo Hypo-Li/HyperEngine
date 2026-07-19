@@ -1,4 +1,5 @@
 #pragma once
+#include <cassert>
 
 namespace hyp
 {
@@ -6,7 +7,9 @@ namespace hyp
     class InputSystem;
     class SampleStateManager;
     class RenderFrontend;
-    class SceneRendererContext;
+    class RendererContext;
+    class AssetManager;
+    class RenderTagRegistry;
 
     class Context
     {
@@ -16,26 +19,43 @@ namespace hyp
 
         Context(const Context&) = delete;
         Context& operator=(const Context&) = delete;
-        ~Context() = default;
+
+        ~Context();
 
         InputSystem& getInputSystem() const noexcept
         {
+            assert(mInputSystem);
             return *mInputSystem;
         }
 
         SampleStateManager& getSampleStateManager() const noexcept
         {
+            assert(mSampleStateManager);
             return *mSampleStateManager;
         }
 
         RenderFrontend& getRenderFrontend() const noexcept
         {
+            assert(mRenderFrontend);
             return *mRenderFrontend;
         }
 
-        SceneRendererContext& getSceneRendererContext() const noexcept
+        RendererContext& getRendererContext() const noexcept
         {
-            return *mSceneRendererContext;
+            assert(mRendererContext);
+            return *mRendererContext;
+        }
+
+        AssetManager& getAssetManager() const noexcept
+        {
+            assert(mAssetManager);
+            return *mAssetManager;
+        }
+
+        RenderTagRegistry& getRenderTagRegistry() const noexcept
+        {
+            assert(mRenderTagRegistry);
+            return *mRenderTagRegistry;
         }
 
         enum class Environment
@@ -72,16 +92,28 @@ namespace hyp
             mRenderFrontend = renderFrontend;
         }
 
-        void setSceneRendererContext(SceneRendererContext* sceneRendererContext)
+        void setRendererContext(RendererContext* rendererContext)
         {
-            mSceneRendererContext = sceneRendererContext;
+            mRendererContext = rendererContext;
+        }
+
+        void setAssetManager(AssetManager* assetManager)
+        {
+            mAssetManager = assetManager;
+        }
+
+        void setRenderTagRegistry(RenderTagRegistry* renderTagRegistry)
+        {
+            mRenderTagRegistry = renderTagRegistry;
         }
 
     private:
-        InputSystem* mInputSystem;
-        SampleStateManager* mSampleStateManager;
-        RenderFrontend* mRenderFrontend;
-        SceneRendererContext* mSceneRendererContext;
-        Environment mEnvironment;
+        InputSystem* mInputSystem = nullptr;
+        SampleStateManager* mSampleStateManager = nullptr;
+        RenderFrontend* mRenderFrontend = nullptr;
+        RendererContext* mRendererContext = nullptr;
+        AssetManager* mAssetManager = nullptr;
+        RenderTagRegistry* mRenderTagRegistry = nullptr;
+        Environment mEnvironment = Environment::Standalone;
     };
 }

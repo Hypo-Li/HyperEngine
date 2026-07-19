@@ -21,6 +21,12 @@ namespace hyp
         unrefMaterialShader();
     }
 
+    void MaterialInstance::finalizeLoad()
+    {
+        if (mTemplate)
+            mTemplate->registerInstance(this);
+    }
+
     void MaterialInstance::setTemplate(MaterialTemplate* newTemplate)
     {
         if (mTemplate)
@@ -107,6 +113,57 @@ namespace hyp
         return getParameterEffectiveValue(mTemplate->getParameterIndex(name));
     }
 
+    void MaterialInstance::setBlendModeOverride(std::optional<BlendMode> blendMode) noexcept
+    {
+        if (mBlendModeOverride == blendMode)
+            return;
+
+        mBlendModeOverride = blendMode;
+        if (getMaterialProxyHandle().isValid())
+        {
+            updateMaterialProxy();
+        }
+    }
+
+    BlendMode MaterialInstance::getEffectiveBlendMode() const noexcept
+    {
+        return mBlendModeOverride.value_or(mTemplate->getBlendMode());
+    }
+
+    void MaterialInstance::setAlphaCutoffOverride(std::optional<float> alphaCutoff) noexcept
+    {
+        if (mAlphaCutoffOverride == alphaCutoff)
+            return;
+
+        mAlphaCutoffOverride = alphaCutoff;
+        if (getMaterialProxyHandle().isValid())
+        {
+            updateMaterialProxy();
+        }
+    }
+
+    float MaterialInstance::getEffectiveAlphaCutoff() const noexcept
+    {
+        return mAlphaCutoffOverride.value_or(mTemplate->getAlphaCutoff());
+    }
+
+    void MaterialInstance::setDoubleSidedOverride(std::optional<bool> doubleSided) noexcept
+    {
+        if (mDoubleSidedOverride == doubleSided)
+            return;
+
+        mDoubleSidedOverride = doubleSided;
+        if (getMaterialProxyHandle().isValid())
+        {
+            updateMaterialProxy();
+        }
+    }
+
+    bool MaterialInstance::getEffectiveDoubleSided() const noexcept
+    {
+        return mDoubleSidedOverride.value_or(mTemplate->isDoubleSided());
+    }
+
     void MaterialInstance::onTemplateUpdated(MaterialTemplate::DirtyFlags dirtyFlags)
     {
         if (enumHasAnyFlags(dirtyFlags, MaterialTemplate::DirtyFlags::Pipeline))
@@ -142,13 +199,13 @@ namespace hyp
         MaterialProxy::Attributes attributes;
         attributes.domain = mTemplate->getMaterialDomain();
         attributes.shadingModel = mTemplate->getShadingModel();
-        attributes.blendMode = mTemplate->getBlendMode();
-        attributes.doubleSided = mTemplate->isDoubleSided();
+        attributes.blendMode = getEffectiveBlendMode();
+        attributes.alphaCutoff = getEffectiveAlphaCutoff();
+        attributes.doubleSided = getEffectiveDoubleSided();
+        attributes.tangentSpaceNormal = mTemplate->isTangentSpaceNormal();
+        attributes.hasVertexPositionOffset = mTemplate->hasVertexPositionOffset();
 
         mShaderHandle = mTemplate->getOrCreateMaterialShader();
-
-        // TODO: add shader macros
-        std::vector<ShaderMacro> shaderMacros;
 
         auto effectiveParameters = makeEffectiveParameters();
         std::vector<MaterialProxy::Parameter> proxyParams;
@@ -160,10 +217,9 @@ namespace hyp
             [shaderHandle = mShaderHandle,
             handle,
             attributes,
-            shaderMacros = std::move(shaderMacros),
             parameters = std::move(proxyParams),
             textureBindings = std::move(textureBindings)
-            ](RenderFrameContext& context) mutable
+            ](FrameContext& context) mutable
             {
                 auto& materialShaderManager = context.getMaterialShaderManager();
                 materialShaderManager.refMaterialShader(shaderHandle);
@@ -176,7 +232,6 @@ namespace hyp
                     handle,
                     attributes,
                     materialShader,
-                    std::move(shaderMacros),
                     parameters
                 );
             }
@@ -191,7 +246,7 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
 
         renderFrontend.enqueueLambda(
-            [shaderHandle = mShaderHandle](RenderFrameContext& context)
+            [shaderHandle = mShaderHandle](FrameContext& context)
             {
                 auto& materialShaderManager = context.getMaterialShaderManager();
                 materialShaderManager.unrefMaterialShader(shaderHandle);
@@ -235,10 +290,10 @@ namespace hyp
         renderFrontend.enqueueLambda(
             [proxyHandle = getMaterialProxyHandle(),
             proxyParam,
-            textureBinding](RenderFrameContext& context) mutable
+            textureBinding](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
-                resolveTextureBinding(proxyParam, textureBinding.first, textureBinding.second, proxyManager);
+                resolveTextureBindings({ &proxyParam, 1 }, { &textureBinding, 1 }, proxyManager);
                 MaterialProxy* proxy = proxyManager.getProxy(proxyHandle);
                 proxy->updateParameters({ &proxyParam, 1 });
             }
@@ -260,7 +315,7 @@ namespace hyp
         renderFrontend.enqueueLambda(
             [proxyHandle,
             parameters = std::move(proxyParams),
-            textureBindings = std::move(textureBindings)](RenderFrameContext& context) mutable
+            textureBindings = std::move(textureBindings)](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 resolveTextureBindings(parameters, textureBindings, proxyManager);
@@ -280,13 +335,13 @@ namespace hyp
         MaterialProxy::Attributes attributes;
         attributes.domain = mTemplate->getMaterialDomain();
         attributes.shadingModel = mTemplate->getShadingModel();
-        attributes.blendMode = mTemplate->getBlendMode();
-        attributes.doubleSided = mTemplate->isDoubleSided();
+        attributes.blendMode = getEffectiveBlendMode();
+        attributes.alphaCutoff = getEffectiveAlphaCutoff();
+        attributes.doubleSided = getEffectiveDoubleSided();
+        attributes.tangentSpaceNormal = mTemplate->isTangentSpaceNormal();
+        attributes.hasVertexPositionOffset = mTemplate->hasVertexPositionOffset();
 
         mShaderHandle = mTemplate->getOrCreateMaterialShader();
-
-        // TODO: add shader macros
-        std::vector<ShaderMacro> shaderMacros;
 
         auto effectiveParameters = makeEffectiveParameters();
         std::vector<MaterialProxy::Parameter> proxyParams;
@@ -298,10 +353,9 @@ namespace hyp
             [shaderHandle = mShaderHandle,
             proxyHandle,
             attributes,
-            shaderMacros = std::move(shaderMacros),
             parameters = std::move(proxyParams),
             textureBindings = std::move(textureBindings)
-            ](RenderFrameContext& context) mutable
+            ](FrameContext& context) mutable
             {
                 auto& materialShaderManager = context.getMaterialShaderManager();
                 materialShaderManager.refMaterialShader(shaderHandle);
@@ -314,7 +368,6 @@ namespace hyp
                 proxy->update(
                     attributes,
                     materialShader,
-                    std::move(shaderMacros),
                     parameters
                 );
             }
@@ -354,9 +407,22 @@ namespace hyp
         mParameterOverrides = std::move(reconciled);
     }
 
+    template <> Type* Reflection::createType<MaterialInstance::ParameterOverride>()
+    {
+        auto s = new TStructure<MaterialInstance::ParameterOverride>("MaterialInstance.ParameterOverride");
+        s->addProperty("Enabled", &MaterialInstance::ParameterOverride::enabled);
+        s->addProperty("Value", &MaterialInstance::ParameterOverride::value);
+        return s;
+    }
+
     template <> Type* Reflection::createType<MaterialInstance>()
     {
         auto c = new TClass<MaterialInstance, Material>("MaterialInstance");
+        c->addProperty("Template", &MaterialInstance::mTemplate);
+        c->addProperty("Parameter Overrides", &MaterialInstance::mParameterOverrides);
+        c->addProperty("Blend Mode Override", &MaterialInstance::mBlendModeOverride);
+        c->addProperty("Alpha Cutoff Override", &MaterialInstance::mAlphaCutoffOverride);
+        c->addProperty("Double Sided Override", &MaterialInstance::mDoubleSidedOverride);
         return c;
     }
 

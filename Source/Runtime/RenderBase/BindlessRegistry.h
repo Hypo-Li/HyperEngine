@@ -1,6 +1,8 @@
 #pragma once
-#include "Vulkan/Image.h"
-#include "Vulkan/Sampler.h"
+#include "RenderBaseDefines.h"
+
+#include <RHI/Texture.h>
+#include <RHI/Sampler.h>
 
 namespace hyp
 {
@@ -9,9 +11,8 @@ namespace hyp
         Unknown = UINT32_MAX,
         Texture2D = 0,
         Texture2DArray,
-        TextureCube,
-        TextureCubeArray,
         Texture3D,
+        TextureCube,
         Sampler,
     };
 
@@ -37,59 +38,43 @@ namespace hyp
     {
         uint32_t maxTexture2DCount = 16384;
         uint32_t maxTexture2DArrayCount = 8;
-        uint32_t maxTextureCubeCount = 8;
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        uint32_t maxTextureCubeArrayCount = 8;
-#endif
         uint32_t maxTexture3DCount = 8;
-        uint32_t maxSamplerCount = 64;
+        uint32_t maxTextureCubeCount = 8;
+        uint32_t maxSamplerCount = 16384;
     };
 
     class GlobalBindings;
+
     class BindlessRegistry
     {
         friend class GlobalBindings;
     public:
-        BindlessRegistry(const BindlessConfig& bindlessConfig);
+        BindlessRegistry(bool enabled, const BindlessConfig& bindlessConfig);
 
         ~BindlessRegistry() noexcept = default;
 
-        const BindlessConfig& getBindlessConfig() const noexcept
+        const BindlessConfig& getConfig() const noexcept
         {
             return mBindlessConfig;
         }
 
-        BindlessHandle registerTexture2D(VkImageView imageView) noexcept;
+        BindlessHandle registerTexture2D(rhi::TextureView* view) noexcept;
+        BindlessHandle registerTexture2DArray(rhi::TextureView* view) noexcept;
+        BindlessHandle registerTexture3D(rhi::TextureView* view) noexcept;
+        BindlessHandle registerTextureCube(rhi::TextureView* view) noexcept;
+        BindlessHandle registerSampler(rhi::Sampler* sampler) noexcept;
 
-        BindlessHandle registerTexture2DArray(VkImageView imageView) noexcept;
-
-        BindlessHandle registerTextureCube(VkImageView imageView) noexcept;
-
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        BindlessHandle registerTextureCubeArray(VkImageView imageView) noexcept;
-#endif
-
-        BindlessHandle registerTexture3D(VkImageView imageView) noexcept;
-
-        BindlessHandle registerSampler(VkSampler sampler) noexcept;
-
-        void updateTexture2D(BindlessHandle handle, VkImageView imageView);
-
-        void updateTexture2DArray(BindlessHandle handle, VkImageView imageView);
-
-        void updateTextureCube(BindlessHandle handle, VkImageView imageView);
-
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        void updateTextureCubeArray(BindlessHandle handle, VkImageView imageView);
-#endif
-
-        void updateTexture3D(BindlessHandle handle, VkImageView imageView);
-
-        void updateSampler(BindlessHandle handle, VkSampler sampler);
+        void updateTexture2D(BindlessHandle handle, rhi::TextureView* view);
+        void updateTexture2DArray(BindlessHandle handle, rhi::TextureView* view);
+        void updateTexture3D(BindlessHandle handle, rhi::TextureView* view);
+        void updateTextureCube(BindlessHandle handle, rhi::TextureView* view);
+        void updateSampler(BindlessHandle handle, rhi::Sampler* sampler);
 
         void unregister(BindlessHandle handle);
 
     private:
+        void setGlobalBindings(GlobalBindings* globalBindings) noexcept;
+
         class IndexPool
         {
         public:
@@ -103,22 +88,17 @@ namespace hyp
 
         private:
             std::vector<uint32_t> mFreeIndices;
-            // TODO: 可以在Debug模式下使用bitset检查是否重复释放, 但我们需要一个动态的bitset
         };
 
-        void setGlobalBindings(GlobalBindings* globalBindings) noexcept;
-
     private:
+        bool mBindlessEnabled;
         BindlessConfig mBindlessConfig;
         GlobalBindings* mGlobalBindings;
 
         IndexPool mTexture2DPool;
         IndexPool mTexture2DArrayPool;
-        IndexPool mTextureCubePool;
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        IndexPool mTextureCubeArrayPool;
-#endif
         IndexPool mTexture3DPool;
+        IndexPool mTextureCubePool;
         IndexPool mSamplerPool;
     };
 }

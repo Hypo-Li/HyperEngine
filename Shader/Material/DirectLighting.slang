@@ -1,4 +1,5 @@
-#include "../Common/Binding.slang"
+#include <Common/Binding.slang>
+#include <Atmosphere/AtmosphereCommon.slang>
 
 [[vk::binding(0, 2)]]
 Texture2D<float4> GbufferAImage;
@@ -10,10 +11,20 @@ Texture2D<float4> GbufferBImage;
 Texture2D<float4> GbufferCImage;
 
 [[vk::binding(3, 2)]]
-Texture2D<float> SceneDepthImage;
+DepthTexture2D SceneDepthImage;
 
-[[vk::push_constant]]
-uint kLightIndex;
+// 这个 pass 的 bind group layout 是编译期反射生成的、固定不变的(Pass shader 不支持像材质那样
+// 按宏走运行时变体), 所以场景没有大气时也必须绑点什么——DirectLightingPass 会喂一张 1x1 全白
+// 纹理 + 一份半径非零的占位 AtmosphereParameters, 让 getTransmittance() 恒返回 (1,1,1), 等效于
+// 没有大气衰减, 不需要为"有没有大气"编两份 shader
+[[vk::binding(4, 2)]]
+ConstantBuffer<AtmosphereParameters> Atmosphere;
+
+[[vk::binding(5, 2)]]
+Texture2D<float4> TransmittanceLutTexture;
+
+[[vk::binding(6, 2)]]
+SamplerState LutSampler;
 
 static constexpr float2 kPositions[3] = {
     float2(-1, -3),
@@ -21,10 +32,13 @@ static constexpr float2 kPositions[3] = {
     float2(-1,  1)
 };
 
+[[vk::push_constant]]
+uint kLightIndex;
+
 [shader("vertex")]
-void VertexMain(in uint vertexID : SV_VertexID, out float4 oPosition : SV_Position)
+float4 VertexMain(in uint vertexID : SV_VertexID) : SV_Position
 {
-    oPosition = float4(kPositions[vertexID], 0, 1);
+    return float4(kPositions[vertexID], 0, 1);
 }
 
 float3 F_Schlick(float VoH, float3 F0)
@@ -47,16 +61,13 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float a)
     return saturate(0.5 / (lambdaV + lambdaL));
 }
 
-static constexpr float PI = 3.1415926535897932384626433832795;
-
 [shader("fragment")]
-void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Target)
+float4 FragmentMain(in float4 svPosition : SV_Position) : SV_Target
 {
     float sceneDepth = SceneDepthImage[uint2(svPosition.xy)].r;
     if (sceneDepth == 0)
     {
-        oColor = float4(0, 0, 0, 1);
-        return;
+        return float4(0, 0, 0, 1);
     }
 
     float4 gbufferA = GbufferAImage[uint2(svPosition.xy)];
@@ -75,7 +86,9 @@ void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Tar
     float a = roughness * roughness;
     float3 F0 = lerp(float3(0.16 * specular * specular), baseColor, metallic);
     
-    float3 lightDirWS = -sLightData[kLightIndex].direction;
+    LightData lightData = sLightData[kLightIndex];
+    InstanceData instanceData = sInstanceData[lightData.instanceIndex];
+    float3 lightDirWS = mul(float3(0, 0, 1), instanceData.localToWorldRot);
     ViewData viewData = sViewData[0];
     
     float2 uv = svPosition.xy / viewData.resolution.xy;
@@ -97,7 +110,27 @@ void FragmentMain(in float4 svPosition : SV_Position, out float4 oColor : SV_Tar
     float V = V_SmithGGXCorrelated(NoV, NoL, a);
     float3 diffuseLobe = albedo * (1 - F) / PI;
     float3 specularLobe = F * D * V;
-    oColor = float4(6.0 * (diffuseLobe + specularLobe) * NoL + (0.5 * albedo), 1);
-    oColor.rgb = pow(oColor.rgb, float3(1.0 / 2.2));
 
+    // 太阳光穿过大气到达着色点的透过率——跟 Atmosphere.slang 渲染天空本体用的是同一张
+    // TransmittanceLut、同一套 (高度, 光源天顶角) 参数化, 只是这里只在着色点这一个高度采样
+    // 一次(不是沿视线积分)。没有大气的场景 DirectLightingPass 绑的是 DefaultResources 里
+    // 完全无内容含义的通用占位 buffer(全零), 这里靠半径退化(topRadiusKm <= bottomRadiusKm,
+    // 全零时自然成立)判断"没有真实大气", 整段跳过而不是硬算——大气模型的 LUT 参数化数学
+    // 假设了一个半径非零的球壳, 塞退化输入进去必然出 NaN/Inf, 不该指望占位资源填出什么
+    // "安全默认值"来兜底
+    float3 transmittance = float3(1);
+    if (Atmosphere.topRadiusKm > Atmosphere.bottomRadiusKm)
+    {
+        float3 cameraWorldPosKm = getWorldPos(Atmosphere, viewData.cameraOrigin);
+        float distanceToFragmentKm = length(fragPosVS.xyz) * 0.001;
+        float3 surfaceWorldPosKm = cameraWorldPosKm - viewDirWS * distanceToFragmentKm;
+        float surfaceHeightKm = length(surfaceWorldPosKm);
+        float3 upVector = surfaceWorldPosKm / surfaceHeightKm;
+        float lightZenithCos = dot(lightDirWS, upVector);
+        transmittance = getTransmittance(Atmosphere, TransmittanceLutTexture, LutSampler, lightZenithCos, surfaceHeightKm);
+    }
+
+    float3 attenuatedIntensity = lightData.intensity * transmittance;
+    float4 color = float4(attenuatedIntensity * (diffuseLobe + specularLobe) * NoL, 1);
+    return color;
 }

@@ -1,5 +1,4 @@
 #pragma once
-#include <Core/Common/EnumBitwise.h>
 #include <Core/Math/Vector.h>
 #include <Core/Math/Matrix.h>
 

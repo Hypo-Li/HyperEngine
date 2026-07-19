@@ -1,24 +1,6 @@
 #pragma once
 #include "WorldCoordinate.slang"
 
-[[vk::binding(0, 0)]]
-Texture2D BindlessTexture2Ds[];
-
-[[vk::binding(1, 0)]]
-Texture2DArray BindlessTexture2DArrays[];
-
-[[vk::binding(2, 0)]]
-TextureCube BindlessTextureCubes[];
-
-[[vk::binding(3, 0)]]
-TextureCubeArray BindlessTextureCubeArrays[];
-
-[[vk::binding(4, 0)]]
-Texture3D BindlessTexture3Ds[];
-
-[[vk::binding(5, 0)]]
-SamplerState BindlessSamplers[];
-
 struct FrameData
 {
     float wrappedTime;
@@ -26,19 +8,37 @@ struct FrameData
     float deltaTime;
     uint frameIndex;
 };
-[[vk::binding(6, 0)]]
+[[vk::binding(0, 0)]]
 ConstantBuffer<FrameData> uFrameData;
+
+#ifndef RHI_BACKEND_WEBGPU
+[[vk::binding(1, 0)]]
+Texture2D BindlessTexture2Ds[];
+
+[[vk::binding(2, 0)]]
+Texture2DArray BindlessTexture2DArrays[];
+
+[[vk::binding(3, 0)]]
+Texture3D BindlessTexture3Ds[];
+
+[[vk::binding(4, 0)]]
+TextureCube BindlessTextureCubes[];
+
+[[vk::binding(5, 0)]]
+SamplerState BindlessSamplers[];
+#endif
+
+[[vk::binding(0, 1)]]
+StructuredBuffer<uint> sIndices;
 
 struct InstanceData
 {
     WorldMatrix localToWorld;
     float3x3 localToWorldRot;
 };
-[[vk::binding(0, 1)]]
-StructuredBuffer<InstanceData> sInstanceData;
 
 [[vk::binding(1, 1)]]
-StructuredBuffer<uint> sInstanceIndices;
+StructuredBuffer<InstanceData> sInstanceData;
 
 enum class LightType : uint
 {
@@ -50,8 +50,7 @@ struct LightData
 {
     uint type;
     uint castShadows;
-    float3 position;
-    float3 direction;
+    uint instanceIndex;
     float3 intensity;
 };
 [[vk::binding(2, 1)]]

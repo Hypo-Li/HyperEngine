@@ -1,11 +1,8 @@
 #include "DirectionalLightProxy.h"
-
-#include <glm/gtc/matrix_transform.hpp>
+#include <Core/Math/Matrix.h>
 
 namespace hyp
 {
-    static uint32_t gAtmosphereRequestCounter = 0;
-
     DirectionalLightProxy::DirectionalLightProxy(
         float3 direction,
         float3 intensity,
@@ -30,10 +27,6 @@ namespace hyp
         mAffectAtmosphere(affectAtmosphere),
         mAtmosphereSunLightIndex(atmosphereSunLightIndex)
     {
-        if (mAffectAtmosphere)
-        {
-            mAtmosphereRequestOrder = gAtmosphereRequestCounter++;
-        }
     }
 
     void DirectionalLightProxy::setDirection(float3 direction) noexcept
@@ -227,27 +220,12 @@ namespace hyp
 
     void DirectionalLightProxy::setAffectAtmosphere(bool affectAtmosphere) noexcept
     {
-        if (mAffectAtmosphere == affectAtmosphere)
-            return;
-
         mAffectAtmosphere = affectAtmosphere;
-
-        if (mAffectAtmosphere)
-        {
-            mAtmosphereRequestOrder = gAtmosphereRequestCounter++;
-        }
     }
 
     void DirectionalLightProxy::setAtmosphereSunLightIndex(uint32_t atmosphereSunLightIndex) noexcept
     {
-        if (mAtmosphereSunLightIndex == atmosphereSunLightIndex)
-            return;
-
         mAtmosphereSunLightIndex = atmosphereSunLightIndex;
-        if (mAffectAtmosphere)
-        {
-            mAtmosphereRequestOrder = gAtmosphereRequestCounter++;
-        }
     }
 
 }

@@ -23,26 +23,51 @@ namespace hyp
     }
 
     void VertexLayout::writeVertexLayoutBindingsAndAttributes(
-        std::vector<VkVertexInputBindingDescription>& bindings,
-        std::vector<VkVertexInputAttributeDescription>& attributes
+        std::vector<rhi::VertexInputBinding>& bindings,
+        std::vector<rhi::VertexInputAttribute>& attributes
     ) const
     {
         switch (mKey.type)
         {
         case VertexLayoutType::Static_Mesh:
         {
-            bindings = {
-                { 0, sizeof(float3), VK_VERTEX_INPUT_RATE_VERTEX }, // Position
-                { 1, sizeof(float3), VK_VERTEX_INPUT_RATE_VERTEX }, // Normal
-                { 2, sizeof(float4), VK_VERTEX_INPUT_RATE_VERTEX }, // Tangent
-                { 3, sizeof(float2), VK_VERTEX_INPUT_RATE_VERTEX }, // TexCoord0
-            };
-            attributes = {
-                { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
-                { 1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0 },
-                { 2, 2, VK_FORMAT_R32G32B32A32_SFLOAT, 0 },
-                { 3, 3, VK_FORMAT_R32G32_SFLOAT, 0 },
-            };
+            bindings.reserve(4);
+            attributes.reserve(4);
+            uint32_t binding = 0;
+            if (enumHasAnyFlags(mKey.attributeMask, VertexAttributeMask::Position))
+            {
+                bindings.push_back({ binding, sizeof(float3), rhi::VertexInputRate::Vertex });
+                attributes.push_back({ binding, binding, rhi::VertexFormat::Float32x3, 0 });
+                ++binding;
+            }
+            if (enumHasAnyFlags(mKey.attributeMask, VertexAttributeMask::Normal))
+            {
+                bindings.push_back({ binding, sizeof(float3), rhi::VertexInputRate::Vertex });
+                attributes.push_back({ binding, binding, rhi::VertexFormat::Float32x3, 0 });
+                ++binding;
+            }
+            if (enumHasAnyFlags(mKey.attributeMask, VertexAttributeMask::Tangent))
+            {
+                bindings.push_back({ binding, sizeof(float4), rhi::VertexInputRate::Vertex });
+                attributes.push_back({ binding, binding, rhi::VertexFormat::Float32x4, 0 });
+                ++binding;
+            }
+            if (enumHasAnyFlags(mKey.attributeMask, VertexAttributeMask::Color))
+            {
+                bindings.push_back({ binding, sizeof(float4), rhi::VertexInputRate::Vertex });
+                attributes.push_back({ binding, binding, rhi::VertexFormat::Float32x4, 0 });
+                ++binding;
+            }
+            static constexpr uint32_t kMaxTexCoordCount = 8;
+            for (uint32_t i = 0; i < kMaxTexCoordCount; ++i)
+            {
+                if (enumHasAnyFlags(mKey.attributeMask, VertexAttributeMask(uint32_t(VertexAttributeMask::TexCoord0) << i)))
+                {
+                    bindings.push_back({ binding, sizeof(float2), rhi::VertexInputRate::Vertex });
+                    attributes.push_back({ binding, binding, rhi::VertexFormat::Float32x2, 0 });
+                    ++binding;
+                }
+            }
             break;
         }
         default:
@@ -107,18 +132,51 @@ namespace hyp
             getters += "float4 getColor(in VSInput vsi) { return float4(1); }\n";
         }
 
-        if (enumHasAllFlags(mKey.attributeMask, VertexAttributeMask::TexCoord0))
+        static constexpr VertexAttributeMask kTexCoordMasks[] = {
+            VertexAttributeMask::TexCoord0, VertexAttributeMask::TexCoord1,
+            VertexAttributeMask::TexCoord2, VertexAttributeMask::TexCoord3,
+            VertexAttributeMask::TexCoord4, VertexAttributeMask::TexCoord5,
+            VertexAttributeMask::TexCoord6, VertexAttributeMask::TexCoord7,
+        };
+        for (size_t i = 0; i < sizeof(kTexCoordMasks) / sizeof(kTexCoordMasks[0]); ++i)
         {
-            vsInputDefine += "    float2 texCoord0 : TEXCOORD0;\n";
-            getters += "float2 getTexCoord0(in VSInput vsi) { return vsi.texCoord0; }\n";
-        }
-        else
-        {
-            getters += "float2 getTexCoord0(in VSInput vsi) { return float2(0); }\n";
+            std::string index = std::to_string(i);
+            if (enumHasAllFlags(mKey.attributeMask, kTexCoordMasks[i]))
+            {
+                vsInputDefine += "    float2 texCoord" + index + " : TEXCOORD" + index + ";\n";
+                getters += "float2 getTexCoord" + index + "(in VSInput vsi) { return vsi.texCoord" + index + "; }\n";
+            }
+            else
+            {
+                getters += "float2 getTexCoord" + index + "(in VSInput vsi) { return float2(0); }\n";
+            }
         }
 
-        vsInputDefine += "    uint instanceID : SV_InstanceID;\n    uint startInstanceLocation : SV_StartInstanceLocation;\n";
-        getters += "uint getInstanceIndex(in VSInput vsi) { return vsi.instanceID + vsi.startInstanceLocation; }\n";
+        if (mKey.type == VertexLayoutType::Skeletal_Mesh)
+        {
+            static constexpr VertexAttributeMask kBoneWeightMasks[] = {
+                VertexAttributeMask::Bone_Weight0, VertexAttributeMask::Bone_Weight1,
+            };
+            for (size_t i = 0; i < sizeof(kBoneWeightMasks) / sizeof(kBoneWeightMasks[0]); ++i)
+            {
+                std::string index = std::to_string(i);
+                if (enumHasAllFlags(mKey.attributeMask, kBoneWeightMasks[i]))
+                {
+                    vsInputDefine += "    uint4 bone" + index + " : BLENDINDICES" + index + ";\n";
+                    vsInputDefine += "    float4 weight" + index + " : BLENDWEIGHT" + index + ";\n";
+                    getters += "uint4 getBone" + index + "(in VSInput vsi) { return vsi.bone" + index + "; }\n";
+                    getters += "float4 getWeight" + index + "(in VSInput vsi) { return vsi.weight" + index + "; }\n";
+                }
+                else
+                {
+                    getters += "uint4 getBone" + index + "(in VSInput vsi) { return uint4(0, 0, 0, 0); }\n";
+                    getters += "float4 getWeight" + index + "(in VSInput vsi) { return float4(" + std::string(i == 0 ? "1, 0, 0, 0" : "0, 0, 0, 0") + "); }\n";
+                }
+            }
+        }
+
+        vsInputDefine += "    uint instanceID : SV_VulkanInstanceID;\n";
+        getters += "uint getInstanceIndex(in VSInput vsi) { return vsi.instanceID; }\n";
 
         vsInputDefine += "};\n";
         return vsInputDefine + getters;

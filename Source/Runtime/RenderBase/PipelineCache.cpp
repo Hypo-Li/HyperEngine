@@ -1,31 +1,28 @@
 #include "PipelineCache.h"
-#include "Vulkan/Context.h"
 #include <Core/Common/Hash.h>
 
 namespace hyp
 {
-    PipelineCache::PipelineCache(const vk::Device& device) :
+    PipelineCache::PipelineCache(const rhi::Device& device) :
         mDevice(device)
     {
     }
 
     bool PipelineCache::PipelineLayoutKey::operator==(const PipelineLayoutKey& other) const noexcept
     {
-        for (uint32_t i = 0; i < kMaxDescriptorSetLayoutCount; ++i)
-            if (descriptorSetLayouts[i] != other.descriptorSetLayouts[i])
+        for (uint32_t i = 0; i < kMaxBindGroupLayoutCount; ++i)
+            if (bindGroupLayouts[i] != other.bindGroupLayouts[i])
                 return false;
-        if (pushConstantRangeSize != other.pushConstantRangeSize)
-            return false;
         return true;
     }
 
-    vk::PipelineLayout* PipelineCache::getOrCreatePipelineLayout(const PipelineLayoutKey& key)
+    TRef<rhi::PipelineLayout> PipelineCache::getOrCreate(const PipelineLayoutKey& key)
     {
         auto it = mPipelineLayoutMap.find(key);
         if (it != mPipelineLayoutMap.end())
             return it->second;
 
-        vk::PipelineLayout* pipelineLayout = createPipelineLayout(key);
+        TRef<rhi::PipelineLayout> pipelineLayout = createPipelineLayout(key);
         mPipelineLayoutMap.emplace(key, pipelineLayout);
         return pipelineLayout;
     }
@@ -36,13 +33,13 @@ namespace hyp
             pipelineLayout == other.pipelineLayout;
     }
 
-    vk::Pipeline* PipelineCache::getOrCreateGraphicsPipeline(const GraphicsKey& key)
+    TRef<rhi::Pipeline> PipelineCache::getOrCreateGraphicsPipeline(const GraphicsKey& key)
     {
         auto it = mGraphicsPipelineMap.find(key);
         if (it != mGraphicsPipelineMap.end())
             return it->second;
 
-        vk::Pipeline* pipeline = createGraphicsPipeline(key);
+        TRef<rhi::Pipeline> pipeline = createGraphicsPipeline(key);
         mGraphicsPipelineMap.emplace(key, pipeline);
         return pipeline;
     }
@@ -53,128 +50,99 @@ namespace hyp
             pipelineLayout == other.pipelineLayout;
     }
 
-    vk::Pipeline* PipelineCache::getOrCreateComputePipeline(const ComputeKey& key)
+    TRef<rhi::Pipeline> PipelineCache::getOrCreateComputePipeline(const ComputeKey& key)
     {
         auto it = mComputePipelineMap.find(key);
         if (it != mComputePipelineMap.end())
             return it->second;
 
-        vk::Pipeline* pipeline = createComputePipeline(key);
+        TRef<rhi::Pipeline> pipeline = createComputePipeline(key);
         mComputePipelineMap.emplace(key, pipeline);
         return pipeline;
     }
 
-    vk::PipelineLayout* PipelineCache::createPipelineLayout(const PipelineLayoutKey& key)
+    TRef<rhi::PipelineLayout> PipelineCache::createPipelineLayout(const PipelineLayoutKey& key)
     {
-        uint32_t descriptorSetLayoutCount = 0;
-        for (size_t i = 0; i < PipelineLayoutKey::kMaxDescriptorSetLayoutCount; ++i)
+        rhi::PipelineLayoutDesc pipelineLayoutDesc;
+        for (size_t i = 0; i < PipelineLayoutKey::kMaxBindGroupLayoutCount; ++i)
         {
-            if (key.descriptorSetLayouts[i] == VK_NULL_HANDLE)
+            if (key.bindGroupLayouts[i] == nullptr)
                 break;
-            ++descriptorSetLayoutCount;
+            pipelineLayoutDesc.bindGroupLayouts[i] = key.bindGroupLayouts[i];
         }
 
-        std::span<const VkDescriptorSetLayout> descriptorSetLayouts(key.descriptorSetLayouts, descriptorSetLayoutCount);
-
-        VkPushConstantRange pushConstantRange;
-        pushConstantRange.stageFlags = VK_SHADER_STAGE_ALL;
-        pushConstantRange.offset = 0;
-        pushConstantRange.size = key.pushConstantRangeSize;
-        std::span<const VkPushConstantRange> pc = {};
-        if (key.pushConstantRangeSize)
-        {
-            pc = { &pushConstantRange, 1 };
-        }
-
-        vk::PipelineLayout* result = new vk::PipelineLayout(mDevice, descriptorSetLayouts, pc);
-        return result;
+        return mDevice.createPipelineLayout(pipelineLayoutDesc);
     }
 
-    vk::Pipeline* PipelineCache::createGraphicsPipeline(const GraphicsKey& key)
+    TRef<rhi::Pipeline> PipelineCache::createGraphicsPipeline(const GraphicsKey& key)
     {
-        vk::Pipeline::GraphicsCreateInfo pipelineInfo;
+        rhi::GraphicsPipelineDesc pipelineDesc;
 
         const GraphicsPipelineState& pipelineState = key.pipelineState;
+        const rhi::ShaderModule* shaderModules[2] = { pipelineState.shader.vertexModule, pipelineState.shader.fragmentModule };
+        pipelineDesc.shaderStages = shaderModules;
 
-        vk::Pipeline::ShaderStage shaderStages[2];
-        shaderStages[0] = { VK_SHADER_STAGE_VERTEX_BIT, pipelineState.shader.vertexModule->getHandle(), "main" };
-        shaderStages[1] = { VK_SHADER_STAGE_FRAGMENT_BIT, pipelineState.shader.fragmentModule->getHandle(), "main" };
-        pipelineInfo.shaderStages = shaderStages;
-
-        std::vector<VkVertexInputBindingDescription> bindings;
-        std::vector<VkVertexInputAttributeDescription> attributes;
+        std::vector<rhi::VertexInputBinding> bindings;
+        std::vector<rhi::VertexInputAttribute> attributes;
         key.pipelineState.vertexLayout.writeVertexLayoutBindingsAndAttributes(bindings, attributes);
-        pipelineInfo.vertexInputState.bindings = bindings;
-        pipelineInfo.vertexInputState.attributes = attributes;
+        pipelineDesc.vertexInputState.bindings = bindings;
+        pipelineDesc.vertexInputState.attributes = attributes;
 
-        pipelineInfo.inputAssemblyState.topology = static_cast<VkPrimitiveTopology>(pipelineState.topology);
+        pipelineDesc.inputAssemblyState.topology = static_cast<rhi::PrimitiveTopology>(pipelineState.topology);
 
-        VkViewport viewports[] = { {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f} };
-        VkRect2D scissors[] = { { {0, 0}, {1, 1} } };
-        pipelineInfo.viewportState.viewports = viewports;
-        pipelineInfo.viewportState.scissors = scissors;
+        auto& rasterState = pipelineDesc.rasterizationState;
+        rasterState.polygonMode = static_cast<rhi::PolygonMode>(pipelineState.polygonMode);
+        rasterState.cullMode = static_cast<rhi::CullMode>(pipelineState.cullMode);
+        rasterState.frontFace = static_cast<rhi::FrontFace>(pipelineState.frontFace);
 
-        auto& rasterState = pipelineInfo.rasterizationState;
-        rasterState.polygonMode = static_cast<VkPolygonMode>(pipelineState.polygonMode);
-        rasterState.cullMode = static_cast<VkCullModeFlags>(pipelineState.cullMode);
-        rasterState.frontFace = static_cast<VkFrontFace>(pipelineState.frontFace);
+        pipelineDesc.multisampleState.sampleCount = static_cast<uint8_t>(1u << pipelineState.samples);
 
-        pipelineInfo.multisampleState.rasterizationSamples = static_cast<VkSampleCountFlagBits>(1u << pipelineState.samples);
-
-        auto& depthStencilState = pipelineInfo.depthStencilState;
+        auto& depthStencilState = pipelineDesc.depthStencilState;
         depthStencilState.depthTestEnable = pipelineState.depthTestEnable;
         depthStencilState.depthWriteEnable = pipelineState.depthWriteEnable;
-        depthStencilState.depthCompareOp = static_cast<VkCompareOp>(pipelineState.depthCompareOp);
+        depthStencilState.depthCompareOp = static_cast<rhi::CompareOp>(pipelineState.depthCompareOp);
         depthStencilState.stencilTestEnable = pipelineState.stencilTestEnable;
         depthStencilState.front = pipelineState.stencilState->getFront();
         depthStencilState.back = pipelineState.stencilState->getBack();
 
         uint8_t colorAttachmentCount = 0;
-        VkFormat colorFormats[8] = { VK_FORMAT_UNDEFINED };
+        rhi::TextureFormat colorFormats[8] = { rhi::TextureFormat::Undefined };
         for (uint8_t i = 0; i < 8; ++i)
         {
             colorFormats[i] = pipelineState.attachmentFormats->getColorFormat(i);
-            if (colorFormats[i] == VK_FORMAT_UNDEFINED)
+            if (colorFormats[i] == rhi::TextureFormat::Undefined)
                 break;
             ++colorAttachmentCount;
         }
 
-        std::vector<VkPipelineColorBlendAttachmentState> attachmentBlendStates(colorAttachmentCount);
+        std::vector<rhi::ColorBlendAttachmentState> attachmentBlendStates(colorAttachmentCount);
         for (uint8_t i = 0; i < colorAttachmentCount; ++i)
             attachmentBlendStates[i] = pipelineState.colorBlendState->getAttachmentBlendState(i);
-        pipelineInfo.colorBlendState.attachments = attachmentBlendStates;
+        pipelineDesc.colorBlendState.attachments = attachmentBlendStates;
 
-        pipelineInfo.layout = key.pipelineLayout;
+        pipelineDesc.pipelineLayout = key.pipelineLayout;
 
         if (colorAttachmentCount)
-            pipelineInfo.colorFormats = { colorFormats, colorAttachmentCount };
-        pipelineInfo.depthStencilFormat = pipelineState.attachmentFormats->getDepthStencilFormat();
+            pipelineDesc.colorFormats = { colorFormats, colorAttachmentCount };
+        pipelineDesc.depthStencilFormat = pipelineState.attachmentFormats->getDepthStencilFormat();
 
-        VkDynamicState dynamicStates[] = {
-            VK_DYNAMIC_STATE_VIEWPORT,
-            VK_DYNAMIC_STATE_SCISSOR,
-            // TODO: only for debug or editor
-            // VK_DYNAMIC_STATE_POLYGON_MODE_EXT
-        };
-        pipelineInfo.dynamicState.dynamicStates = dynamicStates;
-
-        return new vk::Pipeline(mDevice, pipelineInfo);
+        return mDevice.createGraphicsPipeline(pipelineDesc);
     }
 
-    vk::Pipeline* PipelineCache::createComputePipeline(const ComputeKey& key)
+    TRef<rhi::Pipeline> PipelineCache::createComputePipeline(const ComputeKey& key)
     {
-        vk::Pipeline::ComputeCreateInfo pipelineInfo;
-        pipelineInfo.shaderStage = { VK_SHADER_STAGE_COMPUTE_BIT, key.shader.computeModule->getHandle(), "main" };
-        pipelineInfo.layout = key.pipelineLayout;
-        return new vk::Pipeline(mDevice, pipelineInfo);
+        rhi::ComputePipelineDesc pipelineDesc;
+        pipelineDesc.shaderModule = key.shader.computeModule;
+        pipelineDesc.pipelineLayout = key.pipelineLayout;
+        return mDevice.createComputePipeline(pipelineDesc);
     }
 
     size_t PipelineCache::PipelineLayoutKeyHash::operator()(const PipelineLayoutKey& key) const noexcept
     {
         size_t seed = 0;
-        for (uint8_t i = 0; i < PipelineLayoutKey::kMaxDescriptorSetLayoutCount; ++i)
-            Hash::combine(seed, key.descriptorSetLayouts[i]);
-        Hash::combine(seed, key.pushConstantRangeSize);
+        for (uint8_t i = 0; i < PipelineLayoutKey::kMaxBindGroupLayoutCount; ++i)
+            if (key.bindGroupLayouts[i])
+                Hash::combine(seed, key.bindGroupLayouts[i]);
         return seed;
     }
 

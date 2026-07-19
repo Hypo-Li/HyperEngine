@@ -1,5 +1,7 @@
 #include "Hash.h"
 
+#include <xxhash.h>
+
 namespace hyp
 {
     uint64_t Hash::compute(const void* data, size_t size, Algorithm algo) noexcept
@@ -52,12 +54,12 @@ namespace hyp
 
     uint32_t Hash::xxHash32(const void* data, size_t size) noexcept
     {
-        return 0;
+        return XXH32(data, size, 0);
     }
 
     uint64_t Hash::xxHash64(const void* data, size_t size) noexcept
     {
-        return 0;
+        return XXH64(data, size, 0);
     }
 
     uint32_t Hash::murmur3_32(const void* data, size_t size) noexcept

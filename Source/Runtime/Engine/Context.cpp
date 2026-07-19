@@ -12,4 +12,14 @@ namespace hyp
     {
         mEnvironment = Environment::Standalone;
     }
+
+    Context::~Context()
+    {
+        mRenderTagRegistry = nullptr;
+        mAssetManager = nullptr;
+        mRendererContext = nullptr;
+        mRenderFrontend = nullptr;
+        mSampleStateManager = nullptr;
+        mInputSystem = nullptr;
+    }
 }

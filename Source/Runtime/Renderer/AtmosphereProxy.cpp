@@ -8,10 +8,10 @@ namespace hyp
         mParameters(parameters)
     {
         auto& device = getRenderBackend().getDevice();
-        vk::Buffer::CreateInfo bufferInfo;
-        bufferInfo.size = sizeof(AtmosphereShaderParameters);
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        mParametersBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+        rhi::BufferDesc bufferDesc;
+        bufferDesc.size = sizeof(AtmosphereShaderParameters);
+        bufferDesc.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Transfer_Dst;
+        mParametersBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
     }
 
     AtmosphereProxy::~AtmosphereProxy() noexcept
@@ -52,33 +52,44 @@ namespace hyp
         mParametersDirty = true;
     }
 
-    void AtmosphereProxy::prepare(vk::CommandBuffer& cmd)
+    void AtmosphereProxy::prepare(rhi::CommandList& cmdList)
     {
         if (mParametersDirty)
         {
-            uploadToGPU(cmd);
+            uploadToGPU(cmdList);
         }
     }
 
-    void AtmosphereProxy::uploadToGPU(vk::CommandBuffer& cmd)
+    void AtmosphereProxy::uploadToGPU(rhi::CommandList& cmdList)
     {
         if (!mParametersDirty)
             return;
 
-        cmd.updateBuffer(mParametersBuffer->getHandle(), 0, sizeof(mParameters), &mParameters);
+        auto& stagingAllocator = getRenderBackend().getStagingAllocator();
+        auto allocation = stagingAllocator.forceAllocate(sizeof(mParameters));
+        std::memcpy(allocation.mappedData, &mParameters, sizeof(mParameters));
 
-        VkBufferMemoryBarrier2 barrier = {};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR;
-        barrier.dstAccessMask = VK_ACCESS_2_UNIFORM_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = mParametersBuffer->getHandle();
-        barrier.offset = 0;
-        barrier.size = sizeof(mParameters);
-        cmd.pipelineBarrier2({ &barrier, 1 });
+        rhi::BufferBarrier preBarrier;
+        preBarrier.buffer = mParametersBuffer.get();
+        preBarrier.offset = 0;
+        preBarrier.size = sizeof(mParameters);
+        preBarrier.oldState = rhi::ResourceState::Shader_Uniform;
+        preBarrier.newState = rhi::ResourceState::Transfer_Dst;
+        cmdList.insertBarriers({ &preBarrier, 1 });
+
+        rhi::BufferCopyRegion copyRegion;
+        copyRegion.srcOffset = allocation.offset;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = sizeof(mParameters);
+        cmdList.copyBuffer(allocation.buffer, mParametersBuffer.get(), { &copyRegion, 1 });
+
+        rhi::BufferBarrier postBarrier;
+        postBarrier.buffer = mParametersBuffer.get();
+        postBarrier.offset = 0;
+        postBarrier.size = sizeof(mParameters);
+        postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+        postBarrier.newState = rhi::ResourceState::Shader_Uniform;
+        cmdList.insertBarriers({ &postBarrier, 1 });
 
         mParametersDirty = false;
     }

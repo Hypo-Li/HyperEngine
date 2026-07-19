@@ -1,150 +1,140 @@
 #include "BindlessRegistry.h"
 #include "GlobalBindings.h"
 
+#include <Core/Common/LogSystem.h>
+
 namespace hyp
 {
-    BindlessRegistry::BindlessRegistry(const BindlessConfig& bindlessConfig) :
-        mGlobalBindings(nullptr),
+    BindlessRegistry::BindlessRegistry(bool enabled, const BindlessConfig& bindlessConfig) :
+        mBindlessEnabled(enabled),
+        mBindlessConfig(bindlessConfig),
         mTexture2DPool(bindlessConfig.maxTexture2DCount),
         mTexture2DArrayPool(bindlessConfig.maxTexture2DArrayCount),
-        mTextureCubePool(bindlessConfig.maxTextureCubeCount),
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        mTextureCubeArrayPool(bindlessConfig.maxTextureCubeArrayCount),
-#endif
         mTexture3DPool(bindlessConfig.maxTexture3DCount),
+        mTextureCubePool(bindlessConfig.maxTextureCubeCount),
         mSamplerPool(bindlessConfig.maxSamplerCount)
     {
-        
     }
 
-    BindlessHandle BindlessRegistry::registerTexture2D(VkImageView imageView) noexcept
+    BindlessHandle BindlessRegistry::registerTexture2D(rhi::TextureView* view) noexcept
     {
+        if (!mBindlessEnabled) return {};
         uint32_t index = mTexture2DPool.acquire();
-        mGlobalBindings->writeTexture2D(index, imageView);
+        mGlobalBindings->writeTexture2D(index, view);
         return BindlessHandle{ BindlessBinding::Texture2D, index };
     }
 
-    BindlessHandle BindlessRegistry::registerTexture2DArray(VkImageView imageView) noexcept
+    BindlessHandle BindlessRegistry::registerTexture2DArray(rhi::TextureView* view) noexcept
     {
+        if (!mBindlessEnabled) return {};
         uint32_t index = mTexture2DArrayPool.acquire();
-        mGlobalBindings->writeTexture2DArray(index, imageView);
+        mGlobalBindings->writeTexture2DArray(index, view);
         return BindlessHandle{ BindlessBinding::Texture2DArray, index };
     }
 
-    BindlessHandle BindlessRegistry::registerTextureCube(VkImageView imageView) noexcept
+    BindlessHandle BindlessRegistry::registerTexture3D(rhi::TextureView* view) noexcept
     {
-        uint32_t index = mTextureCubePool.acquire();
-        mGlobalBindings->writeTextureCube(index, imageView);
-        return BindlessHandle{ BindlessBinding::TextureCube, index };
-    }
-
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-    BindlessHandle BindlessRegistry::registerTextureCubeArray(VkImageView imageView) noexcept
-    {
-        uint32_t index = mTextureCubeArrayPool.acquire();
-        mGlobalBindings->writeTextureCubeArray(index, imageView);
-        return BindlessHandle{ BindlessBinding::TextureCubeArray, index };
-    }
-#endif
-
-    BindlessHandle BindlessRegistry::registerTexture3D(VkImageView imageView) noexcept
-    {
+        if (!mBindlessEnabled) return {};
         uint32_t index = mTexture3DPool.acquire();
-        mGlobalBindings->writeTexture3D(index, imageView);
+        mGlobalBindings->writeTexture3D(index, view);
         return BindlessHandle{ BindlessBinding::Texture3D, index };
     }
 
-    BindlessHandle BindlessRegistry::registerSampler(VkSampler sampler) noexcept
+    BindlessHandle BindlessRegistry::registerTextureCube(rhi::TextureView* view) noexcept
     {
+        if (!mBindlessEnabled) return {};
+        uint32_t index = mTextureCubePool.acquire();
+        mGlobalBindings->writeTextureCube(index, view);
+        return BindlessHandle{ BindlessBinding::TextureCube, index };
+    }
+
+    BindlessHandle BindlessRegistry::registerSampler(rhi::Sampler* sampler) noexcept
+    {
+        if (!mBindlessEnabled) return {};
         uint32_t index = mSamplerPool.acquire();
         mGlobalBindings->writeSampler(index, sampler);
         return BindlessHandle{ BindlessBinding::Sampler, index };
     }
 
-    void BindlessRegistry::updateTexture2D(BindlessHandle handle, VkImageView imageView)
+    void BindlessRegistry::updateTexture2D(BindlessHandle handle, rhi::TextureView* view)
     {
+        if (!mBindlessEnabled) return;
         assert(handle.binding == BindlessBinding::Texture2D);
-        mGlobalBindings->writeTexture2D(handle.index, imageView);
+        mGlobalBindings->writeTexture2D(handle.index, view);
     }
 
-    void BindlessRegistry::updateTexture2DArray(BindlessHandle handle, VkImageView imageView)
+    void BindlessRegistry::updateTexture2DArray(BindlessHandle handle, rhi::TextureView* view)
     {
+        if (!mBindlessEnabled) return;
         assert(handle.binding == BindlessBinding::Texture2DArray);
-        mGlobalBindings->writeTexture2DArray(handle.index, imageView);
+        mGlobalBindings->writeTexture2DArray(handle.index, view);
     }
 
-    void BindlessRegistry::updateTextureCube(BindlessHandle handle, VkImageView imageView)
+    void BindlessRegistry::updateTexture3D(BindlessHandle handle, rhi::TextureView* view)
     {
-        assert(handle.binding == BindlessBinding::TextureCube);
-        mGlobalBindings->writeTextureCube(handle.index, imageView);
-    }
-
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-    void BindlessRegistry::updateTextureCubeArray(BindlessHandle handle, VkImageView imageView)
-    {
-        assert(handle.binding == BindlessBinding::TextureCubeArray);
-        mGlobalBindings->writeTextureCubeArray(handle.index, imageView);
-    }
-#endif
-
-    void BindlessRegistry::updateTexture3D(BindlessHandle handle, VkImageView imageView)
-    {
+        if (!mBindlessEnabled) return;
         assert(handle.binding == BindlessBinding::Texture3D);
-        mGlobalBindings->writeTexture3D(handle.index, imageView);
+        mGlobalBindings->writeTexture3D(handle.index, view);
     }
 
-    void BindlessRegistry::updateSampler(BindlessHandle handle, VkSampler sampler)
+    void BindlessRegistry::updateTextureCube(BindlessHandle handle, rhi::TextureView* view)
     {
+        if (!mBindlessEnabled) return;
+        assert(handle.binding == BindlessBinding::TextureCube);
+        mGlobalBindings->writeTextureCube(handle.index, view);
+    }
+
+    void BindlessRegistry::updateSampler(BindlessHandle handle, rhi::Sampler* sampler)
+    {
+        if (!mBindlessEnabled) return;
         assert(handle.binding == BindlessBinding::Sampler);
         mGlobalBindings->writeSampler(handle.index, sampler);
     }
 
     void BindlessRegistry::unregister(BindlessHandle handle)
     {
-        uint32_t binding = uint32_t(handle.binding);
+        if (!mBindlessEnabled) return;
+
         switch (handle.binding)
         {
         case BindlessBinding::Texture2D:
         {
             mTexture2DPool.release(handle.index);
-            mGlobalBindings->writeTexture2D(handle.index, VK_NULL_HANDLE);
+            mGlobalBindings->writeTexture2D(handle.index, nullptr);
             break;
         }
         case BindlessBinding::Texture2DArray:
         {
             mTexture2DArrayPool.release(handle.index);
-            mGlobalBindings->writeTexture2DArray(handle.index, VK_NULL_HANDLE);
+            mGlobalBindings->writeTexture2DArray(handle.index, nullptr);
             break;
         }
         case BindlessBinding::TextureCube:
         {
             mTextureCubePool.release(handle.index);
-            mGlobalBindings->writeTextureCube(handle.index, VK_NULL_HANDLE);
+            mGlobalBindings->writeTextureCube(handle.index, nullptr);
             break;
         }
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        case BindlessBinding::TextureCubeArray:
-        {
-            mTextureCubeArrayPool.release(handle.index);
-            mGlobalBindings.writeTextureCubeArray(handle.index, VK_NULL_HANDLE);
-            break;
-        }
-#endif
         case BindlessBinding::Texture3D:
         {
             mTexture3DPool.release(handle.index);
-            mGlobalBindings->writeTexture3D(handle.index, VK_NULL_HANDLE);
+            mGlobalBindings->writeTexture3D(handle.index, nullptr);
             break;
         }
         case BindlessBinding::Sampler:
         {
             mSamplerPool.release(handle.index);
-            mGlobalBindings->writeSampler(handle.index, VK_NULL_HANDLE);
+            mGlobalBindings->writeSampler(handle.index, nullptr);
             break;
         }
         default:
             break;
         }
+    }
+
+    void BindlessRegistry::setGlobalBindings(GlobalBindings* globalBindings) noexcept
+    {
+        mGlobalBindings = globalBindings;
     }
 
     BindlessRegistry::IndexPool::IndexPool(uint32_t capacity)
@@ -176,11 +166,6 @@ namespace hyp
     size_t BindlessRegistry::IndexPool::freeCount() const noexcept
     {
         return mFreeIndices.size();
-    }
-
-    void BindlessRegistry::setGlobalBindings(GlobalBindings* globalBindings) noexcept
-    {
-        mGlobalBindings = globalBindings;
     }
 
 }

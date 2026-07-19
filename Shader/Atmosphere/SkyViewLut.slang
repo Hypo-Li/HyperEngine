@@ -9,13 +9,17 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-Sampler2D TransmittanceLutTexture;
+SamplerState LutSampler;
 
 [[vk::binding(2, 2)]]
-Sampler2D MultiScatteringLutTexture;
+Texture2D<float4> TransmittanceLutTexture;
 
 [[vk::binding(3, 2)]]
-RWTexture2D<float4> SkyViewLutImage;
+Texture2D<float4> MultiScatteringLutTexture;
+
+[[vk::binding(4, 2)]]
+[format("rgba16f")]
+WTexture2D<float4> SkyViewLutImage;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -41,10 +45,10 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     worldPos = float3(0.0, 0.0, viewHeight);
     if (!moveToTopAtmosphere(Atmosphere, worldPos, worldDir))
     {
-        SkyViewLutImage[globalID.xy] = float4(0.0, 0.0, 0.0, 1.0);
+        SkyViewLutImage.Store(globalID.xy, float4(0.0, 0.0, 0.0, 1.0));
         return;
     }
     float3 lum, fms, trans;
-    rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, lightDir, 0.3, 30.0, 9000000.0, lum, fms, trans);
-    SkyViewLutImage[globalID.xy] = float4(lum, 1.0);
+    rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, lightDir, 0.3, 30.0, 9000000.0, lum, fms, trans);
+    SkyViewLutImage.Store(globalID.xy, float4(lum, 1.0));
 }

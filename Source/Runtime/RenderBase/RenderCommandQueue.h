@@ -1,6 +1,5 @@
 #pragma once
-#include "Vulkan/CommandBuffer.h"
-#include "RenderFrameContext.h"
+#include "FrameContext.h"
 
 namespace hyp
 {
@@ -11,7 +10,7 @@ namespace hyp
 
         virtual ~IRenderCommand() noexcept = default;
 
-        virtual void execute(RenderFrameContext& context) = 0;
+        virtual void execute(FrameContext& context) = 0;
     };
 
     template <typename LambdaType>
@@ -31,7 +30,7 @@ namespace hyp
         TRenderCommand(const TRenderCommand&) = delete;
         TRenderCommand& operator=(const TRenderCommand&) = delete;
 
-        virtual void execute(RenderFrameContext& context) override
+        virtual void execute(FrameContext& context) override
         {
             mLambda(context);
         }
@@ -152,7 +151,7 @@ namespace hyp
         /*
         *  消费者：执行所有挂起的命令
         */
-        void executeAll(RenderFrameContext& context);
+        void executeAll(FrameContext& context);
 
         bool empty() const noexcept;
 

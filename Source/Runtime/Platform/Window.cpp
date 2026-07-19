@@ -4,8 +4,12 @@
 #include <GLFW/glfw3.h>
 #ifdef WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
+#elif defined(__linux__)
+// 实际用 X11 还是 Wayland 是运行时探测出来的(见构造函数),两边的 native API 都要暴露出来
+#define GLFW_EXPOSE_NATIVE_X11
+#define GLFW_EXPOSE_NATIVE_WAYLAND
 #endif
+#include <GLFW/glfw3native.h>
 
 namespace hyp
 {
@@ -14,10 +18,12 @@ namespace hyp
     static std::unordered_map<void*, std::function<void(Window*, int, int)>> gResizeCallbackMap;
     static void resizeCallback(GLFWwindow* window, int width, int height)
     {
+        Window* wnd = gWindowMap.at(window);
+        wnd->setFramebufferSize(uint2(width, height));
         auto it = gResizeCallbackMap.find(window);
         if (it != gResizeCallbackMap.end())
         {
-            it->second(gWindowMap.at(window), width, height);
+            it->second(wnd, width, height);
         }
     }
 
@@ -67,25 +73,56 @@ namespace hyp
         gJoystickCallback(jid, event);
     }
 
+    static void windowIconifyCallback(GLFWwindow* window, int iconified)
+    {
+        uint2 size;
+        if (iconified)
+        {
+            size = uint2(0, 0);
+        }
+        else
+        {
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+            size = uint2(width, height);
+        }
+        Window* wnd = gWindowMap.at(window);
+        wnd->setFramebufferSize(size);
+
+        auto it = gResizeCallbackMap.find(window);
+        if (it != gResizeCallbackMap.end())
+        {
+            it->second(wnd, size.x, size.y);
+        }
+    }
+
     Window::Window(int width, int height, const std::string& title) :
-        mWidth(width), mHeight(height), mTitle(title)
+        mTitle(title)
     {
         if (gWindowMap.size() == 0)
         {
             glfwInit();
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+#ifdef _WIN32
+            glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_WIN32);
+#elif defined(__linux__)
+            if (glfwPlatformSupported(GLFW_PLATFORM_WAYLAND))
+                glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
+            else
+                glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+#endif
             glfwSetJoystickCallback(joystickCallback);
         }
 
-        mWindow = glfwCreateWindow(mWidth, mHeight, mTitle.c_str(), nullptr, nullptr);
+        mWindow = glfwCreateWindow(width, height, mTitle.c_str(), nullptr, nullptr);
+        mFramebufferSize.store(uint2{ width, height }, std::memory_order_release);
         glfwSetWindowSizeCallback((GLFWwindow*)mWindow, resizeCallback);
         glfwSetMouseButtonCallback((GLFWwindow*)mWindow, mouseButtonCallback);
         glfwSetCursorPosCallback((GLFWwindow*)mWindow, cursorPositionCallback);
         glfwSetScrollCallback((GLFWwindow*)mWindow, scrollCallback);
         glfwSetKeyCallback((GLFWwindow*)mWindow, keyCallback);
+        glfwSetWindowIconifyCallback((GLFWwindow*)mWindow, windowIconifyCallback);
         gWindowMap.emplace(mWindow, this);
-
-        glfwSetInputMode((GLFWwindow*)mWindow, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     }
 
     Window::~Window()
@@ -99,13 +136,15 @@ namespace hyp
         }
     }
 
-    std::vector<const char*> Window::getRequiredInstanceExtensions()
+    WindowingSystem Window::getWindowingSystem()
     {
-        uint32_t glfwExtensionCount = 0;
-        const char** glfwExtensions;
-        glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-        std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-        return extensions;
+#ifdef _WIN32
+        return WindowingSystem::Win32;
+#elif defined(__linux__)
+        return glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? WindowingSystem::Wayland : WindowingSystem::X11;
+#else
+        return WindowingSystem::Unknow;
+#endif
     }
 
     void Window::pollEvents()
@@ -118,11 +157,14 @@ namespace hyp
         glfwWaitEvents();
     }
 
+    void Window::setFramebufferSize(uint2 size)
+    {
+        mFramebufferSize.store(size, std::memory_order_release);
+    }
+
     uint2 Window::getFramebufferSize() const
     {
-        int width, height;
-        glfwGetFramebufferSize((GLFWwindow*)mWindow, &width, &height);
-        return uint2{ width, height };
+        return mFramebufferSize.load(std::memory_order_acquire);
     }
 
     double2 Window::getCursorPosition() const
@@ -137,6 +179,16 @@ namespace hyp
         float xscale, yscale;
         glfwGetWindowContentScale((GLFWwindow*)mWindow, &xscale, &yscale);
         return float2{ xscale, yscale };
+    }
+
+    void Window::captureCursor() const
+    {
+        glfwSetInputMode((GLFWwindow*)mWindow, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    }
+
+    void Window::releaseCursor() const
+    {
+        glfwSetInputMode((GLFWwindow*)mWindow, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
     bool Window::shouldClose() const
@@ -182,8 +234,38 @@ namespace hyp
 
     void Window::getWin32Handle(void* hWnd) const
     {
-#ifdef WIN32
-        * (HWND*)(hWnd) = glfwGetWin32Window((GLFWwindow*)mWindow);
+#ifdef _WIN32
+        *(HWND*)(hWnd) = glfwGetWin32Window((GLFWwindow*)mWindow);
 #endif
     }
+
+    void Window::getX11Display(void* display) const
+    {
+#ifdef __linux__
+        *(::Display**)(display) = glfwGetX11Display();
+#endif
+    }
+
+    void Window::getX11Handle(void* window) const
+    {
+#ifdef __linux__
+        // ::Window 显式取全局命名空间下 X11 的 Window(XID)类型,避免和 hyp::Window 这个类同名冲突
+        *(::Window*)(window) = glfwGetX11Window((GLFWwindow*)mWindow);
+#endif
+    }
+
+    void Window::getWaylandDisplay(void* display) const
+    {
+#ifdef __linux__
+        *(struct wl_display**)(display) = glfwGetWaylandDisplay();
+#endif
+    }
+
+    void Window::getWaylandSurface(void* surface) const
+    {
+#ifdef __linux__
+        *(struct wl_surface**)(surface) = glfwGetWaylandWindow((GLFWwindow*)mWindow);
+#endif
+    }
+
 }

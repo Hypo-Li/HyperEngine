@@ -44,17 +44,17 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [handle,
-            desc = getDescription()](RenderFrameContext& context)
+            desc = getDescription()](FrameContext& context)
             {
-                vk::Image::CreateInfo imageInfo;
-                imageInfo.imageType = VK_IMAGE_TYPE_3D;
-                imageInfo.format = static_cast<VkFormat>(convertToVkFormat(desc.format, desc.compressionPreset, desc.isSRGB));
-                imageInfo.extent = { desc.width, desc.height, desc.depth };
-                imageInfo.mipLevels = desc.mipLevels;
-                imageInfo.arrayLayers = 1;
-                imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+                rhi::TextureDesc textureDesc;
+                textureDesc.type = rhi::TextureType::Texture_3D;
+                textureDesc.format = convertToRHITextureFormat(desc.format, desc.compressionPreset, desc.compressionFormatFamily, desc.isSRGB);
+                textureDesc.extent = { desc.width, desc.height, desc.depth };
+                textureDesc.mipCount = desc.mipLevels;
+                textureDesc.layerCount = 1;
+                textureDesc.usage = rhi::TextureUsage::Transfer_Src | rhi::TextureUsage::Transfer_Dst | rhi::TextureUsage::Sampled;
 
-                context.getProxyManager().createProxy(handle, imageInfo);
+                context.getProxyManager().createProxy(handle, textureDesc);
             }
         );
     }

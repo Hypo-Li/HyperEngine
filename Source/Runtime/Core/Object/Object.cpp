@@ -16,6 +16,7 @@ namespace hyp
             Object::ConstructionContext context;
             context.owner = owner;
             context.flags = flags;
+            context.guid = Guid::newGuid();
             Object* object = clazz->allocate(context.handle);
             Object::sContextStack.emplace_back(context);
             clazz->construct(object);
@@ -28,6 +29,20 @@ namespace hyp
     {
         Class* clazz = Reflection::getClass(className);
         return createObject(clazz, owner, flags);
+    }
+
+    TRef<Object> restoreObject(Class* clazz, Object* owner, Guid guid, ObjectFlags flags)
+    {
+        assert(!clazz->isAbstract());
+        Object::ConstructionContext context;
+        context.owner = owner;
+        context.flags = flags;
+        context.guid = guid;
+        Object* object = clazz->allocate(context.handle);
+        Object::sContextStack.emplace_back(context);
+        clazz->construct(object);
+        Object::sContextStack.pop_back();
+        return object;
     }
 
     void destroyObject(Object* object) noexcept
@@ -48,10 +63,10 @@ namespace hyp
     thread_local std::vector<Object::ConstructionContext> Object::sContextStack;
 
     Object::Object() noexcept
-        : mGuid(Guid::newGuid())
     {
         assert(!sContextStack.empty());
         const auto& context = sContextStack.back();
+        this->mGuid = context.guid;
         this->mOwner = context.owner;
         this->mFlags = context.flags;
         this->mHandle = context.handle;

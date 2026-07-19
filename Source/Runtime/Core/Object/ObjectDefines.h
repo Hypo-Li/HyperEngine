@@ -12,8 +12,9 @@ namespace hyp
 
     enum class ObjectFlags : uint32_t
     {
-        None = 0u,
-        Default_Object = 1u,
+        None = 0,
+        Default_Object = 1 << 0,
+        Load = 1 << 1,
     };
     ENABLE_ENUM_CLASS_BITWISE(ObjectFlags)
 

@@ -1,7 +1,6 @@
 #pragma once
 #include <functional>
 #include <vector>
-#include <algorithm>
 
 namespace hyp
 {
@@ -15,7 +14,7 @@ namespace hyp
         ~DeferredTaskQueue() = default;
 
         // deferredTicks 为 0 时表示在本帧结尾处执行
-        void push(Task callback, uint32_t deferredTicks = 0);
+        void push(Task callback, uint32_t deferredTicks);
 
         void tick();
 

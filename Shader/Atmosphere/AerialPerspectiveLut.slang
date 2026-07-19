@@ -7,13 +7,17 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-Sampler2D TransmittanceLutTexture;
+SamplerState LutSampler;
 
 [[vk::binding(2, 2)]]
-Sampler2D MultiScatteringLutTexture;
+Texture2D<float4> TransmittanceLutTexture;
 
 [[vk::binding(3, 2)]]
-RWTexture3D<float4> AerialPerspectiveLutImage;
+Texture2D<float4> MultiScatteringLutTexture;
+
+[[vk::binding(4, 2)]]
+[format("rgba16f")]
+WTexture3D<float4> AerialPerspectiveLutImage;
 
 [shader("compute")]
 [numthreads(4, 4, 4)]
@@ -49,14 +53,14 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
         // move the viewpoint around the atmosphere and avoid inefficient stepping
         if (!moveToTopAtmosphere(Atmosphere, worldPos, worldDir))
         {
-            AerialPerspectiveLutImage[globalID] = float4(0, 0, 0, 1);
+            AerialPerspectiveLutImage.Store(globalID, float4(0, 0, 0, 1));
             return;
         }
         float lengthToAtmosphere = length(prevWorldPos - worldPos);
         // determines whether the maximum length of the step is less than the length of the move
         if (tMaxMax < lengthToAtmosphere)
         {
-            AerialPerspectiveLutImage[globalID] = float4(0, 0, 0, 1);
+            AerialPerspectiveLutImage.Store(globalID, float4(0, 0, 0, 1));
             return;
         }
         // the maximum length of the corrected step is the length of the step actually taken in the atmosphere
@@ -64,6 +68,7 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     }
     const float sampleCount = max(1.0, float(globalID.z + 1.0) * 2.0);
     float3 lum, fms, trans;
-    rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, Atmosphere.sun0Direction, 0.3, sampleCount, tMaxMax, lum, fms, trans);
-    AerialPerspectiveLutImage[globalID] = float4(lum, 1.0 - dot(trans, float3(1.0/3.0)));
+    rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, Atmosphere.sun0Direction, 0.3, sampleCount, tMaxMax, lum, fms, trans);
+    
+    AerialPerspectiveLutImage.Store(globalID, float4(lum, 1.0 - dot(trans, float3(1.0/3.0))));
 }

@@ -103,6 +103,7 @@ namespace hyp
         case InputActionState::Started: return 2;
         case InputActionState::Ongoing: return 1;
         case InputActionState::Triggered: return 3;
+        case InputActionState::Ended: return 1;
         default: return 0;
         }
     }

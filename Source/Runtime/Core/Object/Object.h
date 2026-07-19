@@ -19,12 +19,18 @@ public: \
 
 namespace hyp
 {
+    class Object;
+
     template <ObjectType T>
     TRef<T> createObject(Object* owner, ObjectFlags flags);
 
     TRef<Object> createObject(Class* clazz, Object* owner, ObjectFlags flags = ObjectFlags::None);
 
     TRef<Object> createObject(HString className, Object* owner, ObjectFlags flags = ObjectFlags::None);
+
+    // Only for reconstructing a previously-serialized Object during deserialization,
+    // where the guid must match what was originally exported. Not for general use.
+    TRef<Object> restoreObject(Class* clazz, Object* owner, Guid guid, ObjectFlags flags = ObjectFlags::Load);
 
     void destroyObject(Object* object) noexcept;
 
@@ -34,6 +40,8 @@ namespace hyp
         friend TRef<T> createObject(Object* owner, ObjectFlags flags);
 
         friend TRef<Object> createObject(Class* clazz, Object* owner, ObjectFlags flags);
+
+        friend TRef<Object> restoreObject(Class* clazz, Object* owner, Guid guid, ObjectFlags flags);
 
         friend void destroyObject(Object* object) noexcept;
 
@@ -94,6 +102,7 @@ namespace hyp
             Object* owner;
             ObjectFlags flags;
             ObjectHandle handle;
+            Guid guid;
         };
         static thread_local std::vector<ConstructionContext> sContextStack;
     };
@@ -110,6 +119,7 @@ namespace hyp
             Object::ConstructionContext context;
             context.owner = owner;
             context.flags = flags;
+            context.guid = Guid::newGuid();
             T* object = nullptr;
             if (enumHasAllFlags(flags, ObjectFlags::Default_Object))
             {

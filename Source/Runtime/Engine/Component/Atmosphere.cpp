@@ -52,7 +52,7 @@ namespace hyp
             [sceneProxyHandle,
             proxyHandle = mProxyHandle,
             parameters = makeAtmosphereShaderParameters(mParameters)
-            ](RenderFrameContext& context)
+            ](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
@@ -71,7 +71,7 @@ namespace hyp
         renderFrontend.enqueueLambda(
             [sceneProxyHandle,
             proxyHandle = mProxyHandle
-            ](RenderFrameContext& context)
+            ](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
@@ -96,7 +96,7 @@ namespace hyp
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
             parameters = makeAtmosphereShaderParameters(mParameters)
-            ](RenderFrameContext& context)
+            ](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 AtmosphereProxy* proxy = proxyManager.getProxy(proxyHandle);

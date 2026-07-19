@@ -1,12 +1,16 @@
 #include "Special/StdArray.h"
 #include "Special/StdList.h"
 #include "Special/StdMap.h"
+#include "Special/StdOptional.h"
 #include "Special/StdPair.h"
 #include "Special/StdSet.h"
 #include "Special/StdString.h"
+#include "Special/StdUnorderedMap.h"
+#include "Special/StdUnorderedSet.h"
 #include "Special/StdVariant.h"
 #include "Special/StdVector.h"
-#include "Special/HyperHString.h"
+#include "Special/HypHString.h"
+#include "Special/HypBulkData.h"
 
 #include "Property.inl"
 #include "Class.inl"
@@ -68,20 +72,26 @@ namespace hyp
             return new TStdList<T>;
         else if constexpr (is_instance_of_v<T, std::map>)
             return new TStdMap<T>;
+        else if constexpr (is_instance_of_v<T, std::optional>)
+            return new TStdOptional<T>;
         else if constexpr (is_instance_of_v<T, std::pair>)
             return new TStdPair<T>;
         else if constexpr (is_instance_of_v<T, std::set>)
             return new TStdSet<T>;
         else if constexpr (std::is_same_v<T, std::string>)
             return new StdString;
+        else if constexpr (is_instance_of_v<T, std::unordered_map>)
+            return new TStdUnorderedMap<T>;
+        else if constexpr (is_instance_of_v<T, std::unordered_set>)
+            return new TStdUnorderedSet<T>;
         else if constexpr (is_instance_of_v<T, std::variant>)
             return new TStdVariant<T>;
         else if constexpr (is_instance_of_v<T, std::vector>)
             return new TStdVector<T>;
         else if constexpr (std::is_same_v<T, HString>)
-            return new HyperHString;
-        /*else if constexpr (is_instance_of_v<T, TRef>)
-            return getType<container_traits_t<T>>();*/
+            return new HypHString;
+        else if constexpr (std::is_same_v<T, BulkData>)
+            return new HypBulkData;
         else
             static_assert(!sizeof(T*), "T is an unreflectable type.");
     }

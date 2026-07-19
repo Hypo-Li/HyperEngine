@@ -1,9 +1,36 @@
 #pragma once
 #include "../Material/Material.h"
 #include <Core/Math/Box.h>
+#include <Core/Common/BulkData.h>
 
 namespace hyp
 {
+    enum class VertexAttributeType
+    {
+        Position,
+        Normal,
+        Tangent,
+        Color,
+        TexCoord,
+        Bone,
+        Weight,
+    };
+    template <> Type* Reflection::createType<VertexAttributeType>();
+
+    struct VertexAttribute
+    {
+        VertexAttributeType type;
+        uint32_t stride;
+    };
+    template <> Type* Reflection::createType<VertexAttribute>();
+
+    enum class IndexType
+    {
+        Uint16,
+        Uint32,
+    };
+    template <> Type* Reflection::createType<IndexType>();
+
     class Mesh : public Object
     {
         REFLECT_CLASS(Mesh)
@@ -11,29 +38,6 @@ namespace hyp
         Mesh();
 
         ~Mesh() noexcept;
-
-        enum class VertexAttributeType
-        {
-            Position,
-            Normal,
-            Tangent,
-            Color,
-            TexCoord,
-            Bone,
-            Weight,
-        };
-
-        struct VertexAttribute
-        {
-            VertexAttributeType type;
-            uint32_t stride;
-        };
-
-        enum class IndexType
-        {
-            Uint16,
-            Uint32,
-        };
 
         uint32_t addLOD();
 
@@ -80,7 +84,9 @@ namespace hyp
             return lod.submeshes[submeshIndex].materialIndex;
         }
 
-        const Boxf& getBoundingBox() const noexcept;
+        // 非 const:包围盒是懒计算的,首次调用(或 dirty 之后)可能需要临时 load 顶点 BulkData——
+        // 这是有副作用(可能触发磁盘 I/O)的操作,不该伪装成一个廉价的 const getter
+        const Boxf& getOrUpdateBoundingBox() noexcept;
 
         uint32_t getMaterialCount() const noexcept
         {
@@ -95,13 +101,17 @@ namespace hyp
 
         GeometryProxyHandle getOrCreateGeometryProxy(uint32_t lodLevel);
 
+        void postLoad() override;
+
+        void preSave() override;
+
     protected:
         void dirtyBound() noexcept
         {
             mBoundDirty = true;
         }
 
-        void updateBound() const noexcept;
+        void updateBound() noexcept;
 
         void createGeometryProxy(GeometryProxyHandle handle, uint32_t lodLevel);
 
@@ -119,21 +129,26 @@ namespace hyp
 
         struct LOD
         {
-            std::vector<uint8_t> vertexData;
+            BulkData vertexData;
             std::vector<VertexAttribute> vertexAttributes;
-            std::vector<uint8_t> indexData;
+            BulkData indexData;
             IndexType indexType;
             std::vector<Submesh> submeshes;
             float minScreenPercentage = 0.1f;
         };
 
         std::vector<LOD> mLODs;
-        std::vector<GeometryProxyHandle> mLODGeometryProxies;
         std::vector<TRef<Material>> mMaterials;
 
-        mutable Boxf mBoundingBox;
-        mutable bool mBoundDirty = true;
+        Boxf mBoundingBox;
+        bool mBoundDirty = true;
+
+        std::vector<GeometryProxyHandle> mLODGeometryProxies;
     };
+
+    template <> Type* Reflection::createType<Mesh::Submesh>();
+
+    template <> Type* Reflection::createType<Mesh::LOD>();
 
     template <> Type* Reflection::createType<Mesh>();
 }

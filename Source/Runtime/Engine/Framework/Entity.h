@@ -68,6 +68,7 @@ namespace hyp
                     return component;
                 }
             }
+            return nullptr;
         }
 
         template <typename T> requires std::is_base_of_v<Component, T>

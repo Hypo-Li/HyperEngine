@@ -1,11 +1,17 @@
 #include "AtmospherePass.h"
 #include "RenderPassUtils.h"
 
+#include <TransmittanceLut.generated.h>
+#include <MultiScatteringLut.generated.h>
+#include <SkyViewLut.generated.h>
+#include <AerialPerspectiveLut.generated.h>
+#include <Atmosphere.generated.h>
+
 namespace hyp
 {
     void AtmospherePass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const AtmosphereProxy& atmosphere
@@ -20,7 +26,6 @@ namespace hyp
 
     struct TransmittanceLutData
     {
-        SceneRendererContext* rendererContext;
         uint32_t sceneId;
         const AtmosphereProxy* atmosphere;
         rg::TextureHandle transmittanceLut;
@@ -29,13 +34,14 @@ namespace hyp
     struct TransmittanceLutStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<2>> perSceneCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<2>> perSceneCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void AtmospherePass::addTransmittanceLutPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const AtmosphereProxy& atmosphere)
     {
@@ -51,24 +57,25 @@ namespace hyp
             "TransmittanceLut"_hs,
             [&, transmittanceLutName](rg::RenderGraph::Builder& builder, TransmittanceLutData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.sceneId = scene.getSceneId();
                 data.atmosphere = &atmosphere;
-                auto transmittanceLut = builder.createTexture(
-                    transmittanceLutName,
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-                        VkExtent3D{ 256, 64, 1 },
-                        1, 1, 1
-                    }
-                );
+
+                rhi::TextureDesc desc;
+                desc.type = rhi::TextureType::Texture_2D;
+                desc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+                desc.extent = { 256, 64, 1 };
+                desc.mipCount = 1;
+                desc.layerCount = 1;
+                desc.samples = 1;
+                desc.usage = rhi::TextureUsage::Storage | rhi::TextureUsage::Sampled;
+                auto transmittanceLut = builder.createTexture(transmittanceLutName, desc);
+
                 data.transmittanceLut = builder.storage(transmittanceLut, rg::AccessType::Write_Only);
                 builder.getBlackboard().put(transmittanceLutName, data.transmittanceLut);
             },
-            [](rg::ExecuteContext& context, TransmittanceLutData& data)
+            [&rendererContext](rg::ExecuteContext& context, TransmittanceLutData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<AtmospherePass, TransmittanceLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, TransmittanceLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -76,31 +83,34 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "TransmittanceLut",
-                        SHADER_DIR "/Atmosphere/TransmittanceLut.slang"
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(TransmittanceLut, Compute))
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kTransmittanceLut_Bindings);
                 }
 
                 if (storage.perSceneCaches.size() <= data.sceneId)
                 {
                     storage.perSceneCaches.resize(data.sceneId + 1);
                 }
-                auto& descriptorCache = storage.perSceneCaches[data.sceneId];
+                auto& bindGroupCache = storage.perSceneCaches[data.sceneId];
 
-                VkBuffer atmosphereParameters = data.atmosphere->getParametersBuffer().getHandle();
-                VkImageView transmittanceLut = context.getTexture(data.transmittanceLut)->getHandle();
-                if (descriptorCache.needUpdate(atmosphereParameters, transmittanceLut))
+                rhi::Buffer* atmosphereParameters = &data.atmosphere->getParametersBuffer();
+                rhi::TextureView* transmittanceLut = context.getTexture(data.transmittanceLut);
+                if (bindGroupCache.needUpdate(atmosphereParameters, transmittanceLut))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // AtmosphereParams
-                        { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // TransmittanceLut
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_NULL_HANDLE, transmittanceLut, VK_IMAGE_LAYOUT_GENERAL);
+                            PassBindGroupWriter writer(generated::kTransmittanceLut_Bindings);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setTexture("TransmittanceLutImage", transmittanceLut);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -108,20 +118,19 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createComputePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = { descriptorCache.getDescriptorSet()->getHandle() };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.pipeline);
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Compute,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 cmd.dispatch(32, 8, 1);
@@ -131,7 +140,6 @@ namespace hyp
 
     struct MultiScatteringLutData
     {
-        SceneRendererContext* rendererContext;
         uint32_t sceneId;
         const AtmosphereProxy* atmosphere;
         rg::TextureHandle transmittanceLut;
@@ -141,13 +149,14 @@ namespace hyp
     struct MultiScatteringLutStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<3>> perSceneCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<4>> perSceneCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void AtmospherePass::addMultiScatteringLutPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const AtmosphereProxy& atmosphere
     )
@@ -164,18 +173,19 @@ namespace hyp
             "MultiScatteringLut"_hs,
             [&, multiScatteringLutName](rg::RenderGraph::Builder& builder, MultiScatteringLutData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.sceneId = scene.getSceneId();
                 data.atmosphere = &atmosphere;
-                auto multiScatteringLut = builder.createTexture(
-                    multiScatteringLutName,
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-                        VkExtent3D{ 32, 32, 1 },
-                        1, 1, 1
-                    }
-                );
+
+                rhi::TextureDesc desc;
+                desc.type = rhi::TextureType::Texture_2D;
+                desc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+                desc.extent = { 32, 32, 1 };
+                desc.mipCount = 1;
+                desc.layerCount = 1;
+                desc.samples = 1;
+                desc.usage = rhi::TextureUsage::Storage | rhi::TextureUsage::Sampled;
+                auto multiScatteringLut = builder.createTexture(multiScatteringLutName, desc);
+
                 auto& blackboard = builder.getBlackboard();
                 auto transmittanceLut = blackboard.get<rg::TextureHandle>("TransmittanceLut"_hs(scene.getSceneId()));
                 assert(transmittanceLut.isValid());
@@ -183,9 +193,9 @@ namespace hyp
                 data.multiScatteringLut = builder.storage(multiScatteringLut, rg::AccessType::Write_Only);
                 builder.getBlackboard().put(multiScatteringLutName, data.multiScatteringLut);
             },
-            [](rg::ExecuteContext& context, MultiScatteringLutData& data)
+            [&rendererContext](rg::ExecuteContext& context, MultiScatteringLutData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<AtmospherePass, MultiScatteringLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, MultiScatteringLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -193,35 +203,39 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "MultiScatteringLut",
-                        SHADER_DIR "/Atmosphere/MultiScatteringLut.slang"
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(MultiScatteringLut, Compute))
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kMultiScatteringLut_Bindings);
                 }
 
                 if (storage.perSceneCaches.size() <= data.sceneId)
                 {
                     storage.perSceneCaches.resize(data.sceneId + 1);
                 }
-                auto& descriptorCache = storage.perSceneCaches[data.sceneId];
+                auto& bindGroupCache = storage.perSceneCaches[data.sceneId];
 
-                VkBuffer atmosphereParameters = data.atmosphere->getParametersBuffer().getHandle();
-                VkImageView transmittanceLut = context.getTexture(data.transmittanceLut)->getHandle();
-                VkImageView multiScatteringLut = context.getTexture(data.multiScatteringLut)->getHandle();
-                if (descriptorCache.needUpdate(atmosphereParameters, transmittanceLut, multiScatteringLut))
+                rhi::Buffer* atmosphereParameters = &data.atmosphere->getParametersBuffer();
+                rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
+                rhi::TextureView* transmittanceLut = context.getTexture(data.transmittanceLut);
+                rhi::TextureView* multiScatteringLut = context.getTexture(data.multiScatteringLut);
+
+                if (bindGroupCache.needUpdate(atmosphereParameters, linearClampNoMipSampler, transmittanceLut, multiScatteringLut))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // AtmosphereParams
-                        { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // TransmittanceLut
-                        { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // MultiScatteringLut
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            VkSampler sampler = renderBackend.getDevice().getSamplerCache().getLinearClampNoMip()->getHandle();
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, transmittanceLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_NULL_HANDLE, multiScatteringLut, VK_IMAGE_LAYOUT_GENERAL);
+                            PassBindGroupWriter writer(generated::kMultiScatteringLut_Bindings);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setSampler("LutSampler", linearClampNoMipSampler);
+                            writer.setTexture("TransmittanceLutTexture", transmittanceLut);
+                            writer.setTexture("MultiScatteringLutImage", multiScatteringLut);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -229,20 +243,19 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createComputePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = { descriptorCache.getDescriptorSet()->getHandle()};
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.pipeline);
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Compute,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 cmd.dispatch(4, 4, 1);
@@ -252,7 +265,6 @@ namespace hyp
 
     struct SkyViewLutData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         const AtmosphereProxy* atmosphere;
         rg::TextureHandle transmittanceLut;
@@ -263,13 +275,14 @@ namespace hyp
     struct SkyViewLutStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<4>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<5>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void AtmospherePass::addSkyViewLutPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const AtmosphereProxy& atmosphere
@@ -279,18 +292,19 @@ namespace hyp
             "SkyViewLut"_hs,
             [&](rg::RenderGraph::Builder& builder, SkyViewLutData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.atmosphere = &atmosphere;
-                auto skyViewLut = builder.createTexture(
-                    "SkyViewLut"_hs(data.viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-                        VkExtent3D{ 192, 104, 1 },
-                        1, 1, 1
-                    }
-                );
+
+                rhi::TextureDesc desc;
+                desc.type = rhi::TextureType::Texture_2D;
+                desc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+                desc.extent = { 192, 104, 1 };
+                desc.mipCount = 1;
+                desc.layerCount = 1;
+                desc.samples = 1;
+                desc.usage = rhi::TextureUsage::Storage | rhi::TextureUsage::Sampled;
+                auto skyViewLut = builder.createTexture("SkyViewLut"_hs(data.viewId), desc);
+
                 auto& blackboard = builder.getBlackboard();
                 auto transmittanceLut = blackboard.get<rg::TextureHandle>("TransmittanceLut"_hs(scene.getSceneId()));
                 auto multiScatteringLut = blackboard.get<rg::TextureHandle>("MultiScatteringLut"_hs(scene.getSceneId()));
@@ -300,9 +314,9 @@ namespace hyp
                 data.skyViewLut = builder.storage(skyViewLut, rg::AccessType::Write_Only);
                 builder.getBlackboard().put("SkyViewLut"_hs(data.viewId), data.skyViewLut);
             },
-            [](rg::ExecuteContext& context, SkyViewLutData& data)
+            [&rendererContext](rg::ExecuteContext& context, SkyViewLutData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<AtmospherePass, SkyViewLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, SkyViewLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -310,38 +324,41 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "SkyViewLut",
-                        SHADER_DIR "/Atmosphere/SkyViewLut.slang"
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(SkyViewLut, Compute))
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kSkyViewLut_Bindings);
                 }
 
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
 
-                VkBuffer atmosphereParameters = data.atmosphere->getParametersBuffer().getHandle();
-                VkImageView transmittanceLut = context.getTexture(data.transmittanceLut)->getHandle();
-                VkImageView multiScatteringLut = context.getTexture(data.multiScatteringLut)->getHandle();
-                VkImageView skyViewLut = context.getTexture(data.skyViewLut)->getHandle();
-                if (descriptorCache.needUpdate(atmosphereParameters, transmittanceLut, multiScatteringLut, skyViewLut))
+                rhi::Buffer* atmosphereParameters = &data.atmosphere->getParametersBuffer();
+                rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
+                rhi::TextureView* transmittanceLut = context.getTexture(data.transmittanceLut);
+                rhi::TextureView* multiScatteringLut = context.getTexture(data.multiScatteringLut);
+                rhi::TextureView* skyViewLut = context.getTexture(data.skyViewLut);
+
+                if (bindGroupCache.needUpdate(atmosphereParameters, linearClampNoMipSampler, transmittanceLut, multiScatteringLut, skyViewLut))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                       { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // AtmosphereParams
-                       { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // TransmittanceLut
-                       { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // MultiScatteringLut
-                       { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // SkyViewLut
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            VkSampler sampler = renderBackend.getDevice().getSamplerCache().getLinearClampNoMip()->getHandle();
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, transmittanceLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, multiScatteringLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_NULL_HANDLE, skyViewLut, VK_IMAGE_LAYOUT_GENERAL);
+                            PassBindGroupWriter writer(generated::kSkyViewLut_Bindings);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setSampler("LutSampler", linearClampNoMipSampler);
+                            writer.setTexture("TransmittanceLutTexture", transmittanceLut);
+                            writer.setTexture("MultiScatteringLutTexture", multiScatteringLut);
+                            writer.setTexture("SkyViewLutImage", skyViewLut);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -349,20 +366,19 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createComputePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = { descriptorCache.getDescriptorSet()->getHandle()};
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.pipeline);
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Compute,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 cmd.dispatch(24, 13, 1);
@@ -372,7 +388,6 @@ namespace hyp
 
     struct AerialPerspectiveLutData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         const AtmosphereProxy* atmosphere;
         rg::TextureHandle transmittanceLut;
@@ -383,13 +398,14 @@ namespace hyp
     struct AerialPerspectiveLutStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<4>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<5>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void AtmospherePass::addAerialPerspectiveLutPass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const AtmosphereProxy& atmosphere
@@ -399,18 +415,19 @@ namespace hyp
             "AerialPerspectiveLutPass"_hs,
             [&](rg::RenderGraph::Builder& builder, AerialPerspectiveLutData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.atmosphere = &atmosphere;
-                auto aerialPerspectiveLut = builder.createTexture(
-                    "AerialPerspectiveLut"_hs(data.viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_3D,
-                        VK_FORMAT_R16G16B16A16_SFLOAT,
-                        VkExtent3D{ 32, 32, 32 },
-                        1, 1, 1
-                    }
-                );
+
+                rhi::TextureDesc desc;
+                desc.type = rhi::TextureType::Texture_3D;
+                desc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+                desc.extent = { 32, 32, 32 };
+                desc.mipCount = 1;
+                desc.layerCount = 1;
+                desc.samples = 1;
+                desc.usage = rhi::TextureUsage::Storage | rhi::TextureUsage::Sampled;
+                auto aerialPerspectiveLut = builder.createTexture("AerialPerspectiveLut"_hs(data.viewId), desc);
+
                 auto& blackboard = builder.getBlackboard();
                 auto transmittanceLut = blackboard.get<rg::TextureHandle>("TransmittanceLut"_hs(scene.getSceneId()));
                 auto multiScatteringLut = blackboard.get<rg::TextureHandle>("MultiScatteringLut"_hs(scene.getSceneId()));
@@ -420,9 +437,9 @@ namespace hyp
                 data.aerialPerspectiveLut = builder.storage(aerialPerspectiveLut, rg::AccessType::Write_Only);
                 builder.getBlackboard().put("AerialPerspectiveLut"_hs(data.viewId), data.aerialPerspectiveLut);
             },
-            [](rg::ExecuteContext& context, AerialPerspectiveLutData& data)
+            [&rendererContext](rg::ExecuteContext& context, AerialPerspectiveLutData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<AtmospherePass, AerialPerspectiveLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, AerialPerspectiveLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -430,59 +447,61 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "AerialPerspectiveLut",
-                        SHADER_DIR "/Atmosphere/AerialPerspectiveLut.slang"
+                        makeComputeBytecode(renderBackend.getRHIBackend(), GET_PASS_SHADER_BYTECODE(AerialPerspectiveLut, Compute))
                     );
                 }
-                
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kAerialPerspectiveLut_Bindings);
+                }
+
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
-                
-                VkBuffer atmosphereParameters = data.atmosphere->getParametersBuffer().getHandle();
-                VkImageView transmittanceLut = context.getTexture(data.transmittanceLut)->getHandle();
-                VkImageView multiScatteringLut = context.getTexture(data.multiScatteringLut)->getHandle();
-                VkImageView aerialPerspectiveLut = context.getTexture(data.aerialPerspectiveLut)->getHandle();
-                if (descriptorCache.needUpdate(atmosphereParameters, transmittanceLut, multiScatteringLut, aerialPerspectiveLut))
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
+
+                rhi::Buffer* atmosphereParameters = &data.atmosphere->getParametersBuffer();
+                rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
+                rhi::TextureView* transmittanceLut = context.getTexture(data.transmittanceLut);
+                rhi::TextureView* multiScatteringLut = context.getTexture(data.multiScatteringLut);
+                rhi::TextureView* aerialPerspectiveLut = context.getTexture(data.aerialPerspectiveLut);
+
+                if (bindGroupCache.needUpdate(atmosphereParameters, linearClampNoMipSampler, transmittanceLut, multiScatteringLut, aerialPerspectiveLut))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // AtmosphereParams
-                        { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // TransmittanceLut
-                        { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // MultiScatteringLut
-                        { 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }, // AerialPerspectiveLut
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            VkSampler sampler = renderBackend.getDevice().getSamplerCache().getLinearClampNoMip()->getHandle();
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, transmittanceLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, multiScatteringLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_NULL_HANDLE, aerialPerspectiveLut, VK_IMAGE_LAYOUT_GENERAL);
+                            PassBindGroupWriter writer(generated::kAerialPerspectiveLut_Bindings);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setSampler("LutSampler", linearClampNoMipSampler);
+                            writer.setTexture("TransmittanceLutTexture", transmittanceLut);
+                            writer.setTexture("MultiScatteringLutTexture", multiScatteringLut);
+                            writer.setTexture("AerialPerspectiveLutImage", aerialPerspectiveLut);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
-                
+
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createComputePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
-                
-                auto& cmd = context.getCommandBuffer();
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = { descriptorCache.getDescriptorSet()->getHandle()};
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+
+                auto& cmd = context.getCommandList();
+                cmd.bindPipeline(storage.pipeline);
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Compute,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 cmd.dispatch(8, 8, 8);
@@ -492,7 +511,6 @@ namespace hyp
 
     struct AtmosphereData
     {
-        SceneRendererContext* rendererContext;
         uint32_t viewId;
         float4 viewport;
         const AtmosphereProxy* atmosphere;
@@ -507,13 +525,14 @@ namespace hyp
     struct AtmosphereStorage
     {
         std::shared_ptr<PassShader> shader;
-        std::vector<DescriptorCache<6>> perViewCaches;
-        TRef<vk::Pipeline> pipeline;
+        TRef<rhi::BindGroupLayout> bindGroupLayout;
+        std::vector<BindGroupCache<7>> perViewCaches;
+        TRef<rhi::Pipeline> pipeline;
     };
 
     void AtmospherePass::addAtmospherePass(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const AtmosphereProxy& atmosphere
@@ -523,7 +542,6 @@ namespace hyp
             "Atmosphere"_hs,
             [&](rg::RenderGraph::Builder& builder, AtmosphereData& data)
             {
-                data.rendererContext = &rendererContext;
                 data.viewId = view.getViewId();
                 data.viewport = view.getViewport();
                 data.atmosphere = &atmosphere;
@@ -541,12 +559,12 @@ namespace hyp
                 data.skyViewLut = builder.sample(skyViewLut);
                 data.aerialPerspectiveLut = builder.sample(aerialPerspectiveLut);
                 data.sceneDepthD = builder.sample(sceneDepthD);
-                data.sceneColor = builder.addColorAttachment(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD);
+                data.sceneColor = builder.addColorAttachment(sceneColor, rhi::AttachmentLoadOp::Load);
                 blackboard.put("SceneColor"_hs(data.viewId), data.sceneColor);
             },
-            [](rg::ExecuteContext& context, AtmosphereData& data)
+            [&rendererContext](rg::ExecuteContext& context, AtmosphereData& data)
             {
-                static auto& storage = data.rendererContext->getPassStorage().getOrCreate<AtmospherePass, AtmosphereStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, AtmosphereStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -554,44 +572,56 @@ namespace hyp
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
                         "Atmosphere",
-                        SHADER_DIR "/Atmosphere/Atmosphere.slang"
+                        makeVertexFragmentBytecode(
+                            renderBackend.getRHIBackend(),
+                            GET_PASS_SHADER_BYTECODE(Atmosphere, Vertex),
+                            GET_PASS_SHADER_BYTECODE(Atmosphere, Fragment)
+                        )
                     );
+                }
+
+                if (!storage.bindGroupLayout)
+                {
+                    storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kAtmosphere_Bindings);
                 }
 
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& descriptorCache = storage.perViewCaches[data.viewId];
+                auto& bindGroupCache = storage.perViewCaches[data.viewId];
 
-                VkBuffer atmosphereParameters = data.atmosphere->getParametersBuffer().getHandle();
-                VkImageView transmittanceLut = context.getTexture(data.transmittanceLut)->getHandle();
-                VkImageView multiScatteringLut = context.getTexture(data.multiScatteringLut)->getHandle();
-                VkImageView skyViewLut = context.getTexture(data.skyViewLut)->getHandle();
-                VkImageView aerialPerspectiveLut = context.getTexture(data.aerialPerspectiveLut)->getHandle();
-                VkImageView sceneDepthD = context.getTexture(data.sceneDepthD)->getHandle();
-                if (descriptorCache.needUpdate(atmosphereParameters, transmittanceLut, multiScatteringLut, skyViewLut, aerialPerspectiveLut, sceneDepthD))
+                rhi::Buffer* atmosphereParameters = &data.atmosphere->getParametersBuffer();
+                rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
+                rhi::TextureView* transmittanceLut = context.getTexture(data.transmittanceLut);
+                rhi::TextureView* multiScatteringLut = context.getTexture(data.multiScatteringLut);
+                rhi::TextureView* skyViewLut = context.getTexture(data.skyViewLut);
+                rhi::TextureView* aerialPerspectiveLut = context.getTexture(data.aerialPerspectiveLut);
+                rhi::TextureView* sceneDepthD = context.getTexture(data.sceneDepthD);
+
+                if (bindGroupCache.needUpdate(
+                    atmosphereParameters,
+                    linearClampNoMipSampler,
+                    transmittanceLut,
+                    multiScatteringLut,
+                    skyViewLut,
+                    aerialPerspectiveLut,
+                    sceneDepthD))
                 {
-                    VkDescriptorSetLayoutBinding bindings[] = {
-                        { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // AtmosphereParams
-                        { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // TransmittanceLut
-                        { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // MultiScatteringLut
-                        { 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // SkyViewLut
-                        { 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // AerialPerspectiveLut
-                        { 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr} // SceneDepthD
-                    };
-                    descriptorCache.update(
+                    bindGroupCache.update(
                         renderBackend,
-                        bindings,
-                        [&](vk::DescriptorWriter& writer)
+                        *storage.bindGroupLayout,
+                        [&](rhi::BindGroup& bindGroup)
                         {
-                            VkSampler sampler = renderBackend.getDevice().getSamplerCache().getLinearClampNoMip()->getHandle();
-                            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
-                            writer.writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, transmittanceLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, multiScatteringLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, skyViewLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sampler, aerialPerspectiveLut, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-                            writer.writeImage(5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_NULL_HANDLE, sceneDepthD, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                            PassBindGroupWriter writer(generated::kAtmosphere_Bindings);
+                            writer.setBuffer("Atmosphere", atmosphereParameters, 0, sizeof(AtmosphereShaderParameters));
+                            writer.setSampler("LutSampler", linearClampNoMipSampler);
+                            writer.setTexture("TransmittanceLutTexture", transmittanceLut);
+                            writer.setTexture("MultiScatteringLutTexture", multiScatteringLut);
+                            writer.setTexture("SkyViewLutTexture", skyViewLut);
+                            writer.setTexture("AerialPerspectiveLutTexture", aerialPerspectiveLut);
+                            writer.setTexture("SceneDepthImage", sceneDepthD);
+                            writer.apply(bindGroup);
                         }
                     );
                 }
@@ -599,25 +629,22 @@ namespace hyp
                 if (!storage.pipeline)
                 {
                     storage.pipeline = createAtmospherePipeline(
-                        *data.rendererContext,
-                        storage.shader->getOrCreateVariant({}),
-                        descriptorCache.getDescriptorSet()->getLayout()
+                        rendererContext,
+                        storage.shader->getVariant(),
+                        *storage.bindGroupLayout
                     );
                 }
 
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
 
                 setViewportAndScissor(cmd, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline->getBindPoint(), storage.pipeline->getHandle());
-                VkDescriptorSet descriptorSets[] = {
-                    descriptorCache.getDescriptorSet()->getHandle()
-                };
-                cmd.bindDescriptorSets(
-                    storage.pipeline->getBindPoint(),
-                    storage.pipeline->getLayout().getHandle(),
+                cmd.bindPipeline(storage.pipeline);
+                cmd.setBindGroup(
                     2,
-                    descriptorSets,
+                    rhi::PipelineBindPoint::Graphics,
+                    &storage.pipeline->getLayout(),
+                    bindGroupCache.getBindGroup(),
                     {}
                 );
                 cmd.draw(3, 1, 0, 0);
@@ -625,36 +652,26 @@ namespace hyp
         );
     }
 
-    vk::Pipeline* AtmospherePass::createAtmospherePipeline(
-        SceneRendererContext& rendererContext,
+    rhi::Pipeline* AtmospherePass::createAtmospherePipeline(
+        RendererContext& rendererContext,
         ShaderVariant shaderVariant,
-        const vk::DescriptorSetLayout& descriptorSetLayout
+        const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, descriptorSetLayout.getHandle());
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
         PipelineCache::GraphicsKey pipelineKey;
+        pipelineKey.pipelineState = PipelineStatePresets::fullscreenTriangle();
         pipelineKey.pipelineState.shader = shaderVariant;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_List);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 0;
-        pipelineKey.pipelineState.depthWriteEnable = 0;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
-        pipelineKey.pipelineState.colorBlendState = ColorBlendState::get <
-            AttachmentBlendState{ VK_TRUE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, vk::kColorComponentAll }
-        > ();
+        pipelineKey.pipelineState.colorBlendState = ColorBlendState::get<
+            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::One, rhi::BlendFactor::One, rhi::BlendOp::Add, rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add, 0xFF }
+        >();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_UNDEFINED,
-            VK_FORMAT_R16G16B16A16_SFLOAT
+            rhi::TextureFormat::Undefined,
+            rhi::TextureFormat::RGBA16_SFLOAT
         >();
         pipelineKey.pipelineLayout = pipelineLayout;
         return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);
     }
-
 }

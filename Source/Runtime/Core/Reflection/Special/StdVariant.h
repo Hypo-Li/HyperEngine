@@ -39,6 +39,20 @@ namespace hyp
                 setValueImpl<I + 1>(variant, typeIndex, value);
         }
 
+        template <std::size_t I>
+        static const void* getValuePtrImpl(const T* variant)
+        {
+            if constexpr (I < std::variant_size_v<T>)
+            {
+                auto* ptr = std::get_if<I>(variant);
+                if (ptr)
+                    return static_cast<const void*>(ptr);
+                if constexpr (I + 1 < std::variant_size_v<T>)
+                    return getValuePtrImpl<I + 1>(variant);
+            }
+            return nullptr;
+        }
+
     public:
         virtual void construct(void* instance) const override
         {
@@ -70,16 +84,12 @@ namespace hyp
 
         virtual void* getValuePtr(void* instance) const override
         {
-            return std::visit([](auto&& value) -> void* {
-                return static_cast<void*>(&value);
-                }, *static_cast<T*>(instance));
+            return const_cast<void*>(getValuePtrImpl<0>(static_cast<T*>(instance)));
         }
 
         virtual const void* getValuePtr(const void* instance) const override
         {
-            return std::visit([](auto&& value) -> const void* {
-                return static_cast<const void*>(&value);
-                }, *static_cast<const T*>(instance));
+            return getValuePtrImpl<0>(static_cast<const T*>(instance));
         }
 
         virtual void setValue(void* instance, size_t typeIndex, const void* value) const  override

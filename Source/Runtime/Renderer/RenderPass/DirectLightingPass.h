@@ -1,7 +1,8 @@
 #pragma once
 #include "../SceneView.h"
 #include "../SceneProxy.h"
-#include "../SceneRendererContext.h"
+#include "../RendererContext.h"
+#include "../AtmosphereProxy.h"
 
 #include <RenderBase/RenderGraph/RenderGraph.h>
 
@@ -12,16 +13,17 @@ namespace hyp
     public:
         static void addToRenderGraph(
             rg::RenderGraph& renderGraph,
-            SceneRendererContext& rendererContext,
+            RendererContext& rendererContext,
             const SceneProxy& scene,
-            const SceneView& view
+            const SceneView& view,
+            const AtmosphereProxy* atmosphere
         );
 
     private:
-        static vk::Pipeline* createPipeline(
-            SceneRendererContext& rendererContext,
+        static rhi::Pipeline* createPipeline(
+            RendererContext& rendererContext,
             ShaderVariant shaderVariant,
-            const vk::DescriptorSetLayout& descriptorSetLayout
+            const rhi::BindGroupLayout& bindGroupLayout
         );
     };
 }

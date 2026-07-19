@@ -9,6 +9,10 @@ namespace hyp
         for (auto prop : mProperties)
             if (prop->getName() == name)
                 return prop;
+        if (mBaseClass)
+        {
+            return mBaseClass->getProperty(name);
+        }
         return nullptr;
     }
 

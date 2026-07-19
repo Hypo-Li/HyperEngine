@@ -5,6 +5,7 @@
 #include <array>
 #include <list>
 #include <map>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,7 @@
 #include <string>
 
 #include "../Common/HString.h"
+#include "../Common/BulkData.h"
 
 namespace hyp
 {
@@ -43,6 +45,7 @@ namespace hyp
         is_std_array_v<T> ||
         is_instance_of_v<T, std::list> ||
         is_instance_of_v<T, std::map> ||
+        is_instance_of_v<T, std::optional> ||
         is_instance_of_v<T, std::pair> ||
         is_instance_of_v<T, std::set> ||
         std::is_same_v<T, std::string> ||
@@ -50,7 +53,8 @@ namespace hyp
         is_instance_of_v<T, std::unordered_set> ||
         is_instance_of_v<T, std::variant> ||
         is_instance_of_v<T, std::vector> ||
-        std::is_same_v<T, HString>;
+        std::is_same_v<T, HString> ||
+        std::is_same_v<T, BulkData>;
 
     class Special : public Type
     {
@@ -60,6 +64,7 @@ namespace hyp
             StdArray,
             StdList,
             StdMap,
+            StdOptional,
             StdPair,
             StdSet,
             StdString,
@@ -68,7 +73,8 @@ namespace hyp
             StdVariant,
             StdVector,
 
-            HyperHString,
+            HypHString,
+            BulkData,
         };
 
         Case getCase() const

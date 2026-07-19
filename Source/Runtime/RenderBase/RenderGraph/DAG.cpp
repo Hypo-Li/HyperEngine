@@ -5,28 +5,43 @@
 namespace hyp::rg
 {
     DAG::DAG(Arena& arena)
-        : mNodes(StlAllocator<Node*>(arena)),
+        : mArena(arena),
+        mNodes(StlAllocator<Node*>(arena)),
         mEdges(StlAllocator<Edge>(arena))
     {
         mNodes.reserve(8);
         mEdges.reserve(16);
     }
 
+    DAG::Node::Node(DAG& dag, Type type)
+        : mType(type),
+        mIncomingEdges(StlAllocator<uint32_t>(dag.getArena())),
+        mOutgoingEdges(StlAllocator<uint32_t>(dag.getArena()))
+    {
+        mIncomingEdges.reserve(4);
+        mOutgoingEdges.reserve(4);
+        dag.addNode(this);
+    }
+
     void DAG::link(Node* from, Node* to)
     {
+        uint32_t edgeIndex = static_cast<uint32_t>(mEdges.size());
         mEdges.emplace_back(from, to);
+        from->mOutgoingEdges.push_back(edgeIndex);
+        to->mIncomingEdges.push_back(edgeIndex);
     }
 
     void DAG::cull()
     {
-        for (const Edge& edge : mEdges)
-            edge.from->mRefCount++;
-
         std::stack<Node*> culledNodeStack;
         for (Node* node : mNodes)
         {
-            if (node->isCulled())
-                culledNodeStack.push(node);
+            if (!node->isTarget())
+            {
+                node->mRefCount = static_cast<uint32_t>(node->mOutgoingEdges.size());
+                if (node->isCulled())
+                    culledNodeStack.push(node);
+            }
         }
 
         while (!culledNodeStack.empty())
@@ -34,23 +49,29 @@ namespace hyp::rg
             Node* node = culledNodeStack.top();
             culledNodeStack.pop();
 
-            for (Edge& edge : mEdges)
+            for (uint32_t edgeIndex : node->mIncomingEdges)
             {
-                if (edge.to == node)
-                {
-                    if (--edge.from->mRefCount == 0)
-                    {
-                        culledNodeStack.push(edge.from);
-                    }
-                }
+                Edge& edge = mEdges[edgeIndex];
+                Node* from = edge.from;
+
+                if (from->isTarget())
+                    continue;
+
+                if (--from->mRefCount == 0)
+                    culledNodeStack.push(from);
             }
         }
 
-        buildReachability();
+        //buildReachability();
     }
 
     void DAG::clear()
     {
+        for (Node* node : mNodes)
+        {
+            node->mIncomingEdges.clear();
+            node->mOutgoingEdges.clear();
+        }
         mNodes.clear();
         mEdges.clear();
     }

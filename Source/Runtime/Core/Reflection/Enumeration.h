@@ -2,15 +2,15 @@
 #include "Type.h"
 
 #include <vector>
+#include <span>
 
 namespace hyp
 {
-    // TODO: 需要支持 bitmask 枚举
     class Enumeration : public Type
     {
     public:
-        virtual void setValue(void* instance, int64_t value) const = 0;
-        virtual int64_t getValue(void* instance) const = 0;
+        virtual void setValue(void* instance, uint64_t value) const = 0;
+        virtual uint64_t getValue(const void* instance) const = 0;
 
         bool isBitMask() const noexcept
         {
@@ -24,21 +24,25 @@ namespace hyp
 
         size_t getIndexByName(HString name) const noexcept;
 
-        size_t getIndexByValue(int64_t value) const noexcept;
+        size_t getIndexByValue(uint64_t value) const noexcept;
 
         HString getNameByIndex(size_t index) const noexcept;
 
-        int64_t getValueByIndex(size_t index) const noexcept;
+        uint64_t getValueByIndex(size_t index) const noexcept;
 
-        HString getNameByValue(int64_t value) const noexcept;
+        HString getNameByValue(uint64_t value) const noexcept;
 
-        int64_t getValueByName(HString name) const noexcept;
+        uint64_t getValueByName(HString name) const noexcept;
+
+        std::vector<HString> getFlagNames(const void* instance) const;
+
+        void setFlagsByNames(void* instance, std::span<HString> names) const;
 
     protected:
         Enumeration(HString name, size_t size, bool isBitMask);
 
         bool mIsBitMask = false;
-        std::vector<std::pair<HString, int64_t>> mValues;
+        std::vector<std::pair<HString, uint64_t>> mValues;
     };
 
     class Reflection;
@@ -61,19 +65,19 @@ namespace hyp
             return *static_cast<const T*>(instance1) == *static_cast<const T*>(instance2);
         }
 
-        virtual void setValue(void* instance, int64_t value) const override
+        virtual void setValue(void* instance, uint64_t value) const override
         {
             *static_cast<UnderlyingType*>(instance) = static_cast<UnderlyingType>(value);
         }
 
-        virtual int64_t getValue(void* instance) const override
+        virtual uint64_t getValue(const void* instance) const override
         {
-            return static_cast<int64_t>(*(UnderlyingType*)(instance));
+            return static_cast<const uint64_t>(*(const UnderlyingType*)(instance));
         }
 
         void addValue(HString name, T value)
         {
-            mValues.emplace_back(name, static_cast<int64_t>(value));
+            mValues.emplace_back(name, static_cast<uint64_t>(value));
         }
 
     protected:

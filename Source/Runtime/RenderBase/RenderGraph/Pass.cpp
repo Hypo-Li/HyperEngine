@@ -1,58 +1,66 @@
 #include "Pass.h"
+#include "../FrameContext.h"
 #include "../RenderBackend.h"
 
 #include <Core/Math/Vector.h>
 
+#include <cassert>
+
 namespace hyp::rg
 {
-    ExecuteContext::ExecuteContext(RenderGraph& renderGraph, RenderBackend& renderBackend, vk::CommandBuffer& commandBuffer, vk::Swapchain& swapchain, uint32_t frameIndex) :
-        mRenderGraph(renderGraph),
+    ExecuteContext::ExecuteContext(
+        RenderGraph& renderGraph,
+        RenderBackend& renderBackend,
+        rhi::CommandList& commandList,
+        rhi::Swapchain& swapchain,
+        uint32_t frameIndex
+    ) : mRenderGraph(renderGraph),
         mRenderBackend(renderBackend),
-        mCommandBuffer(commandBuffer),
+        mCommandList(commandList),
         mSwapchain(swapchain),
         mFrameIndex(frameIndex)
     {
 
     }
 
-    vk::Buffer* ExecuteContext::getBuffer(BufferHandle handle) const noexcept
+    rhi::Buffer* ExecuteContext::getBuffer(BufferHandle handle) const noexcept
     {
         return mRenderGraph.getBuffer(handle);
     }
 
-    vk::ImageView* ExecuteContext::getTexture(TextureHandle handle) const noexcept
+    rhi::TextureView* ExecuteContext::getTexture(TextureHandle handle) const noexcept
     {
         return mRenderGraph.getTexture(handle);
     }
 
-    void ExecuteContext::beginRenderPass() const noexcept
+    void ExecuteContext::beginPass() const noexcept
     {
-        mPass->beginRenderPass(mCommandBuffer);
+        mPass->beginPass(mCommandList);
     }
 
-    void ExecuteContext::endRenderPass() const noexcept
+    void ExecuteContext::endPass() const noexcept
     {
-        mPass->endRenderPass(mCommandBuffer);
+        mPass->endPass(mCommandList);
     }
 
-    std::span<const VkBufferMemoryBarrier2> ExecuteContext::getPassPrevBufferBarriers(uint16_t begin, uint16_t count) const noexcept
+    std::span<const rhi::BufferBarrier> ExecuteContext::getPrePassBufferBarriers(uint16_t begin, uint16_t count) const noexcept
     {
-        return mRenderGraph.getTransientResources().getPassPrevBufferBarriers(begin, count);
+        return mRenderGraph.getTransientResources().getPrePassBufferBarriers(begin, count);
     }
 
-    std::span<const VkImageMemoryBarrier2> ExecuteContext::getPassPrevImageBarriers(uint16_t begin, uint16_t count) const noexcept
+    std::span<const rhi::TextureBarrier> ExecuteContext::getPrePassTextureBarriers(uint16_t begin, uint16_t count) const noexcept
     {
-        return mRenderGraph.getTransientResources().getPassPrevImageBarriers(begin, count);
+        return mRenderGraph.getTransientResources().getPrePassTextureBarriers(begin, count);
     }
 
-    std::span<const VkBufferMemoryBarrier2> ExecuteContext::getPassPostBufferBarriers(uint16_t begin, uint16_t count) const noexcept
+    std::span<const rhi::BufferBarrier> ExecuteContext::getPostPassBufferBarriers(uint16_t begin, uint16_t count) const noexcept
     {
-        return mRenderGraph.getTransientResources().getPassPostBufferBarriers(begin, count);
+        return mRenderGraph.getTransientResources().getPostPassBufferBarriers(begin, count);
     }
 
-    std::span<const VkImageMemoryBarrier2> ExecuteContext::getPassPostImageBarriers(uint16_t begin, uint16_t count) const noexcept
+    std::span<const rhi::TextureBarrier> ExecuteContext::getPostPassTextureBarriers(uint16_t begin, uint16_t count) const noexcept
     {
-        return mRenderGraph.getTransientResources().getPassPostImageBarriers(begin, count);
+        return mRenderGraph.getTransientResources().getPostPassTextureBarriers(begin, count);
     }
 
     PassBase::PassBase(HString name, PassType type, PassFlags flags, Arena& arena)
@@ -61,171 +69,155 @@ namespace hyp::rg
         mDependencyRecords.reserve(8);
     }
 
-    void PassBase::prevExecute(ExecuteContext& context)
+    void PassBase::preExecute(ExecuteContext& context)
     {
         context.setPass(this);
 
-        auto& cmd = context.getCommandBuffer();
+        auto& cmdList = context.getCommandList();
 
+        // 按 PassType 的声明顺序(Compute/Graphics/Present/Transfer)一一对应, 供 GPU 调试工具
+        // (RenderDoc/PIX/Xcode GPU Frame Capture 等)在 timeline 上按 pass 类型区分颜色。
+        // Transfer 选用暖色调的琥珀/金色 —— 一是与已有的蓝(Compute)/红(Graphics)/绿(Present)
+        // 在色相上离得足够远(现有三者集中在 0°~202° 这段, 琥珀色在 ~45°, 是从红色顺时针方向
+        // 最容易分辨的下一个色相), 二是很多 GPU profiler 习惯用暖黄/橙色标记纯数据搬运
+        // (copy/upload)类操作, 符合直觉。
         static constexpr float4 kPassColor[] = {
-            { 0.1765f, 0.6118f, 0.8588f, 1.0f },
-            { 0.9216f, 0.3412f, 0.3412f, 1.0f },
-            { 0.1529f, 0.6823f, 0.3765f, 1.0f }
+            { 0.1765f, 0.6118f, 0.8588f, 1.0f }, // Compute: 蓝
+            { 0.9216f, 0.3412f, 0.3412f, 1.0f }, // Graphics: 红
+            { 0.1529f, 0.6823f, 0.3765f, 1.0f }, // Present: 绿
+            { 1.0000f, 0.7020f, 0.0000f, 1.0f }  // Transfer: 琥珀/金
         };
 
-        cmd.beginDebugUtilsLabelExt(getName().toCString(), kPassColor[static_cast<uint8_t>(mType)]);
+        cmdList.beginDebugGroup(getName().toCString(), kPassColor[static_cast<uint8_t>(mType)]);
 
-        if (mPrevBufferBarrierCount || mPrevImageBarrierCount)
+        if (mPreBufferBarrierCount || mPreTextureBarrierCount)
         {
-            cmd.pipelineBarrier2(
-                context.getPassPrevBufferBarriers(mPrevBufferBarrierBegin, mPrevBufferBarrierCount),
-                context.getPassPrevImageBarriers(mPrevImageBarrierBegin, mPrevImageBarrierCount)
+            cmdList.insertBarriers(
+                context.getPrePassBufferBarriers(mPreBufferBarrierBegin, mPreBufferBarrierCount),
+                context.getPrePassTextureBarriers(mPreTextureBarrierBegin, mPreTextureBarrierCount)
             );
         }
     }
 
     void PassBase::postExecute(ExecuteContext& context)
     {
-        auto& cmd = context.getCommandBuffer();
+        auto& cmdList = context.getCommandList();
 
-        if (mPostBufferBarrierCount || mPostImageBarrierCount)
+        if (mPostBufferBarrierCount || mPostTextureBarrierCount)
         {
-            cmd.pipelineBarrier2(
-                context.getPassPostBufferBarriers(mPostBufferBarrierBegin, mPostBufferBarrierCount),
-                context.getPassPostImageBarriers(mPostImageBarrierBegin, mPostImageBarrierCount)
+            cmdList.insertBarriers(
+                context.getPostPassBufferBarriers(mPostBufferBarrierBegin, mPostBufferBarrierCount),
+                context.getPostPassTextureBarriers(mPostTextureBarrierBegin, mPostTextureBarrierCount)
             );
         }
 
-        cmd.endDebugUtilsLabelExt();
+        cmdList.endDebugGroup();
     }
 
-    void GraphicsPass::devirtualize(TransientResources& transientResources)
+    void ComputePass::beginPass(rhi::CommandList& cmdList) noexcept
     {
-        mRenderPass = transientResources.acquireRenderPass(mRenderPassKey);
-        mFramebufferKey.renderPass = mRenderPass;
-        mFramebuffer = transientResources.acquireFramebuffer(mFramebufferKey);
+        cmdList.beginComputePass();
     }
 
-    void GraphicsPass::resolveFramebufferKey(RenderGraph& renderGraph)
+    void ComputePass::endPass(rhi::CommandList& cmdList) noexcept
     {
-        TextureHandle validTextureHandle = mColorAttachmentCount ? mColorAttachments[0] : mDepthStencilAttachment;
-        vk::ImageView* validImageView = renderGraph.getTexture(validTextureHandle);
-        uint32_t mipLevel = validImageView->getRange().baseMipLevel;
-        VkExtent3D extent = validImageView->getImage().getExtent();
-        extent.width = std::max(extent.width / (1 << mipLevel), 1u);
-        extent.height = std::max(extent.height / (1 << mipLevel), 1u);
-        uint32_t layerCount = validImageView->getRange().layerCount;
-        uint8_t samples = validImageView->getImage().getSamples();
-
-        mFramebufferKey.width = static_cast<uint16_t>(extent.width);
-        mFramebufferKey.height = static_cast<uint16_t>(extent.height);
-        mFramebufferKey.layers = static_cast<uint16_t>(layerCount);
-        mFramebufferKey.samples = static_cast<uint16_t>(samples);
-
-        if (mRenderArea.extent.width == 0 || mRenderArea.extent.height == 0)
-        {
-            mRenderArea.extent = { extent.width, extent.height };
-        }
-
-        for (uint32_t i = 0; i < mColorAttachmentCount; ++i)
-        {
-            mFramebufferKey.colors[i] = renderGraph.getTexture(mColorAttachments[i])->getHandle();
-        }
-        if (mDepthStencilAttachment.isValid())
-            mFramebufferKey.depthStencil = renderGraph.getTexture(mDepthStencilAttachment)->getHandle();
+        cmdList.endComputePass();
     }
 
-    void GraphicsPass::beginRenderPass(vk::CommandBuffer& cmd) noexcept
+    void TransferPass::beginPass(rhi::CommandList&) noexcept
     {
-        VkClearValue clearValues[kMaxColorAttachmentCount + 1];
-        for (uint8_t i = 0; i < mColorAttachmentCount; ++i)
-        {
-            clearValues[i].color = convertToVkClearColorValue(mClearColorValues[i]);
-        }
-        clearValues[mColorAttachmentCount].depthStencil = convertToVkClearDepthStencilValue(mClearDepthStencilValue);
+        // 正常情况下不会走到这里 —— TTransferPass::execute() 从不调用 beginPass()/endPass(),
+        // 见其注释。这里断言而不是悄悄地什么都不做, 是为了让"execute 回调里误调用了
+        // context.beginPass()"这种误用在调试期就暴露出来, 而不是表现为一次诡异的空操作。
+        assert(false && "TransferPass never enters a pass scope; use ComputePass/GraphicsPass if the execute callback needs to dispatch/draw");
+    }
 
-        cmd.beginRenderPass(
-            mRenderPass->getHandle(),
-            mFramebuffer->getHandle(),
+    void TransferPass::endPass(rhi::CommandList&) noexcept
+    {
+        assert(false && "TransferPass never enters a pass scope; use ComputePass/GraphicsPass if the execute callback needs to dispatch/draw");
+    }
+
+    void GraphicsPass::beginPass(rhi::CommandList& cmdList) noexcept
+    {
+        cmdList.beginRenderPass(
             mRenderArea,
-            std::span<const VkClearValue>(clearValues, mColorAttachmentCount + (mDepthStencilAttachment.isValid() ? 1 : 0))
+            mDepthStencilAttachmentInfo,
+            { mColorAttachmentInfos.data(), mColorAttachmentCount}
         );
     }
 
-    void GraphicsPass::endRenderPass(vk::CommandBuffer& cmd) noexcept
+    void GraphicsPass::endPass(rhi::CommandList& cmdList) noexcept
     {
-        cmd.endRenderPass();
+        cmdList.endRenderPass();
     }
 
-    void GraphicsPass::addColorAttachment(TextureHandle color, VkAttachmentLoadOp loadOp, ClearColorValue clearColorValue)
+    void GraphicsPass::addColorAttachment(TextureHandle color, rhi::AttachmentLoadOp loadOp, rhi::ClearColorValue clearColorValue)
     {
         mColorAttachments[mColorAttachmentCount] = color;
-        mColorAttachmentLoadOps[mColorAttachmentCount] = convertFromVkAttachmentLoadOp(loadOp);
-        mClearColorValues[mColorAttachmentCount] = clearColorValue;
+        mColorAttachmentInfos[mColorAttachmentCount].loadOp = loadOp;
+        mColorAttachmentInfos[mColorAttachmentCount].clearColor = clearColorValue;
         ++mColorAttachmentCount;
     }
 
-    void GraphicsPass::addDepthStencilAttachment(TextureHandle depthStencil, VkAttachmentLoadOp depthLoadOp, VkAttachmentLoadOp stencilLoadOp, ClearDepthStencilValue clearDepthStencilValue)
+    void GraphicsPass::addDepthStencilAttachment(
+        TextureHandle depthStencil,
+        rhi::AttachmentLoadOp depthLoadOp,
+        rhi::AttachmentLoadOp stencilLoadOp,
+        rhi::ClearDepthStencilValue clearDepthStencilValue
+    )
     {
         mDepthStencilAttachment = depthStencil;
-        mDepthAttachmentLoadOp = convertFromVkAttachmentLoadOp(depthLoadOp);
-        mStencilAttachmentLoadOp = convertFromVkAttachmentLoadOp(stencilLoadOp);
-        mClearDepthStencilValue = clearDepthStencilValue;
+        mDepthStencilAttachmentInfo.depthLoadOp = depthLoadOp;
+        mDepthStencilAttachmentInfo.stencilLoadOp = stencilLoadOp;
+        mDepthStencilAttachmentInfo.clearDepthStencil = clearDepthStencilValue;
     }
 
-    void GraphicsPass::setRenderArea(VkRect2D renderArea)
+    void GraphicsPass::setRenderArea(rhi::RenderArea renderArea)
     {
         mRenderArea = renderArea;
     }
 
-    void PresentPass::setSwapchain(vk::Swapchain* swapchain) noexcept
+    void PresentPass::setSwapchain(rhi::Swapchain* swapchain) noexcept
     {
         mSwapchain = swapchain;
-
-        AttachmentKey& attachmentKey = mRenderPassKey.colorAttachments[0];
-        attachmentKey.format = convertFromVkFormat(mSwapchain->getSurfaceFormat().format);
-        attachmentKey.loadOp = AttachmentLoadOp::Clear;
-        attachmentKey.storeOp = AttachmentStoreOp::Store;
-        attachmentKey.layout = ImageLayout::Color_Attachment_Optimal;
-
-        mRenderPassKey.flags |= RenderPassFlags::Present;
     }
 
-    void PresentPass::devirtualize(TransientResources& transientResources)
+    void PresentPass::beginPass(rhi::CommandList& cmdList) noexcept
     {
-        mRenderPass = transientResources.acquireRenderPass(mRenderPassKey);
+        rhi::TextureView* swapchainTextureView = mSwapchain->getCurrentTextureView();
+        rhi::TextureBarrier presentBarrier;
+        presentBarrier.texture = &swapchainTextureView->getTexture();
+        presentBarrier.range = swapchainTextureView->getDesc().range;
+        presentBarrier.oldState = rhi::ResourceState::Present;
+        presentBarrier.newState = rhi::ResourceState::Color_Attachment;
 
-        VkExtent2D swapchainExtent = mSwapchain->getExtent();
-        assert(mFramebuffers.size() == mSwapchain->getImageCount());
-        for (uint32_t i = 0; i < mSwapchain->getImageCount(); ++i)
-        {
-            FramebufferKey framebufferKey;
-            framebufferKey.renderPass = mRenderPass;
-            framebufferKey.width = swapchainExtent.width;
-            framebufferKey.height = swapchainExtent.height;
-            framebufferKey.layers = 1;
-            framebufferKey.samples = 1;
-            framebufferKey.colors[0] = mSwapchain->getImageView(i)->getHandle();
+        cmdList.insertBarriers({}, { &presentBarrier, 1 });
 
-            mFramebuffers[i] = transientResources.acquireFramebuffer(framebufferKey);
-        }
-    }
-
-    void PresentPass::beginRenderPass(vk::CommandBuffer& cmd) noexcept
-    {
-        VkClearValue clearValue = { .color = {0.0f, 0.0f, 0.0f, 1.0f} };
-        VkClearValue clearValues[] = { clearValue };
-        cmd.beginRenderPass(
-            mRenderPass->getHandle(),
-            mFramebuffers[mSwapchain->getCurrentImageIndex()]->getHandle(),
-            { {0, 0}, mSwapchain->getExtent() },
-            clearValues
+        uint2 swapchainExtent = mSwapchain->getExtent();
+        mColorAttachmentInfo.textureView = mSwapchain->getCurrentTextureView();
+        mColorAttachmentInfo.loadOp = rhi::AttachmentLoadOp::Clear;
+        mColorAttachmentInfo.storeOp = rhi::AttachmentStoreOp::Store;
+        mColorAttachmentInfo.clearColor = rhi::ClearColorValue{ float4(0.0, 0.0, 0.0, 0.0) };
+        rhi::RenderArea renderArea = { 0, 0, swapchainExtent.x, swapchainExtent.y };
+        rhi::DepthStencilAttachmentInfo depthStencilAttachmentInfo{};
+        cmdList.beginRenderPass(
+            renderArea,
+            depthStencilAttachmentInfo,
+            { &mColorAttachmentInfo, 1 }
         );
     }
 
-    void PresentPass::endRenderPass(vk::CommandBuffer& cmd) noexcept
+    void PresentPass::endPass(rhi::CommandList& cmdList) noexcept
     {
-        cmd.endRenderPass();
+        cmdList.endRenderPass();
+
+        rhi::TextureView* swapchainTextureView = mSwapchain->getCurrentTextureView();
+        rhi::TextureBarrier presentBarrier;
+        presentBarrier.texture = &swapchainTextureView->getTexture();
+        presentBarrier.range = swapchainTextureView->getDesc().range;
+        presentBarrier.oldState = rhi::ResourceState::Color_Attachment;
+        presentBarrier.newState = rhi::ResourceState::Present;
+        cmdList.insertBarriers({}, { &presentBarrier, 1 });
     }
 
     PassNode::PassNode(DAG& dag, PassBase* pass) noexcept

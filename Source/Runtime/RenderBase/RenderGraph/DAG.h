@@ -12,6 +12,8 @@ namespace hyp::rg
     public:
         DAG(Arena& arena);
 
+        Arena& getArena() noexcept { return mArena; }
+
         class Node
         {
             friend class DAG;
@@ -22,10 +24,7 @@ namespace hyp::rg
                 Resource,
             };
 
-            Node(DAG& dag, Type type) : mType(type)
-            {
-                dag.addNode(this);
-            }
+            Node(DAG& dag, Type type);
 
             Type getType() const noexcept
             {
@@ -53,6 +52,9 @@ namespace hyp::rg
             static constexpr uint32_t kTarget = 0x80000000u;
             uint32_t mRefCount = 0;
             Type mType;
+
+            ArenaVector<uint32_t> mIncomingEdges;
+            ArenaVector<uint32_t> mOutgoingEdges;
         };
 
         struct Edge
@@ -98,6 +100,7 @@ namespace hyp::rg
         void buildReachability();
 
     private:
+        Arena& mArena;
         ArenaVector<Node*> mNodes;
         ArenaVector<Edge> mEdges;
 

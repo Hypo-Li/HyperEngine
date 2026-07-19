@@ -6,60 +6,61 @@
 #include "RenderPass/DirectLightingPass.h"
 #include "RenderPass/AtmospherePass.h"
 #include "RenderPass/SkyLightPass.h"
+#include "RenderPass/IndirectLightingPass.h"
 #include "RenderPass/GSplatPass.h"
+#include "RenderPass/TranslucentPass.h"
+#include "RenderPass/PresentPass.h"
 
 namespace hyp
 {
     struct PrepareData
     {
-        VkPipelineLayout globalPipelineLayout;
-        VkDescriptorSet sceneAndViewDescriptorSet;
+        const rhi::PipelineLayout* globalPipelineLayout;
+        const rhi::BindGroup* sceneAndViewBindGroup;
         uint32_t viewDataDynamicOffset;
-    };
-
-    struct PresentData
-    {
-        rg::TextureHandle sceneColor;
     };
 
     void DeferredPipeline::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const RenderData& renderData
     )
     {
-        renderGraph.addComputePass<PrepareData>(
+        // setBindGroup 不需要处于任何 pass 的 begin/end 范围内: Vulkan 的 vkCmdBindDescriptorSets
+        // 本就无条件立即执行, 不看当前是否在 render/compute pass 里; WebGPU 后端的
+        // setBindGroupBackend 专门实现了延迟绑定 —— pass 外调用会缓存进
+        // mPendingGraphicsBindGroups/mPendingComputeBindGroups, 等下一次 beginRenderPass/
+        // beginComputePass 时自动重放到新开的 pass encoder 上(见 WebGPU/CommandList.cpp)。
+        // 换成 TransferPass 后, 这个 pass 不再需要包一层从未真正被用到的空 compute pass。
+        renderGraph.addTransferPass<PrepareData>(
             "Prepare"_hs,
             [&](rg::RenderGraph::Builder& builder, PrepareData& data)
             {
                 builder.markSideEffect();
-                data.globalPipelineLayout = rendererContext.getGlobalPipelineLayout().getHandle();
-                data.sceneAndViewDescriptorSet = scene.getSceneAndViewDescriptorSet().getHandle();
+                data.globalPipelineLayout = &rendererContext.getGlobalPipelineLayout();
+                data.sceneAndViewBindGroup = &scene.getSceneAndViewBindGroup();
 
                 auto& viewDataManager = rendererContext.getViewDataManager();
                 data.viewDataDynamicOffset = viewDataManager.getViewDataDynamicOffset(view.getViewId());
             },
             [](rg::ExecuteContext& context, PrepareData& data)
             {
-                auto& cmd = context.getCommandBuffer();
+                rhi::CommandList& cmdList = context.getCommandList();
 
-                VkPipelineBindPoint bindPoints[] = {
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR
+                rhi::PipelineBindPoint bindPoints[] = {
+                    rhi::PipelineBindPoint::Graphics,
+                    rhi::PipelineBindPoint::Compute
                 };
-                VkDescriptorSet descriptorSets[] = { data.sceneAndViewDescriptorSet };
-                uint32_t dynamicOffsets[] = { data.viewDataDynamicOffset };
                 for (auto bindPoint : bindPoints)
                 {
-                    cmd.bindDescriptorSets(
+                    cmdList.setBindGroup(
+                        1,
                         bindPoint,
                         data.globalPipelineLayout,
-                        1,
-                        descriptorSets,
-                        dynamicOffsets
+                        data.sceneAndViewBindGroup,
+                        { &data.viewDataDynamicOffset, 1 }
                     );
                 }
             }
@@ -67,108 +68,50 @@ namespace hyp
 
         GBufferPass::addToRenderGraph(renderGraph, rendererContext, scene, view, renderData);
 
-        DirectLightingPass::addToRenderGraph(renderGraph, rendererContext, scene, view);
-
+        // DirectLightingPass 现在要按太阳光穿过大气的透过率衰减直接光照, 需要读 AtmospherePass
+        // 产出的 TransmittanceLut(通过 blackboard), 必须排在 AtmospherePass 后面
         AtmosphereProxy* activeAtmosphere = scene.getActiveAtmosphereProxy();
         if (activeAtmosphere)
         {
             AtmospherePass::addToRenderGraph(renderGraph, rendererContext, scene, view, *activeAtmosphere);
-            SkyLightPass::addToRenderGraph(renderGraph, rendererContext, scene, view, *activeAtmosphere);
+        }
+
+        DirectLightingPass::addToRenderGraph(renderGraph, rendererContext, scene, view, activeAtmosphere);
+
+        SkyLightProxy* activeSkyLight = scene.getActiveSkyLightProxy();
+        if (activeSkyLight)
+        {
+            SkyLightPass::addToRenderGraph(
+                renderGraph,
+                rendererContext,
+                scene,
+                *activeSkyLight,
+                activeAtmosphere
+            );
+            IndirectLightingPass::addToRenderGraph(renderGraph, rendererContext, scene, view, *activeSkyLight);
         }
 
         GSplatScene* gsplatScene = scene.getGSplatScene();
         if (gsplatScene && gsplatScene->getTotalSplatCount())
         {
-            GSplatPass::addToRenderGraph(renderGraph, rendererContext, view, *gsplatScene);
+            GSplatPass::addToRenderGraph(renderGraph, rendererContext, scene, view, *gsplatScene);
         }
 
-        renderGraph.addPresentPass<PresentData>(
-            "Present"_hs,
-            [&](rg::RenderGraph::Builder& builder, PresentData& data)
-            {
-                uint32_t viewId = view.getViewId();
-                rg::Blackboard& blackboard = builder.getBlackboard();
-                rg::TextureHandle sceneColor = blackboard.get<rg::TextureHandle>("SceneColor"_hs(viewId));
-                data.sceneColor = builder.transfer(sceneColor, rg::AccessType::Read_Only);
-            },
-            [](rg::ExecuteContext& context, PresentData& data)
-            {
-                auto& swapchain = context.getSwapchain();
-                uint32_t imageIndex = swapchain.getCurrentImageIndex();
-                vk::Image* swapchainImage = swapchain.getImage(imageIndex);
-                vk::ImageView* sceneColor = context.getTexture(data.sceneColor);
+        // 半透明网格排在最后: 需要读取前面所有 pass(不透明 + 直接光照 + 天光 IBL + GSplat)
+        // 合成完的 SceneColor 作为混合背景, 且不参与 GSplat 的可见性/排序
+        if (!renderData.translucentBucket->empty())
+        {
+            TranslucentPass::addToRenderGraph(renderGraph, rendererContext, scene, view, renderData, activeSkyLight);
+        }
 
-                auto& cmd = context.getCommandBuffer();
-
-                // pre barrier
-                {
-                    VkImageMemoryBarrier2 barrier = {};
-                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-                    barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-                    barrier.srcAccessMask = VK_ACCESS_2_NONE;
-                    barrier.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
-                    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.image = swapchainImage->getHandle();
-                    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-
-                    cmd.pipelineBarrier2({&barrier , 1});
-                }
-
-                VkImageBlit blit = {};
-                blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                blit.srcOffsets[0] = { 0, 0, 0 };
-                VkExtent3D sceneColorExtent = sceneColor->getImage().getExtent();
-                blit.srcOffsets[1] = {
-                    int32_t(sceneColorExtent.width),
-                    int32_t(sceneColorExtent.height),
-                    1
-                };
-                blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                blit.dstOffsets[0] = { 0, 0, 0 };
-                VkExtent3D swapchainExtent = swapchainImage->getExtent();
-                blit.dstOffsets[1] = {
-                    int32_t(swapchainExtent.width),
-                    int32_t(swapchainExtent.height),
-                    1
-                };
-                cmd.blitImage(
-                    sceneColor->getImage().getHandle(),
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    swapchainImage->getHandle(),
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    {&blit, 1},
-                    VK_FILTER_NEAREST
-                );
-
-                {
-                    VkImageMemoryBarrier2 barrier = {};
-                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-                    barrier.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
-                    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                    barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-                    barrier.dstAccessMask = VK_ACCESS_2_NONE;
-                    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.image = swapchainImage->getHandle();
-                    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-                    cmd.pipelineBarrier2({ &barrier, 1 });
-                }
-            },
-            rg::PassFlags::Skip_Begin_Render_Pass | rg::PassFlags::Skip_End_Render_Pass
-        );
+        PresentPass::addToRenderGraph(renderGraph, rendererContext, view);
     }
 
     struct ShadowDepthData
     {
-        SceneRendererContext* rendererContext;
-        VkPipelineLayout globalPipelineLayout;
-        VkDescriptorSet sceneAndViewDescriptorSet;
+        RendererContext* rendererContext;
+        const rhi::PipelineLayout* globalPipelineLayout;
+        const rhi::BindGroup* sceneAndViewBindGroup;
         std::vector<uint32_t> viewDataDynamicOffsets;
         std::vector<float4> viewports;
         std::vector<std::shared_ptr<DrawItemBucket>> shadowDepthBuckets;
@@ -177,7 +120,7 @@ namespace hyp
 
     void CascadeShadowPipeline::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         std::span<const SceneView> views,
         std::span<const RenderData> renderData,

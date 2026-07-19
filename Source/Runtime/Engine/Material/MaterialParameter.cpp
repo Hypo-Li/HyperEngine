@@ -4,6 +4,53 @@
 
 namespace hyp
 {
+    template <> Type* Reflection::createType<SampledTexture2D>()
+    {
+        auto s = new TStructure<SampledTexture2D>("SampledTexture2D");
+        s->addProperty("Texture", &SampledTexture2D::texture);
+        s->addProperty("Sample State Override", &SampledTexture2D::sampleStateOverride);
+        return s;
+    }
+
+    template <> Type* Reflection::createType<SampledTexture2DArray>()
+    {
+        auto s = new TStructure<SampledTexture2DArray>("SampledTexture2DArray");
+        s->addProperty("Texture", &SampledTexture2DArray::texture);
+        s->addProperty("Sample State Override", &SampledTexture2DArray::sampleStateOverride);
+        return s;
+    }
+
+    template <> Type* Reflection::createType<SampledTexture3D>()
+    {
+        auto s = new TStructure<SampledTexture3D>("SampledTexture3D");
+        s->addProperty("Texture", &SampledTexture3D::texture);
+        s->addProperty("Sample State Override", &SampledTexture3D::sampleStateOverride);
+        return s;
+    }
+
+    template <> Type* Reflection::createType<SampledTextureCube>()
+    {
+        auto s = new TStructure<SampledTextureCube>("SampledTextureCube");
+        s->addProperty("Texture", &SampledTextureCube::texture);
+        s->addProperty("Sample State Override", &SampledTextureCube::sampleStateOverride);
+        return s;
+    }
+
+    template <> Type* Reflection::createType<MaterialParameterValue>()
+    {
+        auto s = new TStructure<MaterialParameterValue>("MaterialParameterValue");
+        s->addProperty("Value", &MaterialParameterValue::mValue);
+        return s;
+    }
+
+    template <> Type* Reflection::createType<MaterialParameter>()
+    {
+        auto s = new TStructure<MaterialParameter>("MaterialParameter");
+        s->addProperty("Name", &MaterialParameter::name);
+        s->addProperty("Value", &MaterialParameter::value);
+        return s;
+    }
+
     void makeMaterialProxyParameters(
         std::span<MaterialParameter> parameters,
         std::vector<MaterialProxy::Parameter>& outProxyParameters,
@@ -37,21 +84,6 @@ namespace hyp
                     }
                 }
             );
-        }
-    }
-
-    void resolveTextureBinding(
-        MaterialProxy::Parameter& parameter,
-        TextureProxyHandle textureHandle,
-        SamplerProxyHandle samplerHandle,
-        ProxyManager& proxyManager
-    )
-    {
-        if (isTextureParameterType(parameter.type))
-        {
-            TextureProxy* textureProxy = proxyManager.getProxy(textureHandle);
-            SamplerProxy* samplerProxy = proxyManager.getProxy(samplerHandle);
-            parameter.value = std::pair<TextureProxy*, SamplerProxy*>(textureProxy, samplerProxy);
         }
     }
 

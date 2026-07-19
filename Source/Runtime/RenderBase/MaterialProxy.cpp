@@ -6,7 +6,6 @@ namespace hyp
     uint32_t gMaterialId = 0;
     std::vector<uint32_t> gFreeMaterialIds;
 
-    // 临时实现, 后续需要建立统一的材质管理器
     uint32_t acquireMaterialId()
     {
         if (gFreeMaterialIds.empty())
@@ -29,15 +28,15 @@ namespace hyp
     MaterialProxy::MaterialProxy(
         Attributes attributes,
         MaterialShader* materialShader,
-        std::vector<ShaderMacro> shaderMacros,
         const std::vector<Parameter>& parameters
     ) : mAttributes(attributes),
         mRenderMask(evaluateBuiltinRenderMask(attributes)),
         mMaterialShader(materialShader),
-        mShaderMacros(std::move(shaderMacros))
+        mShaderMacros(makeShaderMacros(attributes)),
+        mBindlessEnabled(getRenderBackend().getDevice().getFeatures().bindless)
     {
         mId = acquireMaterialId();
-        resolveParameterBindings(parameters);
+        buildParameterBindings(parameters);
         createParameterResources();
     }
 
@@ -50,15 +49,15 @@ namespace hyp
     void MaterialProxy::update(
         Attributes attributes,
         MaterialShader* materialShader,
-        std::vector<ShaderMacro> shaderMacros,
-        const std::vector<Parameter>& parameters)
+        const std::vector<Parameter>& parameters
+    )
     {
         destroyParameterResources();
         mAttributes = attributes;
         mRenderMask = evaluateBuiltinRenderMask(attributes);
         mMaterialShader = materialShader;
-        mShaderMacros = std::move(shaderMacros);
-        resolveParameterBindings(parameters);
+        mShaderMacros = makeShaderMacros(attributes);
+        buildParameterBindings(parameters);
         createParameterResources();
 
         mCachedPipelines.clear();
@@ -74,14 +73,24 @@ namespace hyp
                 auto& binding = mParameterBindings[it->second];
 
                 assert(parameter.type == binding.parameter.type);
+                auto oldParameterValue = binding.parameter.value;
                 binding.parameter = parameter;
 
-                copyParameterBindingToUniformBufferCache(binding);
+                if (isTextureParameterType(binding.parameter.type) && !mBindlessEnabled)
+                {
+                    auto oldValue = std::get<std::pair<TextureProxy*, SamplerProxy*>>(oldParameterValue);
+                    auto newValue = std::get<std::pair<TextureProxy*, SamplerProxy*>>(parameter.value);
+                    if (oldValue.first != newValue.first || oldValue.second != newValue.second)
+                    {
+                        mTextureParametersDirty = true;
+                    }
+                }
+                else
+                {
+                    copyParameterBindingToUniformBufferCache(binding);
+                    mParametersDirty = true;
+                }
             }
-        }
-        if (!updatedParameters.empty())
-        {
-            mParametersDirty = true;
         }
     }
 
@@ -99,8 +108,11 @@ namespace hyp
             return 16;
         case MaterialParameterType::Float4:
             return 16;
-        case MaterialParameterType::Texture2D:
-            return 8;
+        case MaterialParameterType::Texture_2D:
+        case MaterialParameterType::Texture_2D_Array:
+        case MaterialParameterType::Texture_3D:
+        case MaterialParameterType::Texture_Cube:
+            return 4;
         default:
             assert(false && "Invalid Material Parameter Type");
             return 0;
@@ -121,7 +133,10 @@ namespace hyp
             return 12;
         case MaterialParameterType::Float4:
             return 16;
-        case MaterialParameterType::Texture2D:
+        case MaterialParameterType::Texture_2D:
+        case MaterialParameterType::Texture_2D_Array:
+        case MaterialParameterType::Texture_3D:
+        case MaterialParameterType::Texture_Cube:
             return 8;
         default:
             assert(false && "Invalid Material Parameter Type");
@@ -129,20 +144,19 @@ namespace hyp
         }
     }
 
-    void MaterialProxy::prepare(vk::CommandBuffer& cmd)
+    void MaterialProxy::prepare(rhi::CommandList& cmdList)
     {
         if (isParametersDirty())
         {
-            uploadToGPU(cmd);
+            uploadToGPU(cmdList);
         }
 
-        // Prepare textures
         for (auto& binding : mParameterBindings)
         {
             if (isTextureParameterType(binding.parameter.type))
             {
                 auto value = std::get<std::pair<TextureProxy*, SamplerProxy*>>(binding.parameter.value);
-                value.first->prepare(cmd);
+                value.first->prepare(cmdList);
             }
         }
     }
@@ -152,13 +166,26 @@ namespace hyp
         VertexLayout vertexLayout
     ) noexcept
     {
+        if (usesSharedGeometryShader(renderTag))
+        {
+            auto& renderBackend = getRenderBackend();
+            MaterialShader* sharedShader = renderBackend.getMaterialShaderManager().getOrCreateSharedGeometryShader(renderTag);
+            return sharedShader->getOrCreateVariant(renderTag, vertexLayout, {});
+        }
         return mMaterialShader->getOrCreateVariant(renderTag, vertexLayout, mShaderMacros);
+    }
+
+    bool MaterialProxy::usesSharedGeometryShader(HString renderTag) const noexcept
+    {
+        return getRenderBackend().getRenderTagRegistry().hasFlags(renderTag, RenderTagFlags::Geometry_Only)
+            && mAttributes.blendMode == BlendMode::Opaque
+            && !mAttributes.hasVertexPositionOffset;
     }
 
     void MaterialProxy::cachePipeline(
         HString renderTag,
         VertexLayout vertexLayout,
-        vk::Pipeline* pipeline
+        rhi::Pipeline* pipeline
     )
     {
         PipelineLookupKey pipelineLookupKey = {};
@@ -167,7 +194,7 @@ namespace hyp
         mCachedPipelines[pipelineLookupKey] = pipeline;
     }
 
-    vk::Pipeline* MaterialProxy::getCachedPipeline(
+    rhi::Pipeline* MaterialProxy::getCachedPipeline(
         HString renderTag,
         VertexLayout vertexLayout
     ) const noexcept
@@ -183,15 +210,21 @@ namespace hyp
 
     void MaterialProxy::copyParameterBindingToUniformBufferCache(const ParameterBinding& binding)
     {
+        if (binding.size == 0)
+            return;
+
         std::visit([&](auto&& arg)
             {
                 using T = std::decay_t<decltype(arg)>;
                 if constexpr (std::is_same_v<T, std::pair<TextureProxy*, SamplerProxy*>>)
                 {
-                    uint32_t indices[2];
-                    indices[0] = arg.first->getBindlessHandle().index;
-                    indices[1] = arg.second->getBindlessHandle().index;
-                    memcpy(mParametersBufferCache.data() + binding.offset, indices, binding.size);
+                    if (mBindlessEnabled)
+                    {
+                        uint32_t indices[2];
+                        indices[0] = arg.first->getBindlessHandle().index;
+                        indices[1] = arg.second->getBindlessHandle().index;
+                        memcpy(mParametersBufferCache.data() + binding.offset, indices, binding.size);
+                    }
                 }
                 else
                 {
@@ -202,40 +235,55 @@ namespace hyp
         );
     }
 
-    void MaterialProxy::resolveParameterBindings(const std::vector<Parameter>& parameters)
+    void MaterialProxy::buildParameterBindings(const std::vector<Parameter>& parameters)
     {
         mParameterBindings.clear();
         mNameToBindingIndex.clear();
 
-        // We use std140 layout for uniform buffer, and use bindless.
         mParameterBindings.reserve(parameters.size());
 
         uint32_t currentOffset = 0;
+        uint32_t textureIndex = 0;
 
+        bool hasTextureParameters = false;
         for (const auto& parameter : parameters)
         {
-            uint32_t alignment = getStd140Alignment(parameter.type);
-            uint32_t size = getParameterSize(parameter.type);
+            const bool isTexture = isTextureParameterType(parameter.type);
+            if (isTexture && !mBindlessEnabled)
+            {
+                uint32_t bindingSlot = 1 + 2 * textureIndex;
+                ++textureIndex;
 
-            // 将当前偏移量向上取整到 alignment 的倍数
-            currentOffset = (currentOffset + alignment - 1) & ~(alignment - 1);
+                mNameToBindingIndex[parameter.name] = static_cast<uint32_t>(mParameterBindings.size());
+                mParameterBindings.emplace_back(parameter, 0u, 0u, bindingSlot);
 
-            mNameToBindingIndex[parameter.name] = static_cast<uint32_t>(mParameterBindings.size());
-            mParameterBindings.emplace_back(parameter, currentOffset, size);
+                hasTextureParameters = true;
+            }
+            else
+            {
+                uint32_t alignment = getStd140Alignment(parameter.type);
+                uint32_t size = getParameterSize(parameter.type);
 
-            currentOffset += size;
+                currentOffset = (currentOffset + alignment - 1) & ~(alignment - 1);
+
+                mNameToBindingIndex[parameter.name] = static_cast<uint32_t>(mParameterBindings.size());
+                mParameterBindings.emplace_back(parameter, currentOffset, size, 0u);
+
+                currentOffset += size;
+            }
         }
 
         uint32_t uniformBufferSize = 0;
-        if (!mParameterBindings.empty())
+        for (const auto& binding : mParameterBindings)
+        {
+            if (binding.size > 0)
+                uniformBufferSize = std::max(uniformBufferSize, binding.offset + binding.size);
+        }
+        if (uniformBufferSize > 0)
         {
             static constexpr uint32_t kMaxAlignment = 16;
-            uniformBufferSize = mParameterBindings.back().offset + mParameterBindings.back().size;
             uniformBufferSize = (uniformBufferSize + kMaxAlignment - 1) & ~(kMaxAlignment - 1);
         }
-
-        if (uniformBufferSize == 0)
-            return;
 
         mParametersBufferCache.resize(uniformBufferSize);
         for (const auto& binding : mParameterBindings)
@@ -244,93 +292,255 @@ namespace hyp
         }
 
         mParametersDirty = true;
+        if (!mBindlessEnabled && hasTextureParameters)
+        {
+            mTextureParametersDirty = true;
+        }
     }
 
-    void MaterialProxy::uploadToGPU(vk::CommandBuffer& cmd)
+    void MaterialProxy::uploadToGPU(rhi::CommandList& cmdList)
     {
-        assert(mParametersDirty);
+        assert(mParametersDirty || mTextureParametersDirty);
 
-        if (!mParametersBuffer)
+        if (mParametersBufferCache.empty() && !mParametersBindGroup)
+        {
+            mParametersDirty = false;
+            mTextureParametersDirty = false;
             return;
+        }
 
-        // Uniform Buffer 的大小不应过大
-        cmd.updateBuffer(mParametersBuffer->getHandle(), 0, mParametersBufferCache.size(), mParametersBufferCache.data());
+        if (mParametersBuffer && mParametersDirty)
+        {
+            rhi::BufferBarrier preBarrier;
+            preBarrier.buffer = mParametersBuffer;
+            preBarrier.offset = 0;
+            preBarrier.size = mParametersBufferCache.size();
+            preBarrier.oldState = rhi::ResourceState::Shader_Uniform;
+            preBarrier.newState = rhi::ResourceState::Transfer_Dst;
+            cmdList.insertBarriers({ &preBarrier, 1 });
 
-        VkBufferMemoryBarrier2 barrier = {};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT_KHR;
-        barrier.dstAccessMask = VK_ACCESS_2_UNIFORM_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = mParametersBuffer->getHandle();
-        barrier.offset = 0;
-        barrier.size = mParametersBufferCache.size();
-        cmd.pipelineBarrier2({ &barrier, 1 });
+            auto allocation = getRenderBackend().getStagingAllocator().forceAllocate(mParametersBufferCache.size());
+            std::memcpy(allocation.mappedData, mParametersBufferCache.data(), mParametersBufferCache.size());
+            rhi::BufferCopyRegion region;
+            region.srcOffset = allocation.offset;
+            region.dstOffset = 0;
+            region.size = allocation.size;
+            cmdList.copyBuffer(allocation.buffer, mParametersBuffer, { &region, 1 });
 
-        mParametersDirty = false;
+            rhi::BufferBarrier postBarrier;
+            postBarrier.buffer = mParametersBuffer;
+            postBarrier.offset = 0;
+            postBarrier.size = allocation.size;
+            postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+            postBarrier.newState = rhi::ResourceState::Shader_Uniform;
+            cmdList.insertBarriers({ &postBarrier, 1 });
+
+            mParametersDirty = false;
+        }
+
+        if (!mBindlessEnabled && mParametersBindGroup && mTextureParametersDirty)
+        {
+            // TODO: 该情况下, 重建ParametersBindGroup
+            getRenderBackend().getDeferredTaskQueue().push(
+                [parametersBindGroup = std::move(mParametersBindGroup)]() mutable
+                {
+                    parametersBindGroup = nullptr;
+                },
+                kMaxFramesInFlight
+            );
+
+            mParametersBindGroup = getRenderBackend().getDevice().createBindGroup(*mParametersBindGroupLayout);
+
+            rhi::BufferBindingInfo bufferBinding;
+            std::vector<rhi::TextureView*> textureBindings;
+            std::vector<rhi::Sampler*> samplerBindings;
+            std::vector<rhi::BindGroupEntry> bindingEntries;
+            if (mParametersBuffer)
+            {
+                bufferBinding = { mParametersBuffer, 0, mParametersBufferCache.size() };
+                bindingEntries.emplace_back(
+                    0u,
+                    rhi::BindingType::Uniform_Buffer,
+                    0u,
+                    std::span<const rhi::BufferBindingInfo>{ &bufferBinding, 1 },
+                    std::span<const rhi::TextureView* const>{},
+                    std::span<const rhi::Sampler* const>{}
+                );
+            }
+            uint32_t textureIndex = 0;
+            for (const auto& binding : mParameterBindings)
+            {
+                if (isTextureParameterType(binding.parameter.type))
+                {
+                    auto value = std::get<std::pair<TextureProxy*, SamplerProxy*>>(binding.parameter.value);
+                    textureBindings.push_back(&value.first->getTextureView());
+                    samplerBindings.push_back(&value.second->getSampler());
+                    bindingEntries.emplace_back(
+                        binding.bindingSlot,
+                        rhi::BindingType::Sampled_Texture,
+                        0u,
+                        std::span<const rhi::BufferBindingInfo>{},
+                        std::span<const rhi::TextureView* const>{ &textureBindings[textureIndex], 1 },
+                        std::span<const rhi::Sampler* const>{}
+                    );
+                    bindingEntries.emplace_back(
+                        binding.bindingSlot + 1,
+                        rhi::BindingType::Sampler,
+                        0u,
+                        std::span<const rhi::BufferBindingInfo>{},
+                        std::span<const rhi::TextureView* const>{},
+                        std::span<const rhi::Sampler* const>{ &samplerBindings[textureIndex], 1 }
+                    );
+                    textureIndex++;
+                }
+            }
+            mParametersBindGroup->update(bindingEntries);
+            mTextureParametersDirty = false;
+        }
     }
 
     uint32_t MaterialProxy::evaluateBuiltinRenderMask(Attributes attributes) noexcept
     {
-        uint32_t renderMask = 0u;
-        auto& renderTagRegistry = getRenderBackend().getRenderTagRegistry();
-        switch (attributes.domain)
-        {
-        case MaterialDomain::Surface:
-        {
-            if (attributes.blendMode == BlendMode::Opaque || attributes.blendMode == BlendMode::Masked)
-            {
-                renderMask |= renderTagRegistry.getRenderMask(BuiltinRenderTags::Opaque);
-                renderMask |= renderTagRegistry.getRenderMask(BuiltinRenderTags::DepthOnly);
-                renderMask |= renderTagRegistry.getRenderMask(BuiltinRenderTags::ShadowDepth);
-            }
-            else
-            {
-                renderMask |= renderTagRegistry.getRenderMask(BuiltinRenderTags::Translucent);
-            }
-            break;
-        }
-        default:
-            break;
-        }
-        return renderMask;
+        return getRenderBackend().getRenderTagRegistry().getApplicableRenderMask(attributes.domain, attributes.blendMode);
+    }
+
+    std::vector<ShaderMacro> MaterialProxy::makeShaderMacros(Attributes attributes) const
+    {
+        std::vector<ShaderMacro> shaderMacros;
+        shaderMacros.reserve(6);
+        shaderMacros.emplace_back("MATERIAL_DOMAIN"_hs, HString(std::to_string(uint32_t(attributes.domain))));
+        shaderMacros.emplace_back("BLEND_MODE"_hs, HString(std::to_string(uint32_t(attributes.blendMode))));
+        shaderMacros.emplace_back("ALPHA_CUTOFF"_hs, HString(std::to_string(attributes.alphaCutoff)));
+        shaderMacros.emplace_back("SHADING_MODEL"_hs, HString(std::to_string(uint32_t(attributes.shadingModel))));
+        if (attributes.doubleSided)
+            shaderMacros.emplace_back("DOUBLE_SIDED"_hs, HString());
+        if (attributes.tangentSpaceNormal)
+            shaderMacros.emplace_back("TANGENT_SPACE_NORMAL"_hs, HString());
+        return shaderMacros;
     }
 
     void MaterialProxy::createParameterResources()
     {
-        if (mParametersBufferCache.size())
+        if (mParameterBindings.empty() || !mMaterialShader)
+            return;
+
+        auto& device = getRenderBackend().getDevice();
+
+        if (!mParametersBufferCache.empty())
         {
-            auto& device = getRenderBackend().getDevice();
-            vk::Buffer::CreateInfo bufferInfo;
-            bufferInfo.size = mParametersBufferCache.size();
-            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mParametersBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
-
-            VkDescriptorSetLayoutBinding bindings[1] = {};
-            bindings[0].binding = 0;
-            bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            bindings[0].descriptorCount = 1;
-            bindings[0].stageFlags = VK_SHADER_STAGE_ALL;
-            bindings[0].pImmutableSamplers = nullptr;
-            mParametersDescriptorSet = device.getDescriptorAllocator().allocate(bindings);
-
-            vk::DescriptorWriter writer;
-            writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, mParametersBuffer->getHandle(), 0, mParametersBufferCache.size());
-            writer.update(*mParametersDescriptorSet);
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = mParametersBufferCache.size();
+            bufferDesc.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Transfer_Dst;
+            mParametersBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
+
+        std::vector<rhi::BindGroupLayoutEntry> layoutEntries;
+        if (mParametersBuffer)
+        {
+            auto& uniformEntry = layoutEntries.emplace_back();
+            uniformEntry.binding = 0;
+            uniformEntry.type = rhi::BindingType::Uniform_Buffer;
+            uniformEntry.access = rhi::BindingAccess::Read_Only;
+            uniformEntry.count = 1;
+            uniformEntry.stageFlags = rhi::ShaderStage::All;
+        }
+
+        uint32_t textureParameterCount = 0;
+        if (!mBindlessEnabled)
+        {
+            for (const auto& binding : mParameterBindings)
+            {
+                if (isTextureParameterType(binding.parameter.type))
+                {
+                    auto [texture, sampler] = std::get<std::pair<TextureProxy*, SamplerProxy*>>(binding.parameter.value);
+
+                    auto& textureEntry = layoutEntries.emplace_back();
+                    textureEntry.binding = binding.bindingSlot;
+                    textureEntry.type = rhi::BindingType::Sampled_Texture;
+                    textureEntry.access = rhi::BindingAccess::Read_Only;
+                    textureEntry.count = 1;
+                    textureEntry.textureViewType = texture->getTextureView().getDesc().type;
+                    textureEntry.textureSampleType = rhi::TextureSampleType::Float;
+                    textureEntry.stageFlags = rhi::ShaderStage::All;
+
+                    auto& samplerEntry = layoutEntries.emplace_back();
+                    samplerEntry.binding = binding.bindingSlot + 1;
+                    samplerEntry.type = rhi::BindingType::Sampler;
+                    samplerEntry.access = rhi::BindingAccess::Read_Only;
+                    samplerEntry.count = 1;
+                    samplerEntry.samplerBindingType = rhi::SamplerBindingType::Filtering;
+                    samplerEntry.stageFlags = rhi::ShaderStage::All;
+
+                    textureParameterCount++;
+                }
+            }
+        }
+
+        if (layoutEntries.empty())
+            return;
+
+        mParametersBindGroupLayout = getRenderBackend().getBindGroupLayoutCache().getOrCreate(layoutEntries);
+        mParametersBindGroup = device.createBindGroup(*mParametersBindGroupLayout);
+
+        rhi::BufferBindingInfo bufferBinding;
+        std::vector<rhi::TextureView*> textureBindings;
+        std::vector<rhi::Sampler*> samplerBindings;
+        if (!mBindlessEnabled)
+        {
+            textureBindings.reserve(textureParameterCount);
+            samplerBindings.reserve(textureParameterCount);
+        }
+
+        std::vector<rhi::BindGroupEntry> bindingEntries;
+        if (mParametersBuffer)
+        {
+            bufferBinding = { mParametersBuffer, 0, mParametersBufferCache.size() };
+            auto& entry = bindingEntries.emplace_back();
+            entry.binding = 0u;
+            entry.type = rhi::BindingType::Uniform_Buffer;
+            entry.buffers = { &bufferBinding, 1 };
+        }
+
+        uint32_t textureIndex = 0;
+        for (const auto& binding : mParameterBindings)
+        {
+            if (isTextureParameterType(binding.parameter.type))
+            {
+                auto value = std::get<std::pair<TextureProxy*, SamplerProxy*>>(binding.parameter.value);
+                if (!mBindlessEnabled)
+                {
+                    textureBindings.push_back(&value.first->getTextureView());
+                    samplerBindings.push_back(&value.second->getSampler());
+                    auto& textureEntry = bindingEntries.emplace_back();
+                    textureEntry.binding = binding.bindingSlot;
+                    textureEntry.type = rhi::BindingType::Sampled_Texture;
+                    textureEntry.textures = { &textureBindings[textureIndex], 1 };
+
+                    auto& samplerEntry = bindingEntries.emplace_back();
+                    samplerEntry.binding = binding.bindingSlot + 1;
+                    samplerEntry.type = rhi::BindingType::Sampler;
+                    samplerEntry.samplers = { &samplerBindings[textureIndex], 1 };
+                    textureIndex++;
+                }
+            }
+        }
+
+        mParametersBindGroup->update(bindingEntries);
+
+        mTextureParametersDirty = false;
     }
 
     void MaterialProxy::destroyParameterResources()
     {
-        if (mParametersBuffer || mParametersDescriptorSet)
+        if (mParametersBuffer || mParametersBindGroup)
         {
             getRenderBackend().getDeferredTaskQueue().push(
                 [parametersBuffer = std::move(mParametersBuffer),
-                descriptorSet = std::move(mParametersDescriptorSet)]() mutable
+                bindGroupLayout = std::move(mParametersBindGroupLayout),
+                bindGroup = std::move(mParametersBindGroup)]() mutable
                 {
-                    descriptorSet = nullptr;
+                    bindGroup = nullptr;
+                    bindGroupLayout = nullptr;
                     parametersBuffer = nullptr;
                 },
                 kMaxFramesInFlight

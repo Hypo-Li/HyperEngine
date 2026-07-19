@@ -2,6 +2,7 @@
 #include "MeshRenderProxy.h"
 #include "CameraProxy.h"
 #include "DirectionalLightProxy.h"
+#include "SkyLightProxy.h"
 
 namespace hyp
 {
@@ -11,53 +12,89 @@ namespace hyp
         auto& device = getRenderBackend().getDevice();
 
         {
-            vk::Buffer::CreateInfo bufferInfo;
-            bufferInfo.size = kBaseInstanceCount * sizeof(InstanceData);
-            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mInstanceDataBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = kBaseIndexCount * sizeof(uint32_t);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
+            mIndicesBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
 
         {
-            vk::Buffer::CreateInfo bufferInfo;
-            // 可能在一个 RenderPass 中绘制多次场景中的对象, 因此InstanceIndicesBuffer需要翻倍
-            bufferInfo.size = kBaseInstanceCount * sizeof(uint32_t) * kInstanceIndicesMultiple;
-            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mInstanceIndicesBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = kBaseInstanceCount * sizeof(InstanceData);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
+            mInstanceDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
 
         {
-            vk::Buffer::CreateInfo bufferInfo;
-            bufferInfo.size = kBaseLightCount * sizeof(LightData);
-            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mLightDataBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = kBaseLightCount * sizeof(LightData);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
+            mLightDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
 
-        TRef<vk::DescriptorSetLayout> sceneAndViewDescriptorSetLayout = createSceneAndViewDescriptorSetLayout(device);
-        mSceneAndViewDescriptorSet = device.getDescriptorAllocator().allocate(*sceneAndViewDescriptorSetLayout);
-        vk::DescriptorWriter writer;
-        writer.writeBuffer(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, mInstanceDataBuffer->getHandle(), 0, kBaseInstanceCount * sizeof(InstanceData));
-        writer.writeBuffer(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, mInstanceIndicesBuffer->getHandle(), 0, kBaseInstanceCount * sizeof(uint32_t));
-        writer.writeBuffer(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, mLightDataBuffer->getHandle(), 0, kBaseLightCount * sizeof(LightData));
+        mSceneAndViewBindGroupLayout = createSceneAndViewBindGroupLayout(getRenderBackend().getBindGroupLayoutCache());
+        mSceneAndViewBindGroup = device.createBindGroup(*mSceneAndViewBindGroupLayout);
+
         auto& viewDataBuffer = viewDataManager.getViewDataBuffer();
-        writer.writeBuffer(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, viewDataBuffer.getHandle(), 0, sizeof(ViewData));
-        writer.update(*mSceneAndViewDescriptorSet);
+
+        rhi::BufferBindingInfo indicesBinding;
+        indicesBinding.buffer = mIndicesBuffer.get();
+        indicesBinding.offset = 0;
+        indicesBinding.range = kBaseInstanceCount * sizeof(uint32_t);
+
+        rhi::BufferBindingInfo instanceDataBinding;
+        instanceDataBinding.buffer = mInstanceDataBuffer.get();
+        instanceDataBinding.offset = 0;
+        instanceDataBinding.range = kBaseInstanceCount * sizeof(InstanceData);
+
+        rhi::BufferBindingInfo lightDataBinding;
+        lightDataBinding.buffer = mLightDataBuffer.get();
+        lightDataBinding.offset = 0;
+        lightDataBinding.range = kBaseLightCount * sizeof(LightData);
+
+        rhi::BufferBindingInfo viewDataBinding;
+        viewDataBinding.buffer = &viewDataBuffer;
+        viewDataBinding.offset = 0;
+        viewDataBinding.range = sizeof(ViewData);
+
+        rhi::BindGroupEntry entries[4] = {};
+        entries[1].binding = 0;
+        entries[1].type = rhi::BindingType::Storage_Buffer;
+        entries[1].buffers = { &indicesBinding, 1 };
+
+        entries[0].binding = 1;
+        entries[0].type = rhi::BindingType::Storage_Buffer;
+        entries[0].buffers = { &instanceDataBinding, 1 };
+
+        entries[2].binding = 2;
+        entries[2].type = rhi::BindingType::Storage_Buffer;
+        entries[2].buffers = { &lightDataBinding, 1 };
+
+        entries[3].binding = 3;
+        entries[3].type = rhi::BindingType::Dynamic_Storage_Buffer;
+        entries[3].buffers = { &viewDataBinding, 1 };
+
+        mSceneAndViewBindGroup->update({ entries, 4 });
 
         mInstanceData.reserve(kBaseInstanceCount);
+        mLightData.reserve(kBaseLightCount);
     }
 
     SceneProxy::~SceneProxy() noexcept
     {
         getRenderBackend().getDeferredTaskQueue().push(
-            [instanceDataBuffer = std::move(mInstanceDataBuffer),
-            instanceIndicesBuffer = std::move(mInstanceIndicesBuffer),
+            [indicesBuffer = std::move(mIndicesBuffer),
+            instanceDataBuffer = std::move(mInstanceDataBuffer),
             lightDataBuffer = std::move(mLightDataBuffer),
-            sceneAndViewDescriptorSet = std::move(mSceneAndViewDescriptorSet)
+            sceneAndViewBindGroup = std::move(mSceneAndViewBindGroup),
+            sceneAndViewBindGroupLayout = std::move(mSceneAndViewBindGroupLayout)
             ]() mutable
             {
-                sceneAndViewDescriptorSet = nullptr;
-                instanceIndicesBuffer = nullptr;
+                sceneAndViewBindGroup = nullptr;
+                sceneAndViewBindGroupLayout = nullptr;
                 lightDataBuffer = nullptr;
                 instanceDataBuffer = nullptr;
+                indicesBuffer = nullptr;
             },
             kMaxFramesInFlight
         );
@@ -135,6 +172,37 @@ namespace hyp
         auto it = std::find(mAtmosphereProxies.begin(), mAtmosphereProxies.end(), atmosphereProxy);
         assert(it != mAtmosphereProxies.end());
         mAtmosphereProxies.erase(it);
+        if (mActiveAtmosphereProxy == atmosphereProxy)
+            mActiveAtmosphereProxy = nullptr;
+    }
+
+    void SceneProxy::addSkyLightProxy(SkyLightProxy* skyLightProxy)
+    {
+        mSkyLightProxies.push_back(skyLightProxy);
+    }
+
+    void SceneProxy::removeSkyLightProxy(SkyLightProxy* skyLightProxy)
+    {
+        auto it = std::find(mSkyLightProxies.begin(), mSkyLightProxies.end(), skyLightProxy);
+        assert(it != mSkyLightProxies.end());
+        mSkyLightProxies.erase(it);
+        if (mActiveSkyLightProxy == skyLightProxy)
+            mActiveSkyLightProxy = nullptr;
+    }
+
+    SkyLightProxy* SceneProxy::getActiveSkyLightProxy() const noexcept
+    {
+        SkyLightProxy* selected = nullptr;
+        for (SkyLightProxy* candidate : mSkyLightProxies)
+        {
+            if (!candidate->isVisible())
+                continue;
+
+            if (!selected || candidate->getIntensity() > selected->getIntensity() + 1e-6f)
+                selected = candidate;
+        }
+        mActiveSkyLightProxy = selected;
+        return mActiveSkyLightProxy;
     }
 
     void SceneProxy::addGSplatRenderProxy(GSplatRenderProxy* gsplatRenderProxy)
@@ -179,7 +247,7 @@ namespace hyp
         }
     }
 
-    void SceneProxy::updateSceneData(vk::CommandBuffer& cmd)
+    void SceneProxy::updateSceneData(rhi::CommandList& cmdList)
     {
         auto& stagingAllocator = getRenderBackend().getStagingAllocator();
 
@@ -189,45 +257,74 @@ namespace hyp
             mUpdatedInstanceMaxIndex
         );
 
-        for (auto& range : updatedInstanceRanges)
-        {
-            size_t offset = range.first * sizeof(InstanceData);
-            size_t dataSize = range.second * sizeof(InstanceData);
-            uploadData(cmd, mInstanceDataBuffer->getHandle(), offset, { (uint8_t*)(&mInstanceData[range.first]), dataSize }, stagingAllocator);
-        }
-
         auto updatedLightRanges = generateUpdateRanges(
             mLightDataUpdatedBitset,
             mUpdatedLightMinIndex,
             mUpdatedLightMaxIndex
         );
 
-        for (auto& range : updatedLightRanges)
-        {
-            size_t offset = range.first * sizeof(LightData);
-            size_t dataSize = range.second * sizeof(LightData);
-            uploadData(cmd, mLightDataBuffer->getHandle(), offset, { (uint8_t*)(&mLightData[range.first]), dataSize }, stagingAllocator);
-        }
-
-        VkBufferMemoryBarrier2 barriers[2] = {};
-        uint32_t barrierCount = 0;
+        std::vector<rhi::BufferBarrier> preBarriers;
         if (!updatedInstanceRanges.empty())
         {
-            VkBufferMemoryBarrier2& barrier = barriers[barrierCount++];
-            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-            barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
-            barrier.buffer = mInstanceDataBuffer->getHandle();
-            size_t beginOffset = updatedInstanceRanges.begin()->first;
-            size_t endOffset = updatedInstanceRanges.back().first;
-            size_t endSize = updatedInstanceRanges.back().second;
-            barrier.offset = beginOffset * sizeof(InstanceData);
-            barrier.size = (endOffset - beginOffset + endSize) * sizeof(InstanceData);
+            rhi::BufferBarrier barrier;
+            barrier.buffer = mInstanceDataBuffer.get();
+            barrier.offset = 0;
+            barrier.size = rhi::kWholeBuffer;
+            barrier.oldState = rhi::ResourceState::Shader_Storage_Read;
+            barrier.newState = rhi::ResourceState::Transfer_Dst;
+            preBarriers.push_back(barrier);
+        }
+
+        if (!updatedLightRanges.empty())
+        {
+            rhi::BufferBarrier barrier;
+            barrier.buffer = mLightDataBuffer.get();
+            barrier.offset = 0;
+            barrier.size = rhi::kWholeBuffer;
+            barrier.oldState = rhi::ResourceState::Shader_Storage_Read;
+            barrier.newState = rhi::ResourceState::Transfer_Dst;
+            preBarriers.push_back(barrier);
+        }
+
+        if (!preBarriers.empty())
+        {
+            cmdList.insertBarriers(preBarriers);
+        }
+
+        if (!updatedInstanceRanges.empty())
+        {
+            uploadData(
+                cmdList,
+                updatedInstanceRanges,
+                sizeof(InstanceData),
+                (uint8_t*)(mInstanceData.data()),
+                mInstanceDataBuffer.get(),
+                stagingAllocator
+            );
+        }
+
+        if (!updatedLightRanges.empty())
+        {
+            uploadData(
+                cmdList,
+                updatedLightRanges,
+                sizeof(LightData),
+                (uint8_t*)(mLightData.data()),
+                mLightDataBuffer.get(),
+                stagingAllocator
+            );
+        }
+
+        std::vector<rhi::BufferBarrier> postBarriers;
+        if (!updatedInstanceRanges.empty())
+        {
+            rhi::BufferBarrier barrier;
+            barrier.buffer = mInstanceDataBuffer.get();
+            barrier.offset = 0;
+            barrier.size = rhi::kWholeBuffer;
+            barrier.oldState = rhi::ResourceState::Transfer_Dst;
+            barrier.newState = rhi::ResourceState::Shader_Storage_Read;
+            postBarriers.push_back(barrier);
 
             std::fill(mInstanceDataUpdatedBitset.begin(), mInstanceDataUpdatedBitset.end(), 0);
             mUpdatedInstanceMinIndex = UINT32_MAX;
@@ -236,30 +333,22 @@ namespace hyp
 
         if (!updatedLightRanges.empty())
         {
-            VkBufferMemoryBarrier2& barrier = barriers[barrierCount++];
-            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-            barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-            barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
-            barrier.buffer = mLightDataBuffer->getHandle();
-            size_t beginOffset = updatedLightRanges.begin()->first;
-            size_t endOffset = updatedLightRanges.back().first;
-            size_t endSize = updatedLightRanges.back().second;
-            barrier.offset = beginOffset * sizeof(LightData);
-            barrier.size = (endOffset - beginOffset + endSize) * sizeof(LightData);
+            rhi::BufferBarrier barrier;
+            barrier.buffer = mLightDataBuffer.get();
+            barrier.offset = 0;
+            barrier.size = rhi::kWholeBuffer;
+            barrier.oldState = rhi::ResourceState::Transfer_Dst;
+            barrier.newState = rhi::ResourceState::Shader_Storage_Read;
+            postBarriers.push_back(barrier);
 
             std::fill(mLightDataUpdatedBitset.begin(), mLightDataUpdatedBitset.end(), 0);
             mUpdatedLightMinIndex = UINT32_MAX;
             mUpdatedLightMaxIndex = 0;
         }
 
-        if (barrierCount)
+        if (!postBarriers.empty())
         {
-            cmd.pipelineBarrier2({ &barriers[0], barrierCount });
+            cmdList.insertBarriers(postBarriers);
         }
 
         for (AtmosphereProxy* proxy : mAtmosphereProxies)
@@ -274,39 +363,26 @@ namespace hyp
         if (mActiveAtmosphereProxy)
         {
             DirectionalLightProxy* sunLights[2] = { nullptr, nullptr };
-            for (auto* proxy : mDirectionalLightProxies)
+            for (auto* candidate : mDirectionalLightProxies)
             {
-                if (!proxy->isVisible() || !proxy->isAffectAtmosphere())
+                uint32_t sunLightIndex = candidate->getAtmosphereSunLightIndex();
+                if (!candidate->isVisible() ||
+                    !candidate->isAffectAtmosphere() ||
+                    sunLightIndex >= 2)
                     continue;
 
-                uint32_t idx = proxy->getAtmosphereSunLightIndex();
-                if (idx > 1)
-                    continue;
-
-                if (sunLights[idx] == nullptr)
+                auto*& selected = sunLights[sunLightIndex];
+                if (!selected)
                 {
-                    sunLights[idx] = proxy;
+                    selected = candidate;
                     continue;
                 }
 
-                float newIntensitySqr = Math::lengthSqr(proxy->getIntensity());
-                float oldIntensitySqr = Math::lengthSqr(sunLights[idx]->getIntensity());
-
-                bool shouldReplace = false;
-
-                if (newIntensitySqr > oldIntensitySqr)
+                float candidateIntensitySqr = Math::lengthSqr(candidate->getIntensity());
+                float selectedIntensitySqr = Math::lengthSqr(selected->getIntensity());
+                if (candidateIntensitySqr > selectedIntensitySqr + 1e-6f)
                 {
-                    shouldReplace = true;
-                }
-                else if (std::abs(newIntensitySqr - oldIntensitySqr) < 1e-6f)
-                {
-                    if (proxy->getAtmosphereRequestOrder() < sunLights[idx]->getAtmosphereRequestOrder())
-                        shouldReplace = true;
-                }
-
-                if (!shouldReplace)
-                {
-                    sunLights[idx] = proxy;
+                    selected = candidate;
                 }
             }
 
@@ -318,12 +394,17 @@ namespace hyp
                 mActiveAtmosphereProxy->setSunLight(i, direction, intensity);
             }
             
-            mActiveAtmosphereProxy->prepare(cmd);
+            mActiveAtmosphereProxy->prepare(cmdList);
+        }
+
+        if (SkyLightProxy* activeSkyLight = getActiveSkyLightProxy())
+        {
+            activeSkyLight->prepare(cmdList);
         }
 
         if (mGSplatScene)
         {
-            mGSplatScene->prepare(cmd);
+            mGSplatScene->prepare(cmdList);
         }
     }
 
@@ -352,38 +433,38 @@ namespace hyp
         return sceneViewGroups;
     }
 
-    TRef<vk::DescriptorSetLayout> SceneProxy::createSceneAndViewDescriptorSetLayout(vk::Device& device)
+    TRef<rhi::BindGroupLayout> SceneProxy::createSceneAndViewBindGroupLayout(BindGroupLayoutCache& cache)
     {
-        VkDescriptorSetLayoutBinding bindings[4] = {};
-        // Instance data
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[0].descriptorCount = 1;
-        bindings[0].stageFlags = VK_SHADER_STAGE_ALL;
-        bindings[0].pImmutableSamplers = nullptr;
+        std::vector<rhi::BindGroupLayoutEntry> entries(4);
+        auto& indicesEntry = entries[0];
+        indicesEntry.binding = 0;
+        indicesEntry.type = rhi::BindingType::Storage_Buffer;
+        indicesEntry.access = rhi::BindingAccess::Read_Only;
+        indicesEntry.count = 1;
+        indicesEntry.stageFlags = rhi::ShaderStage::All;
 
-        // Instance Indices
-        bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_ALL;
-        bindings[1].pImmutableSamplers = nullptr;
+        auto& instanceDataEntry = entries[1];
+        instanceDataEntry.binding = 1;
+        instanceDataEntry.type = rhi::BindingType::Storage_Buffer;
+        instanceDataEntry.access = rhi::BindingAccess::Read_Only;
+        instanceDataEntry.count = 1;
+        instanceDataEntry.stageFlags = rhi::ShaderStage::All;
 
-        // Light Data
-        bindings[2].binding = 2;
-        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags = VK_SHADER_STAGE_ALL;
-        bindings[2].pImmutableSamplers = nullptr;
+        auto& lightDataEntry = entries[2];
+        lightDataEntry.binding = 2;
+        lightDataEntry.type = rhi::BindingType::Storage_Buffer;
+        lightDataEntry.access = rhi::BindingAccess::Read_Only;
+        lightDataEntry.count = 1;
+        lightDataEntry.stageFlags = rhi::ShaderStage::All;
 
-        // View Data
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_ALL;
-        bindings[3].pImmutableSamplers = nullptr;
+        auto& viewDataEntry = entries[3];
+        viewDataEntry.binding = 3;
+        viewDataEntry.type = rhi::BindingType::Dynamic_Storage_Buffer;
+        viewDataEntry.access = rhi::BindingAccess::Read_Only;
+        viewDataEntry.count = 1;
+        viewDataEntry.stageFlags = rhi::ShaderStage::All;
 
-        return device.getDescriptorAllocator().getSetLayout(bindings);
+        return cache.getOrCreate(entries);
     }
 
     inline int ctz64(uint64_t x)
@@ -470,7 +551,7 @@ namespace hyp
         uint32_t minWord = minUpdatedIndex / kBitPerWord;
         uint32_t maxWord = maxUpdatedIndex / kBitPerWord;
 
-        uint32_t lastDirtyIndex = 0; // 记录最后一个真正的脏位
+        uint32_t lastDirtyIndex = 0;
 
         for (uint32_t w = minWord; w <= maxWord; ++w)
         {
@@ -486,7 +567,6 @@ namespace hyp
                 }
                 else
                 {
-                    // 核心：基于实例数量判断是否断开
                     if (firstInWord - lastDirtyIndex > kMaxHoleInInstances)
                     {
                         ranges.emplace_back(currentStart, lastDirtyIndex - currentStart + 1);
@@ -497,7 +577,6 @@ namespace hyp
             }
         }
 
-        // 结尾逻辑只需处理 lastDirtyIndex
         if (currentStart != UINT32_MAX)
         {
             ranges.emplace_back(currentStart, lastDirtyIndex - currentStart + 1);
@@ -507,38 +586,34 @@ namespace hyp
     }
 
     void SceneProxy::uploadData(
-        vk::CommandBuffer& cmd,
-        VkBuffer dstBuffer,
-        size_t dstOffset,
-        std::span<const uint8_t> srcData,
+        rhi::CommandList& cmdList,
+        std::span<const std::pair<size_t, size_t>> updatedRanges,
+        size_t elementSize,
+        uint8_t* srcData,
+        rhi::Buffer* dstBuffer,
         StagingAllocator& stagingAllocator
     )
     {
-        if (srcData.size() <= 4096)
+        std::vector<rhi::BufferCopyRegion> bufferCopyRegions;
+        bufferCopyRegions.reserve(updatedRanges.size());
+        size_t totalSize = 0;
+        for (auto& range : updatedRanges)
         {
-            cmd.updateBuffer(
-                dstBuffer,
-                dstOffset,
-                srcData.size(),
-                srcData.data()
-            );
+            totalSize += range.second * elementSize;
         }
-        else
+        auto allocation = stagingAllocator.forceAllocate(totalSize);
+        size_t srcOffset = 0;
+        for (auto& range : updatedRanges)
         {
-            auto allocation = stagingAllocator.forceAllocate(srcData.size());
-            std::memcpy(allocation.mappedData, srcData.data(), srcData.size());
-
-            VkBufferCopy copyRegion = {};
-            copyRegion.srcOffset = allocation.offset;
-            copyRegion.dstOffset = dstOffset;
-            copyRegion.size = srcData.size();
-
-            cmd.copyBuffer(
-                allocation.buffer,
-                dstBuffer,
-                { &copyRegion, 1 }
-            );
+            auto& copyRegion = bufferCopyRegions.emplace_back();
+            size_t rangeSize = range.second * elementSize;
+            copyRegion.srcOffset = allocation.offset + srcOffset;
+            copyRegion.dstOffset = range.first * elementSize;
+            copyRegion.size = rangeSize;
+            std::memcpy((uint8_t*)(allocation.mappedData) + srcOffset, srcData + range.first * elementSize, rangeSize);
+            srcOffset += rangeSize;
         }
+        cmdList.copyBuffer(allocation.buffer, dstBuffer, bufferCopyRegions);
     }
 
 }

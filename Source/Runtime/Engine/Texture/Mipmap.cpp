@@ -34,63 +34,87 @@ namespace hyp
         return lut[index];
     }
 
-    uint16_t FloatConverter::float32ToFloat16(float v)
+    float3 cubeGetDirection(CubeFace face, float x, float y, uint32_t dim)
     {
-        uint32_t f32i;
-        std::memcpy(&f32i, &v, sizeof(uint32_t));
+        const float scale = 2.0f / dim;
+        const float cx = x * scale - 1.0f; // -1 to 1, left to right
+        const float cy = y * scale - 1.0f; // -1 to 1, top to bottom (origin top-left)
 
-        uint32_t s = (f32i >> 16) & 0x8000;          // 符号位
-        int32_t e = ((f32i >> 23) & 0xFF) - 112;     // 指数位并重新偏移
-        uint32_t m = f32i & 0x7FFFFF;                // 尾数位
+        float3 dir;
+        switch (face)
+        {
+        case CubeFace::PX: dir = float3(1.0f, -cy, -cx); break;
+        case CubeFace::NX: dir = float3(-1.0f, -cy, cx); break;
+        case CubeFace::PY: dir = float3(cx, 1.0f, cy); break;
+        case CubeFace::NY: dir = float3(cx, -1.0f, -cy); break;
+        case CubeFace::PZ: dir = float3(cx, -cy, 1.0f); break;
+        case CubeFace::NZ: dir = float3(-cx, -cy, -1.0f); break;
+        }
 
-        if (e <= 0) {
-            if (e < -10) return (uint16_t)s;         // 太小，转为 0
-
-            // 处理非规格化数 (Denormalized)
-            m = (m | 0x800000) >> (1 - e);
-            return (uint16_t)(s | (m >> 13));
-        }
-        else if (e == 143) {
-            if (m == 0) return (uint16_t)(s | 0x7C00); // 无穷大
-            return (uint16_t)(s | 0x7C00 | (m >> 13)); // NaN
-        }
-        else {
-            if (e > 30) return (uint16_t)(s | 0x7C00); // 溢出转为无穷大
-            return (uint16_t)(s | (e << 10) | (m >> 13));
-        }
+        return glm::normalize(dir);
     }
 
-    float FloatConverter::float16ToFloat32(uint16_t v)
+    CubeAddress cubeGetAddressFor(const float3& r)
     {
-        uint32_t s = (v >> 15) & 0x0001;
-        uint32_t e = (v >> 10) & 0x001F;
-        uint32_t m = v & 0x03FF;
+        CubeAddress addr;
+        const float rx = std::abs(r.x);
+        const float ry = std::abs(r.y);
+        const float rz = std::abs(r.z);
 
-        uint32_t f32i;
-        if (e == 0) {
-            if (m == 0) {
-                f32i = s << 31; // 0
+        float sc, tc, ma;
+
+        if (rx >= ry && rx >= rz)
+        {
+            ma = 1.0f / rx;
+            if (r.x >= 0.0f)
+            {
+                addr.face = CubeFace::PX;
+                sc = -r.z;
+                tc = -r.y;
             }
-            else {
-                // 非规格化数转规格化
-                while (!(m & 0x0400)) {
-                    m <<= 1;
-                    e--;
-                }
-                e++;
-                f32i = (s << 31) | ((e + 112) << 23) | ((m & ~0x0400) << 13);
+            else
+            {
+                addr.face = CubeFace::NX;
+                sc = r.z;
+                tc = -r.y;
             }
         }
-        else if (e == 31) {
-            f32i = (s << 31) | (0xFF << 23) | (m << 13); // NaN 或 无穷大
+        else if (ry >= rx && ry >= rz)
+        {
+            ma = 1.0f / ry;
+            if (r.y >= 0.0f)
+            {
+                addr.face = CubeFace::PY;
+                sc = r.x;
+                tc = r.z;
+            }
+            else
+            {
+                addr.face = CubeFace::NY;
+                sc = r.x;
+                tc = -r.z;
+            }
         }
-        else {
-            f32i = (s << 31) | ((e + 112) << 23) | (m << 13);
+        else
+        {
+            ma = 1.0f / rz;
+            if (r.z >= 0.0f)
+            {
+                addr.face = CubeFace::PZ;
+                sc = r.x;
+                tc = -r.y;
+            }
+            else
+            {
+                addr.face = CubeFace::NZ;
+                sc = -r.x;
+                tc = -r.y;
+            }
         }
 
-        float f32;
-        std::memcpy(&f32, &f32i, sizeof(uint32_t));
-        return f32;
+        addr.s = (sc * ma + 1.0f) * 0.5f;
+        addr.t = (tc * ma + 1.0f) * 0.5f;
+        return addr;
     }
 
 }

@@ -70,9 +70,9 @@ namespace hyp::rg
     class BufferResource final : public VirtualResource
     {
     public:
-        using Description = BufferDescription;
-        using PhysicalResource = vk::Buffer;
-        using Usage = BufferUsage;
+        using Description = rhi::BufferDesc;
+        using PhysicalResource = rhi::Buffer;
+        using Usage = rhi::BufferUsage;
 
         BufferResource(HString name, const Description& desc, Arena& arena) noexcept;
 
@@ -87,7 +87,7 @@ namespace hyp::rg
 
         const Description& getDescription() const noexcept
         {
-            return mKey.description;
+            return mKey.desc;
         }
 
         PhysicalResource* getPhysicalResource() const noexcept
@@ -100,13 +100,15 @@ namespace hyp::rg
             return mAccessRecords;
         }
 
-        void addAccessRecord(PassNode* passNode, BufferUsage usage, AccessType accessType)
+        uint32_t addAccessRecord(PassNode* passNode, rhi::BufferUsage usage, AccessType accessType)
         {
+            uint32_t accessRecordIndex = static_cast<uint32_t>(mAccessRecords.size());
             mAccessRecords.emplace_back(passNode, usage, accessType);
+            return accessRecordIndex;
         }
 
     private:
-        void resolveUsage() noexcept;
+        void aggregateUsage() noexcept;
 
     private:
         BufferKey mKey;
@@ -117,13 +119,13 @@ namespace hyp::rg
     class TextureResource final : public VirtualResource
     {
     public:
-        using Description = TextureDescription;
-        using PhysicalResource = vk::ImageView;
-        using Usage = TextureUsage;
+        using Description = rhi::TextureDesc;
+        using PhysicalResource = rhi::TextureView;
+        using Usage = rhi::TextureUsage;
 
         TextureResource(HString name, const Description& desc, Arena& arena) noexcept;
 
-        TextureResource(HString name, PhysicalResource* physicalResource, VkImageLayout defaultLayout, Arena& arena) noexcept;
+        TextureResource(HString name, PhysicalResource* physicalResource, rhi::ResourceState defaultState, Arena& arena) noexcept;
 
         virtual void devirtualize(TransientResources& transientResources) noexcept override;
 
@@ -134,7 +136,7 @@ namespace hyp::rg
 
         const Description& getDescription() const noexcept
         {
-            return mKey.description;
+            return mKey.desc;
         }
 
         PhysicalResource* getPhysicalResource() const noexcept
@@ -142,9 +144,9 @@ namespace hyp::rg
             return mPhysicalResource;
         }
 
-        VkImageLayout getDefaultLayout() const noexcept
+        rhi::ResourceState getDefaultState() const noexcept
         {
-            return mDefaultLayout;
+            return mDefaultState;
         }
 
         std::span<const TextureAccessRecord> getAccessRecords() const noexcept
@@ -152,27 +154,29 @@ namespace hyp::rg
             return mAccessRecords;
         }
 
-        void addAccessRecord(PassNode* passNode, TextureUsage usage, AccessType accessType, const VkImageSubresourceRange& range)
+        uint32_t addAccessRecord(PassNode* passNode, rhi::TextureUsage usage, AccessType accessType, const rhi::TextureRange& range)
         {
+            uint32_t accessRecordIndex = static_cast<uint32_t>(mAccessRecords.size());
             mAccessRecords.emplace_back(passNode, usage, accessType, range);
+            return accessRecordIndex;
         }
 
     private:
-        void resolveUsage() noexcept;
+        void aggregateUsage() noexcept;
 
     private:
         TextureKey mKey;
         TRef<PhysicalResource> mPhysicalResource;
-        VkImageLayout mDefaultLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        rhi::ResourceState mDefaultState = rhi::ResourceState::None;
         ArenaVector<TextureAccessRecord> mAccessRecords;
     };
 
     class SubTextureResource final : public VirtualResource
     {
     public:
-        using Description = SubTextureDescription;
-        using PhysicalResource = vk::ImageView;
-        using Usage = TextureUsage;
+        using Description = rhi::TextureViewDesc;
+        using PhysicalResource = rhi::TextureView;
+        using Usage = rhi::TextureUsage;
 
         SubTextureResource(HString name, uint16_t textureResourceId, TextureResource* textureResource, const Description& desc) noexcept;
 
@@ -195,7 +199,7 @@ namespace hyp::rg
 
         const Description& getDescription() const noexcept
         {
-            return mKey.description;
+            return mKey.desc;
         }
 
         PhysicalResource* getPhysicalResource() const noexcept

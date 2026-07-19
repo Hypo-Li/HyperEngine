@@ -3,9 +3,10 @@
 #include "Texture/SampleState.h"
 #include "Input/InputSystem.h"
 
+#include <Core/Asset/AssetManager.h>
 #include <Platform/Window.h>
 #include <RenderBase/RenderSystem.h>
-#include <Renderer/SceneRendererContext.h>
+#include <Renderer/RendererContext.h>
 
 namespace hyp
 {
@@ -30,6 +31,16 @@ namespace hyp
             mScene = scene;
         }
 
+        void setPreTickCallback(std::function<void(float)> callback)
+        {
+            onPreTick = std::move(callback);
+        }
+
+        void setPreRenderCallback(std::function<void()> callback)
+        {
+            onPreRender = std::move(callback);
+        }
+
         void run();
 
     private:
@@ -40,7 +51,8 @@ namespace hyp
         std::unique_ptr<InputSystem> mInputSystem;
         std::unique_ptr<SampleStateManager> mSampleStateManager;
         std::unique_ptr<RenderSystem> mRenderSystem;
-        std::unique_ptr<SceneRendererContext> mSceneRendererContext;
+        std::unique_ptr<RendererContext> mRendererContext;
+        std::unique_ptr<AssetManager> mAssetManager;
         TRef<Scene> mScene;
 
         bool mRunning = true;

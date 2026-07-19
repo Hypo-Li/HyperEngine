@@ -6,10 +6,14 @@
 ConstantBuffer<AtmosphereParameters> Atmosphere;
 
 [[vk::binding(1, 2)]]
-Sampler2D TransmittanceLutTexture;
+SamplerState LutSampler;
 
 [[vk::binding(2, 2)]]
-RWTexture2D<float4> MultiScatteringLutImage;
+Texture2D<float4> TransmittanceLutTexture;
+
+[[vk::binding(3, 2)]]
+[format("rgba16f")]
+WTexture2D<float4> MultiScatteringLutImage;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -25,13 +29,13 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     float sphereSolidAngle = 4.0 * PI;
     float isotropicPhase = 1.0 / sphereSolidAngle;
     float3 lum0, fms0, trans0;
-    rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, worldPos, worldDir, lightDir, 0.3, 15.0, 9000000.0, lum0, fms0, trans0);
+    rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, worldPos, worldDir, lightDir, 0.3, 15.0, 9000000.0, lum0, fms0, trans0);
     float3 lum1, fms1, trans1;
-    rayMarchAtmosphere(Atmosphere, TransmittanceLutTexture, worldPos, -worldDir, lightDir, 0.3, 15.0, 9000000.0, lum1, fms1, trans1);
+    rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, worldPos, -worldDir, lightDir, 0.3, 15.0, 9000000.0, lum1, fms1, trans1);
     float3 integratedIlluminance = (sphereSolidAngle * 0.5) * (lum0 + lum1);
     float3 fms = 0.5 * (fms0 + fms1);
     float3 fmsSqr = fms * fms;
     float3 inScatteredLuminance = integratedIlluminance * isotropicPhase;
     float3 L = inScatteredLuminance * (1.0 + fms + fmsSqr + fms * fmsSqr + fmsSqr * fmsSqr);
-    MultiScatteringLutImage[globalID.xy] = float4(L, 1);
+    MultiScatteringLutImage.Store(globalID.xy, float4(L, 1));
 }

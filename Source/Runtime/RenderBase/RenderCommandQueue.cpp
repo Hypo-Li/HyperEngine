@@ -45,7 +45,7 @@ namespace hyp
         ::operator delete[](mBuffer, std::align_val_t{ kMaxAlignment });
     }
 
-    void RenderCommandQueue::executeAll(RenderFrameContext& context)
+    void RenderCommandQueue::executeAll(FrameContext& context)
     {
         size_t tail = mTail.load(std::memory_order_relaxed);
 

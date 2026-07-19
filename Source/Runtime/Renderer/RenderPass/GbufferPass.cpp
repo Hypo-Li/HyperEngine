@@ -6,7 +6,6 @@ namespace hyp
     struct GBufferData
     {
         std::shared_ptr<DrawItemBucket> opaqueBucket;
-        SceneRendererContext* rendererContext;
         const SceneProxy* scene;
         float4 viewport;
         rg::TextureHandle sceneColor;
@@ -27,7 +26,7 @@ namespace hyp
 
     void GBufferPass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
-        SceneRendererContext& rendererContext,
+        RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
         const RenderData& renderData
@@ -38,7 +37,6 @@ namespace hyp
             [&](rg::RenderGraph::Builder& builder, GBufferData& data)
             {
                 data.opaqueBucket = renderData.opaqueBucket;
-                data.rendererContext = &rendererContext;
                 data.scene = &scene;
                 data.viewport = view.getViewport();
 
@@ -46,56 +44,57 @@ namespace hyp
                 uint32_t width = uint32_t(data.viewport.z);
                 uint32_t height = uint32_t(data.viewport.w);
 
-                auto sceneColor = builder.createTexture(
-                    "SceneColor"_hs(viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_R16G16B16A16_SFLOAT,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                auto gbufferA = builder.createTexture(
-                    "GBufferA"_hs(viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_A2R10G10B10_UNORM_PACK32,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                auto gbufferB = builder.createTexture(
-                    "GBufferB"_hs(viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_R8G8B8A8_UNORM,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                auto gbufferC = builder.createTexture(
-                    "GBufferC"_hs(viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_R8G8B8A8_SRGB,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                auto sceneDepth = builder.createTexture(
-                    "SceneDepth"_hs(viewId),
-                    rg::TextureDescription{
-                        VK_IMAGE_TYPE_2D,
-                        VK_FORMAT_D32_SFLOAT_S8_UINT,
-                        VkExtent3D{ width, height, 1 },
-                        1, 1, 1
-                    }
-                );
-                data.sceneColor = builder.addColorAttachment(sceneColor, VK_ATTACHMENT_LOAD_OP_CLEAR);
-                data.gbufferA = builder.addColorAttachment(gbufferA, VK_ATTACHMENT_LOAD_OP_CLEAR);
-                data.gbufferB = builder.addColorAttachment(gbufferB, VK_ATTACHMENT_LOAD_OP_CLEAR);
-                data.gbufferC = builder.addColorAttachment(gbufferC, VK_ATTACHMENT_LOAD_OP_CLEAR);
-                data.sceneDepth = builder.addDepthStencilAttachment(sceneDepth, VK_ATTACHMENT_LOAD_OP_CLEAR, true, VK_ATTACHMENT_LOAD_OP_DONT_CARE, false);
+                rhi::TextureDesc sceneColorDesc;
+                sceneColorDesc.type = rhi::TextureType::Texture_2D;
+                sceneColorDesc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+                sceneColorDesc.extent = { width, height, 1 };
+                sceneColorDesc.mipCount = 1;
+                sceneColorDesc.layerCount = 1;
+                sceneColorDesc.usage = rhi::TextureUsage::Color_Attachment | rhi::TextureUsage::Sampled | rhi::TextureUsage::Transfer_Src;
+                auto sceneColor = builder.createTexture("SceneColor"_hs(viewId), sceneColorDesc);
+
+                rhi::TextureDesc gbufferADesc;
+                gbufferADesc.type = rhi::TextureType::Texture_2D;
+                gbufferADesc.format = rhi::TextureFormat::A2BGR10_UNORM_PACK32;
+                gbufferADesc.extent = { width, height, 1 };
+                gbufferADesc.mipCount = 1;
+                gbufferADesc.layerCount = 1;
+                gbufferADesc.usage = rhi::TextureUsage::Color_Attachment | rhi::TextureUsage::Sampled;
+                auto gbufferA = builder.createTexture("GBufferA"_hs(viewId), gbufferADesc);
+
+                rhi::TextureDesc gbufferBDesc;
+                gbufferBDesc.type = rhi::TextureType::Texture_2D;
+                gbufferBDesc.format = rhi::TextureFormat::RGBA8_UNORM;
+                gbufferBDesc.extent = { width, height, 1 };
+                gbufferBDesc.mipCount = 1;
+                gbufferBDesc.layerCount = 1;
+                gbufferBDesc.usage = rhi::TextureUsage::Color_Attachment | rhi::TextureUsage::Sampled;
+                auto gbufferB = builder.createTexture("GBufferB"_hs(viewId), gbufferBDesc);
+
+                rhi::TextureDesc gbufferCDesc;
+                gbufferCDesc.type = rhi::TextureType::Texture_2D;
+                gbufferCDesc.format = rhi::TextureFormat::RGBA8_SRGB;
+                gbufferCDesc.extent = { width, height, 1 };
+                gbufferCDesc.mipCount = 1;
+                gbufferCDesc.layerCount = 1;
+                gbufferCDesc.usage = rhi::TextureUsage::Color_Attachment | rhi::TextureUsage::Sampled;
+                auto gbufferC = builder.createTexture("GBufferC"_hs(viewId), gbufferCDesc);
+
+                rhi::TextureDesc sceneDepthDesc;
+                sceneDepthDesc.type = rhi::TextureType::Texture_2D;
+                sceneDepthDesc.format = rhi::TextureFormat::D32_SFLOAT_S8_UINT;
+                sceneDepthDesc.extent = { width, height, 1 };
+                sceneDepthDesc.mipCount = 1;
+                sceneDepthDesc.layerCount = 1;
+                sceneDepthDesc.usage = rhi::TextureUsage::Depth_Stencil_Attachment | rhi::TextureUsage::Sampled;
+                auto sceneDepth = builder.createTexture("SceneDepth"_hs(viewId), sceneDepthDesc);
+
+                data.sceneColor = builder.addColorAttachment(sceneColor, rhi::AttachmentLoadOp::Clear);
+                data.gbufferA = builder.addColorAttachment(gbufferA, rhi::AttachmentLoadOp::Clear);
+                data.gbufferB = builder.addColorAttachment(gbufferB, rhi::AttachmentLoadOp::Clear);
+                data.gbufferC = builder.addColorAttachment(gbufferC, rhi::AttachmentLoadOp::Clear);
+                data.sceneDepth = builder.addDepthStencilAttachment(sceneDepth, rhi::AttachmentLoadOp::Clear, true, rhi::AttachmentLoadOp::Clear, false);
+
                 rg::Blackboard& blackboard = builder.getBlackboard();
                 blackboard.put("SceneColor"_hs(viewId), data.sceneColor);
                 blackboard.put("GBufferA"_hs(viewId), data.gbufferA);
@@ -103,35 +102,28 @@ namespace hyp
                 blackboard.put("GBufferC"_hs(viewId), data.gbufferC);
                 blackboard.put("SceneDepth"_hs(viewId), data.sceneDepth);
 
-                rg::TextureHandle sceneDepthD = builder.createSubTexture(
-                    "SceneDepthD"_hs(viewId),
-                    data.sceneDepth,
-                    rg::SubTextureDescription{
-                        VK_IMAGE_ASPECT_DEPTH_BIT,
-                        0, 1, 0, 1
-                    }
-                );
-                rg::TextureHandle sceneDepthS = builder.createSubTexture(
-                    "SceneDepthS"_hs(viewId),
-                    data.sceneDepth,
-                    rg::SubTextureDescription{
-                        VK_IMAGE_ASPECT_STENCIL_BIT,
-                        0, 1, 0, 1
-                    }
-                );
+                rhi::TextureViewDesc sceneDepthDViewDesc;
+                sceneDepthDViewDesc.type = rhi::TextureViewType::Texture_View_2D;
+                sceneDepthDViewDesc.format = rhi::TextureFormat::D32_SFLOAT_S8_UINT;
+                sceneDepthDViewDesc.range.aspect = rhi::TextureAspect::Depth;
+                sceneDepthDViewDesc.range.baseMip = 0;
+                sceneDepthDViewDesc.range.mipCount = 1;
+                sceneDepthDViewDesc.range.baseLayer = 0;
+                sceneDepthDViewDesc.range.layerCount = 1;
+                rg::TextureHandle sceneDepthD = builder.createSubTexture("SceneDepthD"_hs(viewId), data.sceneDepth, sceneDepthDViewDesc);
+
                 blackboard.put("SceneDepthD"_hs(viewId), sceneDepthD);
-                blackboard.put("SceneDepthS"_hs(viewId), sceneDepthS);
             },
-            [](rg::ExecuteContext& context, GBufferData& data)
+            [&rendererContext](rg::ExecuteContext& context, GBufferData& data)
             {
                 if (data.opaqueBucket->empty())
                 {
-                    context.beginRenderPass();
+                    context.beginPass();
                     return;
                 }
 
                 HString renderTag = "Builtin_Opaque"_hs;
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
 
                 std::vector<DrawBatch> drawBatches;
                 std::vector<uint32_t> instanceIndices;
@@ -168,89 +160,72 @@ namespace hyp
                 }
                 if (drawBatches.empty()) return;
 
-                auto& instanceIndicesBuffer = data.scene->getInstanceIndicesBuffer();
+                auto& indicesBuffer = data.scene->getIndicesBuffer();
 
                 size_t indicesBufferSize = instanceIndices.size() * sizeof(uint32_t);
-                if (indicesBufferSize <= 4096)
-                {
-                    // 小于等于 4KB (1024 个索引), 走 UpdateBuffer
-                    cmd.updateBuffer(
-                        instanceIndicesBuffer.getHandle(),
-                        0,
-                        indicesBufferSize,
-                        instanceIndices.data()
-                    );
-                }
-                else
-                {
-                    // 大于 4KB, 走 CopyBuffer
-                    StagingAllocation allocation = data.rendererContext->getRenderBackend().getStagingAllocator().forceAllocate(indicesBufferSize);
-                    std::memcpy(allocation.mappedData, instanceIndices.data(), indicesBufferSize);
-                    VkBufferCopy copyRegion = {};
-                    copyRegion.srcOffset = allocation.offset;
-                    copyRegion.dstOffset = 0;
-                    copyRegion.size = indicesBufferSize;
-                    cmd.copyBuffer(
-                        allocation.buffer,
-                        instanceIndicesBuffer.getHandle(),
-                        std::span(&copyRegion, 1)
-                    );
-                }
+                auto allocation = rendererContext.getRenderBackend().getStagingAllocator().forceAllocate(indicesBufferSize);
+                std::memcpy(allocation.mappedData, instanceIndices.data(), indicesBufferSize);
 
-                VkBufferMemoryBarrier2 barrier = {};
-                barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-                barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-                barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
-                barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-                barrier.buffer = instanceIndicesBuffer.getHandle();
-                barrier.offset = 0;
-                barrier.size = indicesBufferSize;
-                cmd.pipelineBarrier2({ &barrier, 1 });
+                rhi::BufferBarrier preBarrier;
+                preBarrier.buffer = &indicesBuffer;
+                preBarrier.offset = 0;
+                preBarrier.size = indicesBufferSize;
+                preBarrier.oldState = rhi::ResourceState::Shader_Storage_Read;
+                preBarrier.newState = rhi::ResourceState::Transfer_Dst;
+                cmd.insertBarriers({ &preBarrier, 1 });
+
+                rhi::BufferCopyRegion copyRegion;
+                copyRegion.srcOffset = allocation.offset;
+                copyRegion.dstOffset = 0;
+                copyRegion.size = indicesBufferSize;
+                cmd.copyBuffer(allocation.buffer, &indicesBuffer, { &copyRegion, 1 });
+
+                rhi::BufferBarrier postBarrier;
+                postBarrier.buffer = &indicesBuffer;
+                postBarrier.offset = 0;
+                postBarrier.size = indicesBufferSize;
+                postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+                postBarrier.newState = rhi::ResourceState::Shader_Storage_Read;
+                cmd.insertBarriers({ &postBarrier, 1 });
+
+                context.beginPass();
 
                 setViewportAndScissor(cmd, data.viewport);
 
-                context.beginRenderPass();
-
-                vk::Pipeline* currentPipeline = nullptr;
+                rhi::Pipeline* currentPipeline = nullptr;
                 prevMaterial = nullptr;
                 prevGeometry = nullptr;
                 for (const auto& drawBatch : drawBatches)
                 {
-                    // bind pipeline
                     VertexLayout vertexLayout = drawBatch.geometry->getVertexLayout();
-                    vk::Pipeline* pipeline = drawBatch.material->getCachedPipeline(renderTag, vertexLayout);
+                    rhi::Pipeline* pipeline = drawBatch.material->getCachedPipeline(renderTag, vertexLayout);
                     if (!pipeline)
                     {
-                        pipeline = createPipeline(*data.rendererContext, *drawBatch.material, renderTag, vertexLayout);
+                        pipeline = createPipeline(rendererContext, *drawBatch.material, renderTag, vertexLayout);
                         drawBatch.material->cachePipeline(renderTag, vertexLayout, pipeline);
                     }
                     if (pipeline != currentPipeline)
                     {
-                        cmd.bindPipeline(pipeline->getBindPoint(), pipeline->getHandle());
-                        //cmd.setPolygonMode(VK_POLYGON_MODE_FILL);
+                        cmd.bindPipeline(pipeline);
                         currentPipeline = pipeline;
                     }
 
-                    // bind descriptor set
                     if (drawBatch.material != prevMaterial)
                     {
-                        const vk::DescriptorSet* parametersDescriptorSet = drawBatch.material->getParametersDescriptorSet();
-                        if (parametersDescriptorSet)
+                        const rhi::BindGroup* parametersBindGroup = drawBatch.material->getParametersBindGroup();
+                        if (parametersBindGroup)
                         {
-                            VkDescriptorSet descriptorSetHandle = parametersDescriptorSet->getHandle();
-                            cmd.bindDescriptorSets(
-                                currentPipeline->getBindPoint(),
-                                currentPipeline->getLayout().getHandle(),
-                                2, // Material DescriptorSet Slot
-                                { &descriptorSetHandle, 1 },
+                            cmd.setBindGroup(
+                                2,
+                                rhi::PipelineBindPoint::Graphics,
+                                &currentPipeline->getLayout(),
+                                parametersBindGroup,
                                 {}
                             );
                         }
                         prevMaterial = drawBatch.material;
                     }
 
-                    // bind geometry
                     if (drawBatch.geometry != prevGeometry)
                     {
                         drawBatch.geometry->bind(cmd);
@@ -260,12 +235,12 @@ namespace hyp
                     drawBatch.geometry->draw(cmd, drawBatch.sectionIndex, drawBatch.instanceCount, drawBatch.firstInstance);
                 }
             },
-            rg::PassFlags::Skip_Begin_Render_Pass
+            rg::PassFlags::Skip_Begin_Pass
         );
     }
 
-    vk::Pipeline* GBufferPass::createPipeline(
-        SceneRendererContext& rendererContext,
+    rhi::Pipeline* GBufferPass::createPipeline(
+        RendererContext& rendererContext,
         MaterialProxy& material,
         HString renderTag,
         VertexLayout vertexLayout
@@ -274,33 +249,23 @@ namespace hyp
         auto shaderVariant = material.getOrCreateShaderVariant(renderTag, vertexLayout);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
-        const vk::DescriptorSet* materialParameterDescriptorSet = material.getParametersDescriptorSet();
+        const rhi::BindGroup* materialParameterBindGroup = material.getParametersBindGroup();
         auto* pipelineLayout = createRenderPassPipelineLayout(
             rendererContext,
-            VK_NULL_HANDLE,
-            materialParameterDescriptorSet ? materialParameterDescriptorSet->getLayout().getHandle() : VK_NULL_HANDLE
+            nullptr,
+            materialParameterBindGroup ? &materialParameterBindGroup->getLayout() : nullptr
         );
 
         PipelineCache::GraphicsKey pipelineKey;
+        pipelineKey.pipelineState = PipelineStatePresets::opaqueMesh(material.getAttributes().doubleSided, rhi::CompareOp::Greater_Equal);
         pipelineKey.pipelineState.shader = shaderVariant;
         pipelineKey.pipelineState.vertexLayout = vertexLayout;
-        pipelineKey.pipelineState.topology = static_cast<uint32_t>(Topology::Triangle_List);
-        pipelineKey.pipelineState.samples = static_cast<uint32_t>(SampleCount::Count_1);
-        pipelineKey.pipelineState.polygonMode = static_cast<uint32_t>(PolygonMode::Fill);
-        pipelineKey.pipelineState.cullMode = static_cast<uint32_t>(material.getAttributes().doubleSided ? CullMode::None : CullMode::Back);
-        pipelineKey.pipelineState.frontFace = static_cast<uint32_t>(FrontFace::Counter_Clockwise);
-        pipelineKey.pipelineState.depthTestEnable = 1;
-        pipelineKey.pipelineState.depthWriteEnable = 1;
-        pipelineKey.pipelineState.depthCompareOp = static_cast<uint32_t>(CompareOp::Greater_Or_Equal);
-        pipelineKey.pipelineState.stencilTestEnable = 0;
-        pipelineKey.pipelineState.stencilState = StencilState::get();
-        pipelineKey.pipelineState.colorBlendState = ColorBlendState::get();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
-            VK_FORMAT_D32_SFLOAT_S8_UINT,
-            VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_FORMAT_A2R10G10B10_UNORM_PACK32,
-            VK_FORMAT_R8G8B8A8_UNORM,
-            VK_FORMAT_R8G8B8A8_SRGB
+            rhi::TextureFormat::D32_SFLOAT_S8_UINT,
+            rhi::TextureFormat::RGBA16_SFLOAT,
+            rhi::TextureFormat::A2BGR10_UNORM_PACK32,
+            rhi::TextureFormat::RGBA8_UNORM,
+            rhi::TextureFormat::RGBA8_SRGB
         >();
         pipelineKey.pipelineLayout = pipelineLayout;
         return pipelineCache.getOrCreateGraphicsPipeline(pipelineKey);

@@ -6,103 +6,96 @@ namespace hyp::rg
     class TransientResources
     {
     public:
-        TransientResources(const vk::Device& device);
+        TransientResources(const rhi::Device& device);
+
         ~TransientResources();
 
-        vk::Buffer* acquireBuffer(const BufferKey& key);
+        TRef<rhi::Buffer> acquireBuffer(const BufferKey& key);
 
-        vk::ImageView* acquireTexture(const TextureKey& key);
+        TRef<rhi::TextureView> acquireTexture(const TextureKey& key);
 
-        vk::ImageView* acquireSubTexture(vk::ImageView* texture, const SubTextureKey& key);
+        TRef<rhi::TextureView> acquireSubTexture(const rhi::TextureView& texture, const SubTextureKey& key);
 
-        vk::RenderPass* acquireRenderPass(const RenderPassKey& key);
-
-        vk::Framebuffer* acquireFramebuffer(const FramebufferKey& key);
-
-        uint16_t getPassPrevBufferBarrierCount() const noexcept
+        uint16_t getPrePassBufferBarrierCount() const noexcept
         {
-            return static_cast<uint16_t>(mPassPrevBufferBarriers.size());
+            return static_cast<uint16_t>(mPrePassBufferBarriers.size());
         }
 
-        void addPassPrevBufferBarrier(const VkBufferMemoryBarrier2& barrier)
+        void addPrePassBufferBarrier(rhi::BufferBarrier transition)
         {
-            mPassPrevBufferBarriers.emplace_back(barrier);
+            mPrePassBufferBarriers.emplace_back(transition);
         }
 
-        std::span<const VkBufferMemoryBarrier2> getPassPrevBufferBarriers(uint16_t begin, uint16_t count) const noexcept
+        std::span<const rhi::BufferBarrier> getPrePassBufferBarriers(uint16_t begin, uint16_t count) const noexcept
         {
-            return std::span<const VkBufferMemoryBarrier2>(mPassPrevBufferBarriers.data() + begin, count);
+            return std::span<const rhi::BufferBarrier>(mPrePassBufferBarriers.data() + begin, count);
         }
 
-        uint16_t getPassPrevImageBarrierCount() const noexcept
+        uint16_t getPrePassTextureBarrierCount() const noexcept
         {
-            return static_cast<uint16_t>(mPassPrevImageBarriers.size());
+            return static_cast<uint16_t>(mPrePassTextureBarriers.size());
         }
 
-        void addPassPrevImageBarrier(const VkImageMemoryBarrier2& barrier)
+        void addPrePassTextureBarrier(rhi::TextureBarrier transition)
         {
-            mPassPrevImageBarriers.emplace_back(barrier);
+            mPrePassTextureBarriers.emplace_back(transition);
         }
 
-        std::span<const VkImageMemoryBarrier2> getPassPrevImageBarriers(uint16_t begin, uint16_t count) const noexcept
+        std::span<const rhi::TextureBarrier> getPrePassTextureBarriers(uint16_t begin, uint16_t count) const noexcept
         {
-            return std::span<const VkImageMemoryBarrier2>(mPassPrevImageBarriers.data() + begin, count);
+            return std::span<const rhi::TextureBarrier>(mPrePassTextureBarriers.data() + begin, count);
         }
 
-        uint16_t getPassPostBufferBarrierCount() const noexcept
+        uint16_t getPostPassBufferBarrierCount() const noexcept
         {
-            return static_cast<uint16_t>(mPassPostBufferBarriers.size());
+            return static_cast<uint16_t>(mPostPassBufferBarriers.size());
         }
 
-        void addPassPostBufferBarrier(const VkBufferMemoryBarrier2& barrier)
+        void addPostPassBufferBarrier(rhi::BufferBarrier transition)
         {
-            mPassPostBufferBarriers.emplace_back(barrier);
+            mPostPassBufferBarriers.emplace_back(transition);
         }
 
-        std::span<const VkBufferMemoryBarrier2> getPassPostBufferBarriers(uint16_t begin, uint16_t count) const noexcept
+        std::span<const rhi::BufferBarrier> getPostPassBufferBarriers(uint16_t begin, uint16_t count) const noexcept
         {
-            return std::span<const VkBufferMemoryBarrier2>(mPassPostBufferBarriers.data() + begin, count);
+            return std::span<const rhi::BufferBarrier>(mPostPassBufferBarriers.data() + begin, count);
         }
 
-        uint16_t getPassPostImageBarrierCount() const noexcept
+        uint16_t getPostPassTextureBarrierCount() const noexcept
         {
-            return static_cast<uint16_t>(mPassPostImageBarriers.size());
+            return static_cast<uint16_t>(mPostPassTextureBarriers.size());
         }
 
-        void addPassPostImageBarrier(const VkImageMemoryBarrier2& barrier)
+        void addPostPassTextureBarrier(rhi::TextureBarrier transition)
         {
-            mPassPostImageBarriers.emplace_back(barrier);
+            mPostPassTextureBarriers.emplace_back(transition);
         }
 
-        std::span<const VkImageMemoryBarrier2> getPassPostImageBarriers(uint16_t begin, uint16_t count) const noexcept
+        std::span<const rhi::TextureBarrier> getPostPassTextureBarriers(uint16_t begin, uint16_t count) const noexcept
         {
-            return std::span<const VkImageMemoryBarrier2>(mPassPostImageBarriers.data() + begin, count);
+            return std::span<const rhi::TextureBarrier>(mPostPassTextureBarriers.data() + begin, count);
         }
 
         void destroyUselessResources();
 
         void clearBarriers();
 
-        const vk::Device& getDevice() const noexcept
+        const rhi::Device& getDevice() const noexcept
         {
             return mDevice;
         }
 
     private:
-        static vk::Buffer* createBuffer(const vk::Device& device, const BufferKey& key);
+        static TRef<rhi::Buffer> createBuffer(const rhi::Device& device, const BufferKey& key);
 
-        static std::pair<vk::Image*, vk::ImageView*> createTexture(const vk::Device& device, const TextureKey& key);
+        static std::pair<TRef<rhi::Texture>, TRef<rhi::TextureView>> createTexture(const rhi::Device& device, const TextureKey& key);
 
-        static vk::ImageView* createSubTexture(vk::Image* image, const SubTextureKey& key);
-
-        static vk::RenderPass* createRenderPass(const vk::Device& device, const RenderPassKey& key);
-
-        static vk::Framebuffer* createFramebuffer(const vk::Device& device, const FramebufferKey& key);
+        static TRef<rhi::TextureView> createSubTexture(rhi::Texture& texture, const SubTextureKey& key);
 
     private:
-        const vk::Device& mDevice;
+        const rhi::Device& mDevice;
 
-        template <typename T, size_t MIN_REFCOUNT, size_t MAX_UNUSED_COUNT = 3>
+        template <typename T, size_t MAX_UNUSED_COUNT = 3>
         struct ResourceRecord
         {
             TRef<T> resource;
@@ -113,7 +106,7 @@ namespace hyp::rg
             bool shouldDestroy() noexcept
             {
                 // 连续MAX_UNUSED_COUNT没有被使用则可销毁
-                if (resource->getRefCount() == MIN_REFCOUNT)
+                if (resource->getRefCount() == 1)
                     ++unusedCount;
                 else
                     unusedCount = 0;
@@ -122,25 +115,19 @@ namespace hyp::rg
             }
         };
 
-        using BufferRecord = ResourceRecord<vk::Buffer, 1>;
+        using BufferRecord = ResourceRecord<rhi::Buffer>;
         std::unordered_map<BufferKey, BufferRecord, BufferKeyHash> mBufferMap;
 
-        using TextureRecord = ResourceRecord<vk::ImageView, 2>;
+        using TextureRecord = ResourceRecord<rhi::TextureView>;
         std::unordered_map<TextureKey, TextureRecord, TextureKeyHash> mTextureMap;
 
-        // key用于存放image, value为非默认imageView
+        // key用于存放texture, value为非默认textureView
         using SubTextureMap = std::unordered_map<SubTextureKey, TextureRecord, SubTextureKeyHash>;
-        std::unordered_map<TRef<vk::Image>, SubTextureMap> mSubTextureMaps;
+        std::unordered_map<TRef<rhi::Texture>, SubTextureMap> mSubTextureMaps;
 
-        using RenderPassRecord = ResourceRecord<vk::RenderPass, 1>;
-        std::unordered_map<RenderPassKey, RenderPassRecord, RenderPassKeyHash> mRenderPassMap;
-
-        using FramebufferRecord = ResourceRecord<vk::Framebuffer, 1>;
-        std::unordered_map<FramebufferKey, FramebufferRecord, FramebufferKeyHash> mFramebufferMap;
-
-        std::vector<VkBufferMemoryBarrier2> mPassPrevBufferBarriers;
-        std::vector<VkBufferMemoryBarrier2> mPassPostBufferBarriers;
-        std::vector<VkImageMemoryBarrier2> mPassPrevImageBarriers;
-        std::vector<VkImageMemoryBarrier2> mPassPostImageBarriers;
+        std::vector<rhi::BufferBarrier> mPrePassBufferBarriers;
+        std::vector<rhi::TextureBarrier> mPrePassTextureBarriers;
+        std::vector<rhi::BufferBarrier> mPostPassBufferBarriers;
+        std::vector<rhi::TextureBarrier> mPostPassTextureBarriers;
     };
 }

@@ -2,18 +2,47 @@
 #include "../Context.h"
 
 #include <Core/Common/Hash.h>
-#include <RenderBase/Vulkan/Sampler.h>
+#include <RenderBase/SamplerCache.h>
 #include <RenderBase/RenderFrontend.h>
 #include <RenderBase/SamplerProxy.h>
 
 namespace hyp
 {
+    template <> Type* Reflection::createType<Filter>()
+    {
+        auto e = new TEnumeration<Filter>("Filter");
+        e->addValue("Point", Filter::Point);
+        e->addValue("Bilinear", Filter::Bilinear);
+        e->addValue("Trilinear", Filter::Trilinear);
+        e->addValue("Anisotropic", Filter::Anisotropic);
+        return e;
+    }
+
+    template <> Type* Reflection::createType<AddressMode>()
+    {
+        auto e = new TEnumeration<AddressMode>("AddressMode");
+        e->addValue("Repeat", AddressMode::Repeat);
+        e->addValue("Clamp", AddressMode::Clamp);
+        e->addValue("Mirror", AddressMode::Mirror);
+        return e;
+    }
+
     bool SampleState::operator==(const SampleState& other) const noexcept
     {
         return filter == other.filter &&
             addressModeU == other.addressModeU &&
             addressModeV == other.addressModeV &&
             addressModeW == other.addressModeW;
+    }
+
+    template <> Type* Reflection::createType<SampleState>()
+    {
+        auto s = new TStructure<SampleState>("SampleState");
+        s->addProperty("Filter", &SampleState::filter);
+        s->addProperty("Address Mode U", &SampleState::addressModeU);
+        s->addProperty("Address Mode V", &SampleState::addressModeV);
+        s->addProperty("Address Mode W", &SampleState::addressModeW);
+        return s;
     }
 
     size_t SampleStateHash::operator()(const SampleState& key) const noexcept
@@ -39,7 +68,7 @@ namespace hyp
         mSamplerProxyHandleMap.clear();
 
         renderFrontend.enqueueLambda(
-            [proxyHandles = std::move(proxyHandles)](RenderFrameContext& context)
+            [proxyHandles = std::move(proxyHandles)](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 for (auto proxyHandle : proxyHandles)
@@ -62,14 +91,14 @@ namespace hyp
         return proxyHandle;
     }
 
-    static VkSamplerAddressMode toVkSamplerAddressMode(AddressMode addressMode) noexcept
+    static rhi::AddressMode toRHIAddressMode(AddressMode addressMode) noexcept
     {
         switch (addressMode)
         {
-        case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        case AddressMode::Clamp: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-        default: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        case AddressMode::Repeat: return rhi::AddressMode::Repeat;
+        case AddressMode::Clamp: return rhi::AddressMode::Clamp_To_Edge;
+        case AddressMode::Mirror: return rhi::AddressMode::Mirrored_Repeat;
+        default: return rhi::AddressMode::Repeat;
         }
     }
 
@@ -78,37 +107,37 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         SamplerProxyHandle proxyHandle = renderFrontend.allocateProxyHandle<ProxyType::Sampler>();
 
-        vk::Sampler::CreateInfo samplerInfo;
+        rhi::SamplerDesc samplerDesc;
         switch (sampleState.filter)
         {
         case Filter::Point:
         {
-            samplerInfo.minFilter = VK_FILTER_NEAREST;
-            samplerInfo.magFilter = VK_FILTER_NEAREST;
-            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            samplerDesc.minFilter = rhi::Filter::Nearest;
+            samplerDesc.magFilter = rhi::Filter::Nearest;
+            samplerDesc.mipmapMode = rhi::MipmapMode::Nearest;
             break;
         }
         case Filter::Bilinear:
         {
-            samplerInfo.minFilter = VK_FILTER_LINEAR;
-            samplerInfo.magFilter = VK_FILTER_LINEAR;
-            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            samplerDesc.minFilter = rhi::Filter::Linear;
+            samplerDesc.magFilter = rhi::Filter::Linear;
+            samplerDesc.mipmapMode = rhi::MipmapMode::Nearest;
             break;
         }
         case Filter::Trilinear:
         {
-            samplerInfo.minFilter = VK_FILTER_LINEAR;
-            samplerInfo.magFilter = VK_FILTER_LINEAR;
-            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerDesc.minFilter = rhi::Filter::Linear;
+            samplerDesc.magFilter = rhi::Filter::Linear;
+            samplerDesc.mipmapMode = rhi::MipmapMode::Linear;
             break;
         }
         case Filter::Anisotropic:
         {
-            samplerInfo.minFilter = VK_FILTER_LINEAR;
-            samplerInfo.magFilter = VK_FILTER_LINEAR;
-            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-            samplerInfo.anisotropyEnable = VK_TRUE;
-            samplerInfo.maxAnisotropy = 16.0f;
+            samplerDesc.minFilter = rhi::Filter::Linear;
+            samplerDesc.magFilter = rhi::Filter::Linear;
+            samplerDesc.mipmapMode = rhi::MipmapMode::Linear;
+            samplerDesc.anisotropyEnable = true;
+            samplerDesc.maxAnisotropy = 16.0f;
             break;
         }
         default:
@@ -118,46 +147,17 @@ namespace hyp
         }
         }
 
-        samplerInfo.addressModeU = toVkSamplerAddressMode(sampleState.addressModeU);
-        samplerInfo.addressModeV = toVkSamplerAddressMode(sampleState.addressModeV);
-        samplerInfo.addressModeW = toVkSamplerAddressMode(sampleState.addressModeW);
+        samplerDesc.addressModeU = toRHIAddressMode(sampleState.addressModeU);
+        samplerDesc.addressModeV = toRHIAddressMode(sampleState.addressModeV);
+        samplerDesc.addressModeW = toRHIAddressMode(sampleState.addressModeW);
 
         renderFrontend.enqueueLambda(
-            [proxyHandle, samplerInfo](RenderFrameContext& context)
+            [proxyHandle, samplerDesc](FrameContext& context)
             {
-                context.getProxyManager().createProxy(proxyHandle, samplerInfo);
+                context.getProxyManager().createProxy(proxyHandle, samplerDesc);
             }
         );
 
         return proxyHandle;
-    }
-
-    template <> Type* Reflection::createType<Filter>()
-    {
-        auto e = new TEnumeration<Filter>("Filter");
-        e->addValue("Point", Filter::Point);
-        e->addValue("Bilinear", Filter::Bilinear);
-        e->addValue("Trilinear", Filter::Trilinear);
-        e->addValue("Anisotropic", Filter::Anisotropic);
-        return e;
-    }
-
-    template <> Type* Reflection::createType<AddressMode>()
-    {
-        auto e = new TEnumeration<AddressMode>("AddressMode");
-        e->addValue("Repeat", AddressMode::Repeat);
-        e->addValue("Clamp", AddressMode::Clamp);
-        e->addValue("Mirror", AddressMode::Mirror);
-        return e;
-    }
-
-    template <> Type* Reflection::createType<SampleState>()
-    {
-        auto s = new TStructure<SampleState>("SampleState");
-        s->addProperty("Filter", &SampleState::filter);
-        s->addProperty("Address Mode U", &SampleState::addressModeU);
-        s->addProperty("Address Mode V", &SampleState::addressModeV);
-        s->addProperty("Address Mode W", &SampleState::addressModeW);
-        return s;
     }
 }

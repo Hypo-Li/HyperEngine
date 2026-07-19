@@ -30,11 +30,12 @@ struct V2F
     float linearDepth;
 };
 
+// 原因同 GSplat.slang:新 RHI 没有 Triangle_Fan,改用 Triangle_Strip,顶点顺序要用 strip 的 "Z" 字形
 static constexpr float3 kQuadPositions[4] = {
     float3(-1, -1, 0),
     float3(-1,  1, 0),
-    float3( 1,  1, 0),
-    float3( 1, -1, 0)
+    float3( 1, -1, 0),
+    float3( 1,  1, 0)
 };
 
 [shader("vertex")]
@@ -116,12 +117,12 @@ void VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID, ou
 }
 
 [shader("fragment")]
-void FragmentMain(in V2F v2f, out float4 oColor : SV_Target)
+float4 FragmentMain(in V2F v2f) : SV_Target
 {
     float A = dot(v2f.position, v2f.position);
     if (A > 1.0)
         discard;
     float B = exp(-A * 4.0) * v2f.color.a;
 
-    oColor = float4(float3(v2f.linearDepth * B), 1.0 - B);
+    return float4(float3(v2f.linearDepth * B), 1.0 - B);
 }

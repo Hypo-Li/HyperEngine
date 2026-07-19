@@ -1,13 +1,13 @@
 #pragma once
 #include "RenderBaseDefines.h"
-#include "StagingAllocator.h"
 #include "BindlessRegistry.h"
-#include "Vulkan/Buffer.h"
-#include "Vulkan/DescriptorSet.h"
-#include "Vulkan/Pipeline.h"
-#include "Vulkan/CommandBuffer.h"
 
-#define SUPPORT_TEXTURE_CUBE_ARRAY 0
+#include <RHI/Buffer.h>
+#include <RHI/Texture.h>
+#include <RHI/Sampler.h>
+#include <RHI/BindGroup.h>
+#include <RHI/Pipeline.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -19,59 +19,60 @@ namespace hyp
         uint32_t frameIndex;
     };
 
+    class RenderBackend;
     class GlobalBindings
     {
     public:
-        GlobalBindings(const vk::Device& device, BindlessRegistry& bindlessRegistry);
+        GlobalBindings(RenderBackend& renderBackend);
 
-        const vk::DescriptorSet& getGlobalDataDescriptorSet() const  noexcept
+        const rhi::BindGroup& getGlobalDataBindGroup() const noexcept
         {
-            return *mGlobalDataDescriptorSet;
+            return *mGlobalDataBindGroup;
         }
 
-        const vk::PipelineLayout& getPipelineLayout() const noexcept
+        const rhi::PipelineLayout& getPipelineLayout() const noexcept
         {
             return *mPipelineLayout;
         }
 
-        void writeTexture2D(uint32_t index, VkImageView imageView);
+        void writeTexture2D(uint32_t index, rhi::TextureView* view);
 
-        void writeTexture2DArray(uint32_t index, VkImageView imageView);
+        void writeTexture2DArray(uint32_t index, rhi::TextureView* view);
 
-        void writeTextureCube(uint32_t index, VkImageView imageView);
+        void writeTexture3D(uint32_t index, rhi::TextureView* view);
 
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        void writeTextureCubeArray(uint32_t index, VkImageView imageView);
-#endif
+        void writeTextureCube(uint32_t index, rhi::TextureView* view);
 
-        void writeTexture3D(uint32_t index, VkImageView imageView);
+        void writeSampler(uint32_t index, rhi::Sampler* sampler);
 
-        void writeSampler(uint32_t index, VkSampler sampler);
-
-        void updateFrameData(vk::CommandBuffer& cmd, const FrameData& frameData);
+        void updateFrameData(rhi::CommandList& cmdList, const FrameData& frameData);
 
     private:
         void initBindlessDefaultResources();
 
-        void initGlobalDataDescriptorSet(const BindlessRegistry& bindlessRegistry);
+        void initGlobalDataBindGroup(const BindlessConfig& bindlessConfig);
 
     private:
-        const vk::Device& mDevice;
+        RenderBackend& mRenderBackend;
 
-        TRef<vk::Image> mDefaultTextureImage2D;
-        TRef<vk::ImageView> mDefaultTexture2DImageView;
-        TRef<vk::ImageView> mDefaultTexture2DArrayImageView;
-        TRef<vk::ImageView> mDefaultTextureCubeImageView;
-#if SUPPORT_TEXTURE_CUBE_ARRAY
-        TRef<vk::ImageView> mDefaultTextureCubeArrayImageView;
-#endif
-        TRef<vk::Image> mDefaultTextureImage3D;
-        TRef<vk::ImageView> mDefaultTexture3DImageView;
-        TRef<vk::Sampler> mDefaultSampler;
+        bool mBindlessEnabled = false;
 
-        TRef<vk::Buffer> mFrameDataUniformBuffer;
+        TRef<rhi::Texture> mDefaultTexture2D;
+        TRef<rhi::TextureView> mDefaultTexture2DView;
+        TRef<rhi::TextureView> mDefaultTexture2DArrayView;
 
-        TRef<vk::DescriptorSet> mGlobalDataDescriptorSet;
-        TRef<vk::PipelineLayout> mPipelineLayout;
+        TRef<rhi::Texture> mDefaultTexture3D;
+        TRef<rhi::TextureView> mDefaultTexture3DView;
+
+        TRef<rhi::Texture> mDefaultTextureCube;
+        TRef<rhi::TextureView> mDefaultTextureCubeView;
+
+        TRef<rhi::Sampler> mDefaultSampler;
+
+        TRef<rhi::Buffer> mFrameDataUniformBuffer;
+
+        TRef<rhi::BindGroupLayout> mGlobalDataBindGroupLayout;
+        TRef<rhi::BindGroup> mGlobalDataBindGroup;
+        TRef<rhi::PipelineLayout> mPipelineLayout;
     };
 }

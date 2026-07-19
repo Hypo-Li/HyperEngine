@@ -2,7 +2,7 @@
 #include <execution>
 #include <ranges>
 
-#include "SceneRendererContext.h"
+#include "RendererContext.h"
 #include "SceneProxy.h"
 #include "MeshRenderProxy.h"
 #include "RenderPipeline.h"
@@ -12,7 +12,7 @@ namespace hyp
     class SceneRenderer
     {
     public:
-        SceneRenderer(SceneRendererContext& sceneRendererContext);
+        SceneRenderer(RendererContext& rendererContext);
 
         void render(SceneProxy& scene, std::span<const SceneViewGroup> sceneViewGroups, rg::RenderGraph& renderGraph);
 
@@ -33,9 +33,9 @@ namespace hyp
             uint32_t geometryId
         );
 
-        // TODO: 考虑有顶点偏移的材质
         static uint64_t makeDepthOnlySortKey(
             BlendMode blendMode,
+            bool hasVertexPositionOffset,
             VertexLayoutType vertexLayoutType,
             uint32_t materialId,
             uint32_t vertexLayoutId,
@@ -48,6 +48,6 @@ namespace hyp
         void cull(const SceneProxy& scene, const SceneView& sceneView, RenderData& renderData);
 
     private:
-        SceneRendererContext& mSceneRendererContext;
+        RendererContext& mRendererContext;
     };
 }

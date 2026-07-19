@@ -5,7 +5,7 @@ namespace hyp
 {
     enum class CopyPolicy
     {
-        Skip,
+        Ignore,
         Shallow,
         Deep,
     };

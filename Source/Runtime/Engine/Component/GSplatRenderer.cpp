@@ -140,7 +140,7 @@ namespace hyp
             [sceneProxyHandle,
             proxyHandle = mProxyHandle,
             gpuSplatData = std::move(gpuSplatData),
-            worldMatrix = transform.getWorldMatrix()](RenderFrameContext& context) mutable
+            worldMatrix = transform.getWorldMatrix()](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
@@ -171,7 +171,7 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle = mProxyHandle,
-            sceneProxyHandle](RenderFrameContext& context)
+            sceneProxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 GSplatRenderProxy* proxy = proxyManager.getProxy(proxyHandle);
@@ -203,7 +203,7 @@ namespace hyp
             [proxyHandle = mProxyHandle,
             sceneProxyHandle,
             worldMatrix = transform.getWorldMatrix()]
-            (RenderFrameContext& context)
+            (FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 GSplatRenderProxy* proxy = proxyManager.getProxy(proxyHandle);
@@ -251,7 +251,7 @@ namespace hyp
             [sceneProxyHandle,
             proxyHandle = mProxyHandle,
             gpuSplatData = std::move(gpuSplatData),
-            worldMatrix = transform.getWorldMatrix()](RenderFrameContext& context) mutable
+            worldMatrix = transform.getWorldMatrix()](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);

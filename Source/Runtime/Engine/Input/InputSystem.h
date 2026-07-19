@@ -129,6 +129,8 @@ namespace hyp
     class IInputEventHandler
     {
     public:
+        virtual ~IInputEventHandler() = default;
+
         virtual bool handle(const InputEvent& event) = 0;
     };
 
@@ -137,12 +139,18 @@ namespace hyp
     public:
         InputSystem(Window& window);
 
-        void registerEventHandler(IInputEventHandler* eventHandler)
+        // 按值接收 unique_ptr: 所有权转移在调用点是显式的(调用方要么 std::make_unique,
+        // 要么自己 std::move 一个已有的 unique_ptr), 不会出现"传一个裸指针进来, 它却被悄悄
+        // delete 掉"这种和裸指针惯例(裸指针参数默认不持有所有权)相悖的情况。
+        void registerEventHandler(std::unique_ptr<IInputEventHandler> eventHandler)
         {
-            mEventHandlers.push_back(std::unique_ptr<IInputEventHandler>(eventHandler));
+            mEventHandlers.push_back(std::move(eventHandler));
         }
 
-        void unregisterEventHandler(IInputEventHandler* eventHandler)
+        // 这里的裸指针只是用来按地址查找、比较身份的, 本来就不持有所有权, 用裸指针没问题;
+        // 调用方需要在 registerEventHandler() 之前自己留一份原始指针(比如
+        // unique_ptr::get()), 才能在之后用它来 unregister。
+        void unregisterEventHandler(const IInputEventHandler* eventHandler)
         {
             auto it = std::find_if(mEventHandlers.begin(), mEventHandlers.end(), [eventHandler](const auto& handler)
             {
@@ -153,6 +161,11 @@ namespace hyp
         }
 
         void tick(float deltaTime);
+
+        Window& getWindow() noexcept
+        {
+            return mWindow;
+        }
 
         PlayerInput& getPlayerInput() noexcept
         {

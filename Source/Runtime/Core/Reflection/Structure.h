@@ -1,5 +1,6 @@
 #pragma once
 #include "Property.h"
+#include <span>
 
 namespace hyp
 {
@@ -17,9 +18,19 @@ namespace hyp
             return nullptr;
         }
 
-        const std::vector<Property*>& getProperties() const
+        std::span<Property* const> getProperties() const noexcept
         {
             return mProperties;
+        }
+
+        void setVersion(uint32_t version) noexcept
+        {
+            mVersion = version;
+        }
+
+        uint32_t getVersion() const noexcept
+        {
+            return mVersion;
         }
 
     protected:
@@ -27,6 +38,7 @@ namespace hyp
             Type(name, size, Kind::Structure) {}
 
         std::vector<Property*> mProperties;
+        uint32_t mVersion = 0;
     };
 
     template <typename T>

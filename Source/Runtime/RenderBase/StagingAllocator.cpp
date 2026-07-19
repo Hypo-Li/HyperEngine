@@ -2,133 +2,193 @@
 
 namespace hyp
 {
-    StagingAllocator::StagingAllocator(const vk::Device& device, VkDeviceSize ringBufferSize)
+    StagingAllocator::StagingAllocator(const rhi::Device& device, uint32_t pageSize, uint32_t maxPageCount) :
+        mDevice(device),
+        mPageSize(pageSize),
+        mMaxPageCount(maxPageCount)
     {
-        vk::Buffer::CreateInfo bufferInfo;
-        bufferInfo.size = ringBufferSize;
-        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        mRingBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_CPU_ONLY, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-        mRingBufferMappedData = mRingBuffer->getMemory()->map();
+        mPages.reserve(maxPageCount);
     }
 
     StagingAllocator::~StagingAllocator()
     {
-        mRingBuffer->getMemory()->unmap();
-    }
-
-    std::optional<StagingAllocation> StagingAllocator::tryAllocateFromRingBuffer(VkDeviceSize size, VkDeviceSize alignment)
-    {
-        // 逻辑上的 Head 对齐
-        VkDeviceSize alignedHead = alignUp(mHead, alignment);
-        VkDeviceSize bufferSize = mRingBuffer->getSize();
-
-        // 关键逻辑：如果当前分配导致 Head 超过 Tail 超过一圈的空间，说明满了
-        if (alignedHead + size > mTail + bufferSize)
-            return std::nullopt; // 空间不足
-
-        // 处理回绕时的连续性：Vulkan 的 copyBuffer 要求 Source Offset 在单次拷贝中不能越界
-        // 如果当前分段在物理 Buffer 尾部放不下，我们需要跳过这段空间（Padding）
-        VkDeviceSize physicalOffset = alignedHead % bufferSize;
-        if (physicalOffset + size > bufferSize)
+        for (auto& page : mPages)
         {
-            // 跳过末尾碎片的 Padding, 直接从物理 0 开始分配
-            VkDeviceSize padding = bufferSize - physicalOffset;
-            alignedHead = alignUp(alignedHead + padding, alignment);
-
-            // 再次检查空间
-            if (alignedHead + size > mTail + bufferSize)
+            if (page.mappedData)
             {
-                return std::nullopt;
+                page.buffer->unmap();
+                page.mappedData = nullptr;
             }
-            physicalOffset = 0;
         }
-
-        mCurrentFrameRingBlocks.emplace_back(alignedHead + size - mHead);
-        mHead = alignedHead + size;
-
-        Allocation allocation;
-        allocation.buffer = mRingBuffer->getHandle();
-        allocation.offset = physicalOffset;
-        allocation.size = size;
-        allocation.mappedData = static_cast<uint8_t*>(mRingBufferMappedData) + physicalOffset;
-        return allocation;
     }
 
-    StagingAllocation StagingAllocator::allocateSeparateBuffer(VkDeviceSize size)
+    std::optional<StagingAllocation> StagingAllocator::tryAllocate(size_t size, uint32_t alignment)
     {
-        vk::Buffer::CreateInfo bufferInfo;
-        bufferInfo.size = size;
-        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        TRef<vk::Buffer> separateBuffer = new vk::Buffer(mRingBuffer->getDevice(), bufferInfo, VMA_MEMORY_USAGE_CPU_ONLY, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        if (size > mPageSize)
+            return allocateTransient(size);
 
-        mCurrentFrameSeparateBlocks.emplace_back(separateBuffer);
-
-        Allocation allocation;
-        allocation.buffer = separateBuffer->getHandle();
-        allocation.offset = 0;
-        allocation.size = size;
-        allocation.mappedData = separateBuffer->getMemory()->map();
-        return allocation;
-    }
-
-    std::optional<StagingAllocation> StagingAllocator::tryAllocate(VkDeviceSize size, VkDeviceSize alignment)
-    {
-        // 对于大于 RingBuffer 的请求, 直接分配单独缓冲
-        if (size > mRingBuffer->getSize())
+        auto allocation = tryAllocateFromPages(size, alignment);
+        // 对于大于 1/2 PageSize, 且尝试分配失败时,
+        // 我们认为它很难有机会从 Page 中分配, 也分配单独缓冲
+        if (!allocation && size >= mPageSize / 2)
         {
-            return allocateSeparateBuffer(size);
-        }
-
-        auto allocation = tryAllocateFromRingBuffer(size, alignment);
-        // 对于大于 1/2 RingBuffer, 且尝试分配失败时,
-        // 我们认为它很难有机会从 RingBuffer 中分配, 也分配单独缓冲
-        if (!allocation && size >= (mRingBuffer->getSize() / 2))
-        {
-            return allocateSeparateBuffer(size);
+            return allocateTransient(size);
         }
         return allocation;
     }
 
-    StagingAllocation StagingAllocator::forceAllocate(VkDeviceSize size, VkDeviceSize alignment)
+    StagingAllocation StagingAllocator::forceAllocate(size_t size, uint32_t alignment)
     {
-        auto allocation = tryAllocate(size, alignment);
+        auto allocation = tryAllocateFromPages(size, alignment);
         if (allocation)
         {
             return *allocation;
         }
-        return allocateSeparateBuffer(size);
+        return allocateTransient(size);
     }
 
-    void StagingAllocator::commitAllocations(uint64_t submittedTimelineValue)
+    void StagingAllocator::commitAllocations(uint64_t signalValue)
     {
-        for (auto& block : mCurrentFrameRingBlocks)
+        for (auto pendingRecord : mPendingPages)
         {
-            block.signalValue = submittedTimelineValue;
-            mInFlightRingBlocks.push_back(block);
+            pendingRecord.signalValue = signalValue;
+            auto& page = mPages[pendingRecord.pageIndex];
+            page.buffer->unmap();
+            page.mappedData = nullptr;
+            page.isPending = false;
+            mSubmittedPages.push_back(pendingRecord);
         }
-        mCurrentFrameRingBlocks.clear();
+        mPendingPages.clear();
 
-        for (auto& block : mCurrentFrameSeparateBlocks)
+        for (auto& pendingRecord : mPendingTransients)
         {
-            block.signalValue = submittedTimelineValue;
-            mInFlightSeparateBlocks.push_back(block);
+            pendingRecord.buffer->unmap();
+            pendingRecord.signalValue = signalValue;
+            mSubmittedTransients.push_back(pendingRecord);
         }
-        mCurrentFrameSeparateBlocks.clear();
+        mPendingTransients.clear();
     }
 
-    void StagingAllocator::reclaimAllocation(uint64_t timelineValue) noexcept
+    void StagingAllocator::reclaimAllocations(uint64_t currentValue)
     {
-        while (!mInFlightRingBlocks.empty() && mInFlightRingBlocks.front().signalValue <= timelineValue)
+        uint32_t reclaimedPageCount = 0;
+        for (auto pageeRecord : mSubmittedPages)
         {
-            mTail += mInFlightRingBlocks.front().size;
-            mInFlightRingBlocks.pop_front();
+            if (pageeRecord.signalValue > currentValue)
+                break;
+
+            auto& page = mPages[pageeRecord.pageIndex];
+            page.mappedData = page.buffer->map();
+            page.offset = 0;
+            reclaimedPageCount++;
+        }
+        if (reclaimedPageCount > 0)
+        {
+            mSubmittedPages.erase(
+                mSubmittedPages.begin(),
+                mSubmittedPages.begin() + reclaimedPageCount
+            );
         }
 
-        while (!mInFlightSeparateBlocks.empty() && mInFlightSeparateBlocks.front().signalValue <= timelineValue)
+        uint32_t reclaimedTransientCount = 0;
+        for (auto transientRecord : mSubmittedTransients)
         {
-            mInFlightSeparateBlocks.front().buffer->getMemory()->unmap();
-            mInFlightSeparateBlocks.pop_front();
+            if (transientRecord.signalValue > currentValue)
+                break;
+            reclaimedTransientCount++;
+        }
+        if (reclaimedTransientCount > 0)
+        {
+            mSubmittedTransients.erase(
+                mSubmittedTransients.begin(),
+                mSubmittedTransients.begin() + reclaimedTransientCount
+            );
         }
     }
 
+    static uint32_t alignUp(uint32_t value, uint32_t alignment)
+    {
+        return (value + alignment - 1) & ~(alignment - 1);
+    }
+
+    std::optional<StagingAllocation> StagingAllocator::tryAllocateFromPages(size_t size, uint32_t alignment)
+    {
+        if (size > mPageSize)
+            return std::nullopt;
+
+        // 先尝试从当前 Pending Pages 中寻找可用于分配的 Page
+        for (auto pending : mPendingPages)
+        {
+            auto& page = mPages[pending.pageIndex];
+            uint32_t alignedOffset = alignUp(page.offset, alignment);
+            if (mPageSize - alignedOffset >= size)
+            {
+                page.offset = alignedOffset + static_cast<uint32_t>(size);
+                Allocation allocation;
+                allocation.buffer = page.buffer;
+                allocation.offset = alignedOffset;
+                allocation.size = size;
+                allocation.mappedData = static_cast<uint8_t*>(page.mappedData) + alignedOffset;
+                return allocation;
+            }
+        }
+
+        // 如果 Pending Pages 中没有可用的 Page, 则尝试从 Pages 中寻找一个有足够size 且 mappedData 有效的 Page
+        for (uint32_t i = 0; i < mPages.size(); ++i)
+        {
+            auto& page = mPages[i];
+            if (page.mappedData && !page.isPending)
+            {
+                page.isPending = true;
+                mPendingPages.emplace_back(i);
+                page.offset = static_cast<uint32_t>(size);
+                Allocation allocation;
+                allocation.buffer = page.buffer;
+                allocation.offset = 0;
+                allocation.size = size;
+                allocation.mappedData = page.mappedData;
+                return allocation;
+            }
+        }
+
+        // 如果所有现存 Pages 都没有可用空间, 则在不超过 maxPageCount的范围内创建新的 Page
+        if (mPages.size() < mMaxPageCount)
+        {
+            uint32_t pageIndex = static_cast<uint32_t>(mPages.size());
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = mPageSize;
+            bufferDesc.usage = rhi::BufferUsage::Transfer_Src;
+            TRef<rhi::Buffer> buffer = mDevice.createBuffer(bufferDesc, rhi::MemoryType::Cpu_To_Gpu);
+            std::string debugName = "StagingPage" + std::to_string(pageIndex);
+            buffer->setDebugName(std::string_view(debugName));
+            auto& page = mPages.emplace_back(buffer, static_cast<uint32_t>(size), true, buffer->map());
+            mPendingPages.emplace_back(pageIndex);
+
+            Allocation allocation;
+            allocation.buffer = buffer.get();
+            allocation.offset = 0;
+            allocation.size = size;
+            allocation.mappedData = page.mappedData;
+            return allocation;
+        }
+
+        return std::nullopt;
+    }
+
+    StagingAllocation StagingAllocator::allocateTransient(size_t size)
+    {
+        rhi::BufferDesc bufferDesc;
+        bufferDesc.size = size;
+        bufferDesc.usage = rhi::BufferUsage::Transfer_Src;
+        TRef<rhi::Buffer> transientBuffer = mDevice.createBuffer(bufferDesc, rhi::MemoryType::Cpu_To_Gpu);
+        transientBuffer->setDebugName("StagingTransient");
+        mPendingTransients.emplace_back(transientBuffer);
+
+        Allocation allocation;
+        allocation.buffer = transientBuffer.get();
+        allocation.offset = 0;
+        allocation.size = size;
+        allocation.mappedData = transientBuffer->map();
+        return allocation;
+    }
 }

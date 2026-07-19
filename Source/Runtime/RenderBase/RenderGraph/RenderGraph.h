@@ -16,34 +16,34 @@ namespace hyp::rg
         {
             friend class RenderGraph;
         public:
-            BufferHandle createBuffer(HString name, const BufferDescription& desc);
+            BufferHandle createBuffer(HString name, const rhi::BufferDesc& desc);
 
             BufferHandle importBuffer(HString name, BufferResource::PhysicalResource* physicalResource);
 
-            BufferHandle accessBuffer(BufferHandle handle, BufferUsage usage, AccessType accessType);
+            BufferHandle accessBuffer(BufferHandle handle, rhi::BufferUsage usage, AccessType accessType);
 
-            TextureHandle createTexture(HString name, const TextureDescription& desc);
+            TextureHandle createTexture(HString name, const rhi::TextureDesc& desc);
 
-            TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, VkImageLayout defaultLayout);
+            TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, rhi::ResourceState defaultState);
 
-            TextureHandle createSubTexture(HString name, TextureHandle handle, const SubTextureDescription& desc);
+            TextureHandle createSubTexture(HString name, TextureHandle handle, const rhi::TextureViewDesc& desc);
 
             // 同步 texture 与其 subtexture 之间的版本
             TextureHandle syncTextures(TextureHandle source, TextureHandle target);
 
-            TextureHandle addColorAttachment(TextureHandle handle, VkAttachmentLoadOp loadOp, ClearColorValue clearColor = ClearColorValue::BlackOpaque);
+            TextureHandle addColorAttachment(TextureHandle handle, rhi::AttachmentLoadOp loadOp, rhi::ClearColorValue clearColor = rhi::ClearColorValue(float4(0.0f, 0.0f, 0.0f, 1.0)));
 
-            TextureHandle addDepthAttachment(TextureHandle handle, VkAttachmentLoadOp loadOp, bool write, ClearDepthValue clearDepth = ClearDepthValue::Zero);
+            TextureHandle addDepthAttachment(TextureHandle handle, rhi::AttachmentLoadOp loadOp, bool write, float clearDepth = 0.0f);
 
-            TextureHandle addStencilAttachment(TextureHandle handle, VkAttachmentLoadOp loadOp, bool write, uint8_t clearStencil = 0u);
+            TextureHandle addStencilAttachment(TextureHandle handle, rhi::AttachmentLoadOp loadOp, bool write, uint8_t clearStencil = 0u);
 
             TextureHandle addDepthStencilAttachment(
                 TextureHandle handle,
-                VkAttachmentLoadOp depthLoadOp,
+                rhi::AttachmentLoadOp depthLoadOp,
                 bool writeDepth,
-                VkAttachmentLoadOp stencilLoadOp,
+                rhi::AttachmentLoadOp stencilLoadOp,
                 bool writeStencil,
-                ClearDepthStencilValue clearDepthStencil = { ClearDepthValue::Zero, 0 }
+                rhi::ClearDepthStencilValue clearDepthStencil = { 0.0f, 0 }
             );
 
             TextureHandle sample(TextureHandle handle);
@@ -52,7 +52,7 @@ namespace hyp::rg
 
             TextureHandle transfer(TextureHandle handle, AccessType accessType);
 
-            void setRenderArea(VkRect2D renderArea);
+            void setRenderArea(rhi::RenderArea renderArea);
 
             void markSideEffect();
 
@@ -69,7 +69,7 @@ namespace hyp::rg
             PassNode* mPassNode;
         };
 
-        RenderGraph(TransientResources& transientResources, vk::Swapchain& swapchain) noexcept;
+        RenderGraph(TransientResources& transientResources, rhi::Swapchain& swapchain) noexcept;
 
         ~RenderGraph() noexcept;
 
@@ -83,6 +83,17 @@ namespace hyp::rg
             return addPass<TComputePass, Data, Setup, Execute>(name, flags, std::forward<Setup>(setup), std::forward<Execute>(execute));
         }
 
+        // 不像 addComputePass/addGraphicsPass/addPresentPass 那样带 flags 参数 —— TTransferPass
+        // 无条件跳过 beginPass/endPass(见 Pass.h 的注释), Skip_Begin_Pass/Skip_End_Pass 对它没有
+        // 任何意义, 暴露一个"传了也不起作用"的参数只会带来困惑。execute 应为
+        // void(ExecuteContext&, Data&) lambda, 只做 copyBuffer/copyBufferToTexture/clearBuffer/
+        // insertBarriers, 不应 bindPipeline/dispatch/draw。
+        template <typename Data, typename Setup, typename Execute>
+        TTransferPass<Data, Execute>& addTransferPass(HString name, Setup&& setup, Execute&& execute) noexcept
+        {
+            return addPass<TTransferPass, Data, Setup, Execute>(name, PassFlags::None, std::forward<Setup>(setup), std::forward<Execute>(execute));
+        }
+
         template <typename Data, typename Setup, typename Execute>
         TGraphicsPass<Data, Execute>& addGraphicsPass(HString name, Setup&& setup, Execute&& execute, PassFlags flags = PassFlags::None) noexcept
         {
@@ -94,12 +105,13 @@ namespace hyp::rg
         {
             auto& pass = addPass<TPresentPass, Data, Setup, Execute>(name, flags, std::forward<Setup>(setup), std::forward<Execute>(execute));
             pass.setSwapchain(&mSwapchain);
+            mHasPresentPass = true;
             return pass;
         }
 
         BufferHandle importBuffer(HString name, BufferResource::PhysicalResource* physicalResource);
 
-        TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, VkImageLayout defaultLayout);
+        TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, rhi::ResourceState defaultState);
 
         VirtualResource* getResource(ResourceHandle handle) const noexcept
         {
@@ -122,11 +134,16 @@ namespace hyp::rg
             return mBlackboard;
         }
 
-        vk::Buffer* getBuffer(BufferHandle handle) const noexcept;
+        rhi::Buffer* getBuffer(BufferHandle handle) const noexcept;
 
-        vk::ImageView* getTexture(TextureHandle handle) const noexcept;
+        rhi::TextureView* getTexture(TextureHandle handle) const noexcept;
 
         std::string toGraphviz() const;
+
+        bool hasPresentPass() const noexcept
+        {
+            return mHasPresentPass;
+        }
 
     private:
         template <typename RESOURCE, typename... Args>
@@ -137,7 +154,7 @@ namespace hyp::rg
             return handle;
         }
 
-        TextureHandle createSubTexture(HString name, TextureHandle texture, const SubTextureDescription& desc);
+        TextureHandle createSubTexture(HString name, TextureHandle texture, const rhi::TextureViewDesc& desc);
 
         template <typename RESOURCE, typename... Args>
         TResourceHandle<RESOURCE> importResource(Args&&... args)
@@ -169,7 +186,8 @@ namespace hyp::rg
                 else
                 {
                     // 只有导入的资源才能未写先读
-                    assert(resource->isImported());
+                    assert(resource->isImported() ||
+                        (resource->getType() == ResourceType::SubTexture && static_cast<SubTextureResource*>(resource)->getTextureResource()->isImported()));
                     newNodeId = static_cast<uint16_t>(mResourceNodes.size());
                     resourceNode = mArena.create<ResourceNode>(mDAG, handle.getResourceId());
                     mResourceNodes.emplace_back(resourceNode);
@@ -195,7 +213,7 @@ namespace hyp::rg
 
             TResourceHandle<RESOURCE> newHandle(handle.getResourceId(), newNodeId, newVersion);
 
-            passNode->getPass()->access<RESOURCE>(handle, usage, accessType);
+            passNode->getPass()->recordAccess<RESOURCE>(handle, usage, accessType);
 
             return newHandle;
         }
@@ -213,61 +231,66 @@ namespace hyp::rg
 
         void clear();
 
-        void inferRenderPassKey(PassNode* passNode);
+        void setupGraphicsPassAttachments(PassNode* passNode);
 
         void inferBarriers(PassNode* passNode);
 
-        static bool subresourceRangeEqual(const VkImageSubresourceRange& a, const VkImageSubresourceRange& b);
+        static bool subresourceRangeEqual(const rhi::TextureRange& a, const rhi::TextureRange& b);
 
-        static bool checkSubresourceRangeHasOverlap(const VkImageSubresourceRange& a, const VkImageSubresourceRange& b);
+        // 判断 a 是否包含 b
+        static bool subresourceRangeCovers(const rhi::TextureRange& a, const rhi::TextureRange& b);
 
-        static std::optional<VkImageSubresourceRange> intersectSubresourceRange(const VkImageSubresourceRange& a, const VkImageSubresourceRange& b);
+        static bool checkSubresourceRangeHasOverlap(const rhi::TextureRange& a, const rhi::TextureRange& b);
+
+        static std::optional<rhi::TextureRange> intersectSubresourceRange(const rhi::TextureRange& a, const rhi::TextureRange& b);
 
         class SubresourceRangeSet
         {
         public:
-            SubresourceRangeSet(Arena& arena) : mRanges(StlAllocator<VkImageSubresourceRange>(arena))
+            SubresourceRangeSet(Arena& arena) : mRanges(StlAllocator<rhi::TextureRange>(arena))
             {
                 mRanges.reserve(4);
             }
 
-            void insert(const VkImageSubresourceRange& range);
+            void insert(const rhi::TextureRange& range);
 
             void clear() noexcept
             {
                 mRanges.clear();
             }
 
-            std::span<const VkImageSubresourceRange> getRanges() const noexcept
+            std::span<const rhi::TextureRange> getRanges() const noexcept
             {
                 return mRanges;
             }
 
         private:
-            std::optional<VkImageSubresourceRange> tryMergeSubresourceRanges(const VkImageSubresourceRange& a, const VkImageSubresourceRange& b);
+            std::optional<rhi::TextureRange> tryMergeSubresourceRanges(const rhi::TextureRange& a, const rhi::TextureRange& b);
 
         private:
-            ArenaVector<VkImageSubresourceRange> mRanges;
+            ArenaVector<rhi::TextureRange> mRanges;
         };
 
-        static uint8_t subtractSubresourceRange(const VkImageSubresourceRange& range, const VkImageSubresourceRange& cover, std::array<VkImageSubresourceRange, 5>& result);
+        static uint8_t subtractSubresourceRange(const rhi::TextureRange& range, const rhi::TextureRange& cover, std::array<rhi::TextureRange, 5>& result);
 
-        ArenaVector<VkImageSubresourceRange> subtractSubresourceRangeSet(const VkImageSubresourceRange& range, const SubresourceRangeSet& set);
+        ArenaVector<rhi::TextureRange> subtractSubresourceRangeSet(const rhi::TextureRange& range, const SubresourceRangeSet& set);
 
-        static VkImageLayout inferImageLayout(TextureUsage usage, AccessType accessType);
+        static rhi::ResourceState inferBufferState(rhi::BufferUsage usage, AccessType accessType, PassType passType);
 
-        static void inferBufferStageAccessMask(PassType passType, BufferUsage usage, AccessType accessType, bool isDst, VkPipelineStageFlags2& stageMask, VkAccessFlags2& accessMask);
+        static rhi::ResourceState inferTextureState(rhi::TextureUsage usage, AccessType accessType, rhi::TextureAspect aspect, PassType passType);
 
-        static void inferImageStageAccessMask(PassType passType, TextureUsage usage, AccessType accessType, bool isDst, VkPipelineStageFlags2& stageMask, VkAccessFlags2& accessMask);
+        // 针对单个BufferUsage bit, 直接推断其pipeline stage与access mask, 避免在RAR覆盖判断中反复调用通用函数
+        static rhi::ResourceState inferSingleBufferUsageState(rhi::BufferUsage usageBit, AccessType accessType, PassType passType);
 
     private:
         TransientResources& mTransientResources;
-        vk::Swapchain& mSwapchain;
+        rhi::Swapchain& mSwapchain;
         Arena mArena;
         DAG mDAG;
         Blackboard mBlackboard;
         ArenaVector<VirtualResource*> mResources;
         ArenaVector<ResourceNode*> mResourceNodes;
         ArenaVector<PassNode*> mPassNodes;
+        bool mHasPresentPass = false;
     };
 }

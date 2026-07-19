@@ -39,24 +39,28 @@ namespace hyp
         TRef<Texture2D> texture;
         std::optional<SampleState> sampleStateOverride;
     };
+    template <> Type* Reflection::createType<SampledTexture2D>();
 
     struct SampledTexture2DArray
     {
         TRef<Texture2DArray> texture;
         std::optional<SampleState> sampleStateOverride;
     };
+    template <> Type* Reflection::createType<SampledTexture2DArray>();
 
     struct SampledTexture3D
     {
         TRef<Texture3D> texture;
         std::optional<SampleState> sampleStateOverride;
     };
+    template <> Type* Reflection::createType<SampledTexture3D>();
 
     struct SampledTextureCube
     {
         TRef<TextureCube> texture;
         std::optional<SampleState> sampleStateOverride;
     };
+    template <> Type* Reflection::createType<SampledTextureCube>();
 
     template <typename T>
     struct is_sampled_texture : std::false_type {};
@@ -77,19 +81,22 @@ namespace hyp
     inline constexpr bool is_sampled_texture_v = is_sampled_texture<T>::value;
 
     template <>
-    struct material_parameter_type<SampledTexture2D> { static constexpr MaterialParameterType value = MaterialParameterType::Texture2D; };
+    struct material_parameter_type<SampledTexture2D> { static constexpr MaterialParameterType value = MaterialParameterType::Texture_2D; };
 
     template <>
-    struct material_parameter_type<SampledTexture2DArray> { static constexpr MaterialParameterType value = MaterialParameterType::Texture2DArray; };
+    struct material_parameter_type<SampledTexture2DArray> { static constexpr MaterialParameterType value = MaterialParameterType::Texture_2D_Array; };
 
     template <>
-    struct material_parameter_type<SampledTexture3D> { static constexpr MaterialParameterType value = MaterialParameterType::Texture3D; };
+    struct material_parameter_type<SampledTexture3D> { static constexpr MaterialParameterType value = MaterialParameterType::Texture_3D; };
 
     template <>
-    struct material_parameter_type<SampledTextureCube> { static constexpr MaterialParameterType value = MaterialParameterType::TextureCube; };
+    struct material_parameter_type<SampledTextureCube> { static constexpr MaterialParameterType value = MaterialParameterType::Texture_Cube; };
 
     class MaterialParameterValue
     {
+        // 反射需要直接访问 mValue 才能把底层 variant 注册成属性,复用现成的 std::variant
+        // 反射机制,而不是为 MaterialParameterValue 单独手写一个 Special 序列化器
+        friend class Reflection;
     public:
         MaterialParameterValue() : mValue(0.0f) {}
 
@@ -168,24 +175,19 @@ namespace hyp
         >;
         Value mValue;
     };
+    template <> Type* Reflection::createType<MaterialParameterValue>();
 
     struct MaterialParameter
     {
         HString name;
         MaterialParameterValue value;
     };
+    template <> Type* Reflection::createType<MaterialParameter>();
 
     void makeMaterialProxyParameters(
         std::span<MaterialParameter> parameters,
         std::vector<MaterialProxy::Parameter>& outProxyParameters,
         std::vector<std::pair<TextureProxyHandle, SamplerProxyHandle>>& outTextureBindings
-    );
-
-    void resolveTextureBinding(
-        MaterialProxy::Parameter& parameter,
-        TextureProxyHandle textureHandle,
-        SamplerProxyHandle samplerHandle,
-        ProxyManager& proxyManager
     );
 
     void resolveTextureBindings(

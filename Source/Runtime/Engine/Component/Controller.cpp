@@ -129,6 +129,19 @@ namespace hyp
             actionBinding.modifier.triggerType = TriggerType::Hold;
             playerInput.addActionBinding("Down"_hs, actionBinding);
         }
+
+        {
+            auto addLookActivationBinding = [&playerInput](MouseButton button)
+                {
+                    ActionBinding actionBinding;
+                    actionBinding.input.device = InputDevice::Mouse;
+                    actionBinding.input.inputCode = static_cast<uint32_t>(button);
+                    actionBinding.modifier.triggerType = TriggerType::Hold;
+                    playerInput.addActionBinding("LookActive"_hs, actionBinding);
+                };
+            addLookActivationBinding(MouseButton::Button_Left);
+            addLookActivationBinding(MouseButton::Button_Right);
+        }
     }
 
     void Controller::onUnregister()
@@ -137,7 +150,8 @@ namespace hyp
 
     void Controller::onTick(float deltaTime)
     {
-        auto& playerInput = Context::get().getInputSystem().getPlayerInput();
+        auto& inputSystem = Context::get().getInputSystem();
+        auto& playerInput = inputSystem.getPlayerInput();
         auto& transform = getEntity()->getTransform();
 
         static constexpr float moveSpeed = 10.0f;
@@ -152,19 +166,28 @@ namespace hyp
             );
         }
 
-        float2 look = playerInput.getAxis2D("Look"_hs);
-        if (look != float2(0))
+        auto lookActive = playerInput.getActionState("LookActive"_hs);
+        if (lookActive == InputActionState::Triggered)
         {
-            mYaw -= look.x;
-            mPitch += look.y;
+            inputSystem.getWindow().captureCursor();
+            float2 look = playerInput.getAxis2D("Look"_hs);
+            if (look != float2(0))
+            {
+                mYaw -= look.x;
+                mPitch += look.y;
 
-            mPitch = std::clamp(mPitch, -89.0f, 89.0f);
+                mPitch = std::clamp(mPitch, -89.0f, 89.0f);
 
-            Quaternion qYaw = glm::angleAxis(glm::radians(mYaw), float3{ 0.0f, 0.0f, 1.0f });
-            Quaternion qPitch = glm::angleAxis(glm::radians(mPitch), float3{ 1.0f, 0.0f, 0.0f });
+                Quaternion qYaw = glm::angleAxis(glm::radians(mYaw), float3{ 0.0f, 0.0f, 1.0f });
+                Quaternion qPitch = glm::angleAxis(glm::radians(mPitch), float3{ 1.0f, 0.0f, 0.0f });
 
-            Quaternion newRotation = qYaw * qPitch;
-            transform.setWorldRotation(newRotation);
+                Quaternion newRotation = qYaw * qPitch;
+                transform.setWorldRotation(newRotation);
+            }
+        }
+        else if (lookActive == InputActionState::Ended)
+        {
+            inputSystem.getWindow().releaseCursor();
         }
 
         if (playerInput.getActionState("Up"_hs) == InputActionState::Triggered)

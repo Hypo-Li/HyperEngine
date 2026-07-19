@@ -64,16 +64,17 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle,
-            desc = getDescription()](RenderFrameContext& context) mutable
+            desc = getDescription()](FrameContext& context) mutable
             {
-                vk::Image::CreateInfo imageInfo;
-                imageInfo.imageType = VK_IMAGE_TYPE_2D;
-                imageInfo.format = static_cast<VkFormat>(convertToVkFormat(desc.format, desc.compressionPreset, desc.isSRGB));
-                imageInfo.extent = { desc.width, desc.height, desc.depth };
-                imageInfo.mipLevels = 1;
-                imageInfo.arrayLayers = 1;
-                imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-                context.getProxyManager().createProxy(proxyHandle, imageInfo);
+                rhi::TextureDesc textureDesc;
+                textureDesc.type = rhi::TextureType::Texture_2D;
+                textureDesc.format = convertToRHITextureFormat(desc.format, desc.compressionPreset, desc.compressionFormatFamily, desc.isSRGB);
+                textureDesc.extent = { desc.width, desc.height, 1 };
+                textureDesc.mipCount = 1;
+                textureDesc.layerCount = 1;
+                textureDesc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Color_Attachment;
+
+                context.getProxyManager().createProxy(proxyHandle, textureDesc);
             }
         );
     }

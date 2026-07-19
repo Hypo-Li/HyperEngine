@@ -5,14 +5,16 @@ namespace hyp
 {
     // NOTE: 我们需要考虑是否使用Refable作为Object类型的基类, 后者完全可以使用标志清除法做GC
 
-    struct RefableAccessor;
-
     class Refable
     {
-        friend struct RefableAccessor;
         template <typename T>
         friend class TRef;
     public:
+        Refable(const Refable&) = delete;
+        Refable& operator=(const Refable&) = delete;
+        Refable(Refable&&) = delete;
+        Refable& operator=(Refable&&) = delete;
+
         size_t getRefCount() const noexcept
         {
             return mRefCount.load(std::memory_order_relaxed);
@@ -30,7 +32,7 @@ namespace hyp
             return mRefCount.fetch_add(1, std::memory_order_relaxed) + 1;
         }
 
-        size_t decRef() noexcept
+        size_t decRef() const noexcept
         {
             size_t old = mRefCount.fetch_sub(1, std::memory_order_release);
             if (old == 1)
@@ -39,19 +41,6 @@ namespace hyp
                 return 0;
             }
             return old - 1;
-        }
-    };
-
-    struct RefableAccessor
-    {
-        static void incRef(Refable& refable)
-        {
-            refable.incRef();
-        }
-
-        static void decRef(Refable& refable)
-        {
-            refable.decRef();
         }
     };
 

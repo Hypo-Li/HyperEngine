@@ -2,8 +2,8 @@
 
 namespace hyp
 {
-    SceneRenderer::SceneRenderer(SceneRendererContext& sceneRendererContext) :
-        mSceneRendererContext(sceneRendererContext)
+    SceneRenderer::SceneRenderer(RendererContext& rendererContext) :
+        mRendererContext(rendererContext)
     {
     }
 
@@ -37,7 +37,7 @@ namespace hyp
         if (sceneViewCount > 4)
         {
             auto range = std::views::iota(0ull, sceneViewCount);
-            // NOTE: GCC 需要链接 Intel TBB
+            // NOTE: GCC need link Intel TBB
             std::for_each(std::execution::par, range.begin(), range.end(),
                 [&](size_t i)
                 {
@@ -53,7 +53,10 @@ namespace hyp
             }
         }
 
-        renderGraph.addComputePass<UploadData>(
+        // 全程只有 SceneProxy::updateSceneData / MaterialProxy::prepare / GeometryProxy::prepare /
+        // ViewDataManager::updateViewData —— 逐一确认过, 这条调用链底下全部是 copyBuffer/
+        // insertBarriers, 没有任何 dispatch/draw/setBindGroup, 是 rg::TransferPass 的典型用例。
+        renderGraph.addTransferPass<UploadData>(
             "Upload"_hs,
             [&](rg::RenderGraph::Builder& builder, UploadData& data)
             {
@@ -93,7 +96,7 @@ namespace hyp
                 std::sort(data.materials.begin(), data.materials.end());
                 std::sort(data.geometries.begin(), data.geometries.end());
 
-                data.viewDataManager = &mSceneRendererContext.getViewDataManager();
+                data.viewDataManager = &mRendererContext.getViewDataManager();
                 data.viewIds.reserve(sceneViewCount);
                 data.viewDatas.reserve(sceneViewCount);
                 for (auto& sceneView : sceneViewPtrs)
@@ -104,7 +107,7 @@ namespace hyp
             },
             [](rg::ExecuteContext& context, UploadData& data)
             {
-                auto& cmd = context.getCommandBuffer();
+                auto& cmd = context.getCommandList();
                 data.scene->updateSceneData(cmd);
 
                 MaterialProxy* prevMaterial = nullptr;
@@ -140,7 +143,7 @@ namespace hyp
             {
                 DeferredPipeline::addToRenderGraph(
                     renderGraph,
-                    mSceneRendererContext,
+                    mRendererContext,
                     scene,
                     sceneViewGroup.getSceneViews()[0],
                     renderData[renderDataIndex]
@@ -154,7 +157,7 @@ namespace hyp
                 auto directionalLight = sceneViewGroup.getSource<DirectionalLightProxy>();
                 CascadeShadowPipeline::addToRenderGraph(
                     renderGraph,
-                    mSceneRendererContext,
+                    mRendererContext,
                     scene,
                     sceneViews,
                     { &renderData[renderDataIndex], sceneViews.size() },
@@ -206,6 +209,7 @@ namespace hyp
 
     uint64_t SceneRenderer::makeDepthOnlySortKey(
         BlendMode blendMode,
+        bool hasVertexPositionOffset,
         VertexLayoutType vertexLayoutType,
         uint32_t materialId,
         uint32_t vertexLayoutId,
@@ -217,7 +221,8 @@ namespace hyp
     {
         uint64_t sortKey = 0;
         bool isStaticOpaque = (blendMode == BlendMode::Opaque &&
-            vertexLayoutType == VertexLayoutType::Static_Mesh);
+            vertexLayoutType == VertexLayoutType::Static_Mesh &&
+            !hasVertexPositionOffset);
         sortKey |= static_cast<uint64_t>(isStaticOpaque ? 0 : 1) << 63;     // 1 bit
         sortKey |= (static_cast<uint64_t>(vertexLayoutId) & 0xFF) << 55;    // 8 bit
         materialId = isStaticOpaque ? 0 : materialId;
@@ -230,7 +235,7 @@ namespace hyp
 
     void SceneRenderer::cull(const SceneProxy& scene, const SceneView& sceneView, RenderData& renderData)
     {
-        auto& renderTagRegistry = mSceneRendererContext.getRenderBackend().getRenderTagRegistry();
+        auto& renderTagRegistry = mRendererContext.getRenderBackend().getRenderTagRegistry();
         uint32_t viewMask = sceneView.getRenderMask();
         const Frustumd& frustum = sceneView.getFrustum();
         for (MeshRenderProxy* meshRenderProxy : scene.getMeshRenderProxies())
@@ -262,6 +267,7 @@ namespace hyp
                     continue;
 
                 BlendMode blendMode = drawItem.material->getAttributes().blendMode;
+                bool hasVertexPositionOffset = drawItem.material->getAttributes().hasVertexPositionOffset;
                 uint32_t materialId = drawItem.material->getId();
                 uint32_t vertexLayoutId = drawItem.geometry->getVertexLayout().getId();
                 VertexLayoutType vertexLayoutType = drawItem.geometry->getVertexLayout().getType();
@@ -272,7 +278,7 @@ namespace hyp
 
                 if (combinedMask & renderTagRegistry.getBuiltinDepthOnlyMask())
                 {
-                    uint64_t preDepthSortKey = makeDepthOnlySortKey(blendMode, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
+                    uint64_t preDepthSortKey = makeDepthOnlySortKey(blendMode, hasVertexPositionOffset, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
                     renderData.preDepthBucket->emplace_back(preDepthSortKey, drawItem);
                 }
 
@@ -289,7 +295,7 @@ namespace hyp
 
                 if (combinedMask & renderTagRegistry.getBuiltinShadowDepthMask())
                 {
-                    uint64_t shadowDepthSortKey = makeDepthOnlySortKey(blendMode, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
+                    uint64_t shadowDepthSortKey = makeDepthOnlySortKey(blendMode, hasVertexPositionOffset, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
                     renderData.shadowDepthBucket->emplace_back(shadowDepthSortKey, drawItem);
                 }
             }

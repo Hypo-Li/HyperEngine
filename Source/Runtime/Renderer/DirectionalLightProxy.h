@@ -98,11 +98,6 @@ namespace hyp
             return mAtmosphereSunLightIndex;
         }
 
-        uint32_t getAtmosphereRequestOrder() const noexcept
-        {
-            return mAtmosphereRequestOrder;
-        }
-
     private:
         uint32_t mLightIndex;
         float3 mDirection;
@@ -125,7 +120,6 @@ namespace hyp
 
         bool mAffectAtmosphere;
         uint32_t mAtmosphereSunLightIndex;
-        uint32_t mAtmosphereRequestOrder;
     };
 
     template <>

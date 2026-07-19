@@ -99,6 +99,21 @@ namespace hyp
             return mMaterialSource;
         }
 
+        void setVertexPositionOffsetSource(std::string vertexPositionOffsetSource) noexcept;
+
+        const std::string& getVertexPositionOffsetSource() const noexcept
+        {
+            return mVertexPositionOffsetSource;
+        }
+
+        // 是否定义了顶点位置偏移(vertex position offset): 只看这份源码字符串是不是空,
+        // 不做语法级别的检测——空字符串就代表材质作者没写 evaluateVertexPositionOffset(),
+        // shader 组装阶段会用一个返回 float3(0,0,0) 的默认实现补上
+        bool hasVertexPositionOffset() const noexcept
+        {
+            return !mVertexPositionOffsetSource.empty();
+        }
+
         void addShaderMacro(HString name, HString value);
 
         void removeShaderMacro(HString name);
@@ -134,7 +149,7 @@ namespace hyp
 
         void updateMaterialProxy();
 
-        std::string makeParameterDefines();
+        std::vector<MaterialParameterMetadata> makeParameterMetadata() const;
 
     private:
         MaterialDomain mMaterialDomain = MaterialDomain::Surface;
@@ -144,11 +159,11 @@ namespace hyp
 
         std::vector<MaterialParameter> mParameters;
         std::string mMaterialSource;
-        std::vector<ShaderMacro> mShaderMacros;
+        std::string mVertexPositionOffsetSource;
 
-        bool mDoubleSided : 1;
-        bool mTangentSpaceNormal : 1;
-        DirtyFlags mDirtyFlags;
+        bool mDoubleSided;
+        bool mTangentSpaceNormal;
+        DirtyFlags mDirtyFlags = DirtyFlags::None;
 
         MaterialShaderHandle mShaderHandle;
         bool mShaderHandleDirty = true;

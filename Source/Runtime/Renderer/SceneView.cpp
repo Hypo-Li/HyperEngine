@@ -49,13 +49,12 @@ namespace hyp
         mRenderBackend(renderBackend)
     {
         auto& device = renderBackend.getDevice();
-        size_t alignment = device.getPhysicalDevice().getProperties().limits.minStorageBufferOffsetAlignment;
-        mViewDataAlignedSize = static_cast<uint32_t>(sizeof(ViewData) + alignment - 1) & ~(alignment - 1);
+        mViewDataAlignedSize = static_cast<uint32_t>((sizeof(ViewData) + kStorageBufferOffsetAlignment - 1) & ~(kStorageBufferOffsetAlignment - 1));
 
-        vk::Buffer::CreateInfo bufferInfo = {};
-        bufferInfo.size = mViewDataAlignedSize * kMaxViews;
-        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        mViewDataBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+        rhi::BufferDesc bufferDesc;
+        bufferDesc.size = mViewDataAlignedSize * kMaxViews;
+        bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
+        mViewDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
     }
 
     uint32_t ViewDataManager::acquireViewId()
@@ -78,7 +77,7 @@ namespace hyp
     }
 
     void ViewDataManager::updateViewData(
-        vk::CommandBuffer& cmd,
+        rhi::CommandList& cmd,
         std::span<const uint32_t> viewIds,
         std::span<const ViewData> viewData
     )
@@ -88,7 +87,7 @@ namespace hyp
             return;
         auto allocation = mRenderBackend.getStagingAllocator().forceAllocate(viewCount * sizeof(ViewData));
 
-        std::vector<VkBufferCopy> copyRegions(viewCount);
+        std::vector<rhi::BufferCopyRegion> copyRegions(viewCount);
         for (size_t i = 0; i < viewCount; ++i)
         {
             std::memcpy(
@@ -101,23 +100,15 @@ namespace hyp
             copyRegion.dstOffset = viewIds[i] * mViewDataAlignedSize;
             copyRegion.size = sizeof(ViewData);
         }
-        cmd.copyBuffer(allocation.buffer, mViewDataBuffer->getHandle(), copyRegions);
+        cmd.copyBuffer(allocation.buffer, mViewDataBuffer.get(), copyRegions);
 
-        VkBufferMemoryBarrier2 barrier = {};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
-        barrier.dstAccessMask = VK_ACCESS_2_UNIFORM_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = mViewDataBuffer->getHandle();
+        rhi::BufferBarrier barrier;
+        barrier.buffer = mViewDataBuffer.get();
         barrier.offset = 0;
-        barrier.size = VK_WHOLE_SIZE;
-        cmd.pipelineBarrier2({ &barrier, 1 });
+        barrier.size = rhi::kWholeBuffer;
+        barrier.oldState = rhi::ResourceState::Transfer_Dst;
+        barrier.newState = rhi::ResourceState::Shader_Storage_Read;
+        cmd.insertBarriers({ &barrier, 1 });
     }
 
 }

@@ -3,15 +3,14 @@
 
 #include "RenderProxy.h"
 #include "Shader.h"
-#include "Vulkan/Buffer.h"
-#include "Vulkan/DescriptorSet.h"
-#include "Vulkan/CommandBuffer.h"
 #include "TextureProxy.h"
 #include "SamplerProxy.h"
 #include "MaterialTypes.h"
-#include "RenderBaseDefines.h"
 
 #include <Core/Common/HString.h>
+#include <RHI/Buffer.h>
+#include <RHI/BindGroup.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -23,7 +22,12 @@ namespace hyp
             MaterialDomain domain = MaterialDomain::Surface;
             ShadingModel shadingModel = ShadingModel::Standard;
             BlendMode blendMode = BlendMode::Opaque;
+            float alphaCutoff = 0.3333f;
             bool doubleSided = true;
+            bool tangentSpaceNormal = true;
+            // 对应 MaterialTemplate::hasVertexPositionOffset(),渲染线程判断这个材质在
+            // RenderTagFlags::Geometry_Only 的 render tag 下能否走跨材质共享的 shader/pipeline 时要用
+            bool hasVertexPositionOffset = false;
         };
 
         struct Parameter
@@ -45,7 +49,6 @@ namespace hyp
         MaterialProxy(
             Attributes attributes,
             MaterialShader* materialShader,
-            std::vector<ShaderMacro> shaderMacros,
             const std::vector<Parameter>& parameters
         );
 
@@ -74,22 +77,21 @@ namespace hyp
         void update(
             Attributes attributes,
             MaterialShader* materialShader,
-            std::vector<ShaderMacro> shaderMacros,
             const std::vector<Parameter>& parameters
         );
 
         void updateParameters(std::span<const Parameter> updatedParameters);
 
-        const vk::DescriptorSet* getParametersDescriptorSet() const noexcept
+        const rhi::BindGroup* getParametersBindGroup() const noexcept
         {
-            return mParametersDescriptorSet;
+            return mParametersBindGroup;
         }
 
-        void prepare(vk::CommandBuffer& cmd);
+        void prepare(rhi::CommandList& cmdList);
 
         bool isParametersDirty() const noexcept
         {
-            return mParametersDirty;
+            return mParametersDirty || mTextureParametersDirty;
         }
 
         ShaderVariant getOrCreateShaderVariant(
@@ -97,13 +99,19 @@ namespace hyp
             VertexLayout vertexLayout
         ) noexcept;
 
+        // RenderTagFlags::Geometry_Only 的 render tag 下,静态不透明且无顶点位置偏移的材质会被
+        // 重定向到跨材质共享的 shader,此时不应该再绑材质参数 bind group(共享 shader 根本没有
+        // 材质参数),getOrCreateShaderVariant 内部据此选择共享/独立 shader,这里暴露判断结果供
+        // pass 侧决定要不要把材质参数 bind group layout 塞进 pipeline layout
+        bool usesSharedGeometryShader(HString renderTag) const noexcept;
+
         void cachePipeline(
             HString renderTag,
             VertexLayout vertexLayout,
-            vk::Pipeline* pipeline
+            rhi::Pipeline* pipeline
         );
 
-        vk::Pipeline* getCachedPipeline(
+        rhi::Pipeline* getCachedPipeline(
             HString renderTag,
             VertexLayout vertexLayout
         ) const noexcept;
@@ -115,15 +123,24 @@ namespace hyp
             uint32_t offset;
             uint32_t size;
             uint32_t bindingSlot;
+
+            ParameterBinding() = default;
+
+            ParameterBinding(Parameter p, uint32_t o, uint32_t s, uint32_t slot)
+                : parameter(p), offset(o), size(s), bindingSlot(slot)
+            {
+            }
         };
 
         void copyParameterBindingToUniformBufferCache(const ParameterBinding& binding);
 
-        void resolveParameterBindings(const std::vector<Parameter>& parameters);
+        void buildParameterBindings(const std::vector<Parameter>& parameters);
 
-        void uploadToGPU(vk::CommandBuffer& cmd);
+        void uploadToGPU(rhi::CommandList& cmdList);
 
         uint32_t evaluateBuiltinRenderMask(Attributes attributes) noexcept;
+
+        std::vector<ShaderMacro> makeShaderMacros(Attributes attributes) const;
 
         void createParameterResources();
 
@@ -135,15 +152,20 @@ namespace hyp
         uint32_t mRenderMask;
         Attributes mAttributes;
         MaterialShader* mMaterialShader;
+        // 由 makeShaderMacros(mAttributes) 派生,传给 getOrCreateShaderVariant;同一个
+        // mMaterialShader 可能被多个 Attributes 组合不同的 Proxy 共用,各自缓存各自的 variant
         std::vector<ShaderMacro> mShaderMacros;
 
+        bool mBindlessEnabled;
         std::vector<ParameterBinding> mParameterBindings;
         std::unordered_map<HString, uint32_t> mNameToBindingIndex;
         std::vector<uint8_t> mParametersBufferCache;
 
-        TRef<vk::Buffer> mParametersBuffer;
-        TRef<vk::DescriptorSet> mParametersDescriptorSet;
-        bool mParametersDirty;
+        TRef<rhi::Buffer> mParametersBuffer;
+        TRef<rhi::BindGroupLayout> mParametersBindGroupLayout;
+        TRef<rhi::BindGroup> mParametersBindGroup;
+        bool mParametersDirty = false;
+        bool mTextureParametersDirty = false;
 
         struct PipelineLookupKey
         {
@@ -167,7 +189,7 @@ namespace hyp
                 return seed;
             }
         };
-        std::unordered_map<PipelineLookupKey, TRef<vk::Pipeline>, PipelineLookupKeyHasher> mCachedPipelines;
+        std::unordered_map<PipelineLookupKey, TRef<rhi::Pipeline>, PipelineLookupKeyHasher> mCachedPipelines;
 
     };
 

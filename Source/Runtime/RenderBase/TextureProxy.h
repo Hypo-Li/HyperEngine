@@ -1,34 +1,32 @@
 #pragma once
 #include "RenderProxy.h"
 #include "BindlessRegistry.h"
-#include "Vulkan/Image.h"
-#include "Vulkan/CommandBuffer.h"
 #include "StagingAllocator.h"
+
+#include <RHI/Texture.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
     class TextureProxy : public RenderProxy
     {
     public:
-        TextureProxy(const vk::Image::CreateInfo& imageInfo);
+        TextureProxy(const rhi::TextureDesc& desc);
 
         ~TextureProxy() noexcept;
 
-        void stageUpload(std::vector<uint8_t> data, uint32_t mipLevel, uint32_t baseLayer = 0, uint32_t layerCount = 1);
+        void stageUpload(std::vector<uint8_t>&& data, uint32_t mipCount, uint32_t baseLayer = 0, uint32_t layerCount = 1);
 
-        void prepare(vk::CommandBuffer& cmd);
+        void prepare(rhi::CommandList& cmdList);
 
-        // Only for Render Target
-        //void resize(uint32_t width, uint32_t height);
-
-        vk::Image& getImage() const noexcept
+        rhi::Texture& getTexture() const noexcept
         {
-            return *mImage;
+            return *mTexture;
         }
 
-        vk::ImageView& getImageView() const noexcept
+        rhi::TextureView& getTextureView() const noexcept
         {
-            return *mImageView;
+            return *mTextureView;
         }
 
         BindlessHandle getBindlessHandle() const noexcept
@@ -37,18 +35,16 @@ namespace hyp
         }
 
     private:
-        void flushUploads(vk::CommandBuffer& cmd);
+        void flushUploads(rhi::CommandList& cmdList);
 
     private:
-        TRef<vk::Image> mImage;
-        TRef<vk::ImageView> mImageView;
+        TRef<rhi::Texture> mTexture;
+        TRef<rhi::TextureView> mTextureView;
         BindlessHandle mBindlessHandle;
 
         struct PendingUpload
         {
-            uint32_t mipLevel;
-            uint32_t baseLayer;
-            uint32_t layerCount;
+            rhi::TextureSlice slice;
             std::vector<uint8_t> data;
             std::optional<StagingAllocation> stagingAllocation;
         };

@@ -13,7 +13,7 @@ endforeach()
 
 add_executable (RenderTest ${HEADER_FILES} ${SOURCE_FILES})
 
-target_link_libraries (RenderTest Engine RenderBase)
+target_link_libraries (RenderTest Engine AssetInterchange)
 
 set(SLANG_DLL "$<IF:$<CONFIG:Debug>,${PROJECT_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin/slang-glslang.dll,${PROJECT_BINARY_DIR}/vcpkg_installed/x64-windows/bin/slang-glslang.dll>")
 

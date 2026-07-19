@@ -19,7 +19,7 @@ namespace hyp
         Boxd boundingBox;
         if (mMesh)
         {
-            boundingBox = mMesh->getBoundingBox();
+            boundingBox = mMesh->getOrUpdateBoundingBox();
         }
         auto& transform = getEntity()->getTransform();
 
@@ -30,7 +30,7 @@ namespace hyp
             [proxyHandle = mProxyHandle,
             boundingBox = boundingBox.transformBy(transform.getWorldMatrix()),
             worldMatrix = transform.getWorldMatrix(),
-            sceneProxyHandle](RenderFrameContext& context)
+            sceneProxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 MeshRenderProxy* meshRenderProxy = proxyManager.createProxy(proxyHandle);
@@ -61,7 +61,7 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle = mProxyHandle,
-            sceneProxyHandle](RenderFrameContext& context)
+            sceneProxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 MeshRenderProxy* meshRenderProxy = proxyManager.getProxy(proxyHandle);
@@ -94,7 +94,7 @@ namespace hyp
         Boxd boundingBox;
         if (mMesh)
         {
-            boundingBox = mMesh->getBoundingBox();
+            boundingBox = mMesh->getOrUpdateBoundingBox();
         }
         SceneProxyHandle sceneProxyHandle = getScene()->getOrCreateSceneProxy();
         Context::get().getRenderFrontend().enqueueLambda(
@@ -102,7 +102,7 @@ namespace hyp
             boundingBox = boundingBox.transformBy(transform.getWorldMatrix()),
             sceneProxyHandle,
             worldMatrix = transform.getWorldMatrix()]
-            (RenderFrameContext& context)
+            (FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 MeshRenderProxy* proxy = proxyManager.getProxy(proxyHandle);
@@ -177,7 +177,7 @@ namespace hyp
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
             drawItemHandles = std::move(drawItemHandles),
-            lodInfos = std::move(lodInfos)](RenderFrameContext& context) mutable
+            lodInfos = std::move(lodInfos)](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 MeshRenderProxy* proxy = proxyManager.getProxy(proxyHandle);
@@ -200,7 +200,7 @@ namespace hyp
                     float minScreenPercentage = std::get<2>(lodInfo);
                     lods.emplace_back(startItem, itemCount, minScreenPercentage);
                 }
-                proxy->setDrawItems(drawItems, lods);
+                proxy->setDrawItems(std::move(drawItems), std::move(lods));
             }
         );
     }
@@ -208,7 +208,7 @@ namespace hyp
     void MeshRenderer::setProxyVisible(bool visible)
     {
         Context::get().getRenderFrontend().enqueueLambda(
-            [proxyHandle = mProxyHandle, visible](RenderFrameContext& context)
+            [proxyHandle = mProxyHandle, visible](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 MeshRenderProxy* proxy = proxyManager.getProxy(proxyHandle);

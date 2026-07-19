@@ -1,5 +1,6 @@
 #include "DeferredTaskQueue.h"
 #include <iterator>
+#include <algorithm>
 
 namespace hyp
 {

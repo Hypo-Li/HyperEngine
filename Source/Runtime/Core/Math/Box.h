@@ -9,6 +9,7 @@ namespace hyp
     template <typename T>
     class TBox
     {
+        friend class Reflection;
     public:
         using Vector3 = TVector3<T>;
 
@@ -180,5 +181,7 @@ namespace hyp
     };
 
     using Boxf = TBox<float>;
+    template <> Type* Reflection::createType<Boxf>();
     using Boxd = TBox<double>;
+    template <> Type* Reflection::createType<Boxd>();
 }

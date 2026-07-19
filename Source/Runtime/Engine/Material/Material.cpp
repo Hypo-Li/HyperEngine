@@ -37,7 +37,7 @@ namespace hyp
     {
         assert(handle.isValid());
         Context::get().getRenderFrontend().enqueueLambda(
-            [handle](RenderFrameContext& context)
+            [handle](FrameContext& context)
             {
                 context.getProxyManager().destroyProxy(handle);
             }

@@ -40,6 +40,9 @@ namespace hyp
             return mProxyHandle;
         }
 
+    protected:
+        virtual void applyLightIntensity() override;
+
     private:
         uint32_t mCascadeCount = 4;
         uint32_t mCascadeResolution = 1024;

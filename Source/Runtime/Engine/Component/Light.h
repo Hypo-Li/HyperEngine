@@ -12,11 +12,12 @@ namespace hyp
     public:
         Light() = default;
 
-        ~Light() noexcept = default;
+        virtual ~Light() noexcept = default;
 
         void setIntensity(float intensity)
         {
             mIntensity = intensity;
+            applyLightIntensity();
         }
 
         float getIntensity()const noexcept
@@ -27,6 +28,7 @@ namespace hyp
         void setColor(float3 linearColor)
         {
             mColor = linearColor;
+            applyLightIntensity();
         }
 
         float3 getColor() const noexcept
@@ -63,6 +65,9 @@ namespace hyp
         {
             return mCastShadows;
         }
+
+    protected:
+        virtual void applyLightIntensity() = 0;
 
     private:
         float mIntensity = 1.0f;

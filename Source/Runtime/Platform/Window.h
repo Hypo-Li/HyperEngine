@@ -2,23 +2,35 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <atomic>
 
 #include <Core/Common/Refable.h>
 #include <Core/Math/Vector.h>
 
 namespace hyp
 {
+    enum class WindowingSystem
+    {
+        Unknown,
+        Win32,
+        X11,
+        Wayland,
+    };
+
     class Window : public Refable
     {
     public:
         Window(int width, int height, const std::string& title);
         ~Window();
 
-        static std::vector<const char*> getRequiredInstanceExtensions();
+        // 仅在 Linux 上有意义,返回当前 GLFW 实际选中的 windowing system
+        static WindowingSystem getWindowingSystem();
 
         static void pollEvents();
 
         static void waitEvents();
+
+        void setFramebufferSize(uint2 size);
 
         uint2 getFramebufferSize() const;
 
@@ -27,6 +39,10 @@ namespace hyp
         double2 getScrollOffset() const;
 
         float2 getContentScale() const;
+
+        void captureCursor() const;
+
+        void releaseCursor() const;
 
         bool shouldClose() const;
 
@@ -46,8 +62,16 @@ namespace hyp
 
         void getWin32Handle(void* hWnd) const;
 
+        void getX11Display(void* display) const;
+
+        void getX11Handle(void* window) const;
+
+        void getWaylandDisplay(void* display) const;
+
+        void getWaylandSurface(void* surface) const;
+
     private:
-        int mWidth, mHeight;
+        std::atomic<uint2> mFramebufferSize;
         std::string mTitle;
         void* mWindow;
     };

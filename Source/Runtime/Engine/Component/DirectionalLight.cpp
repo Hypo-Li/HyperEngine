@@ -23,7 +23,7 @@ namespace hyp
             proxyHandle = mProxyHandle,
             worldMatrix = transform.getWorldMatrix(),
             direction = -transform.getWorldUpVector(),
-            intensity = float3(6.0f),//getColor() * getIntensity(),
+            intensity = getColor() * getIntensity(),
             castShadows = isCastShadows(),
             cascadeCount = mCascadeCount,
             cascadeResolution = mCascadeResolution,
@@ -33,7 +33,7 @@ namespace hyp
             slopeBias = mSlopeBias,
             affectAtmosphere = mAffectAtmosphere,
             atmosphereSunLightIndex = mAtmosphereSunLightIndex
-            ](RenderFrameContext& context)
+            ](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
@@ -55,18 +55,19 @@ namespace hyp
 
                 sceneProxy->addDirectionalLightProxy(directionalLightProxy);
 
-                uint32_t lightIndex = directionalLightProxy->getLightIndex();
-                auto& lightData = sceneProxy->getLightData(lightIndex);
-                lightData.type = SceneProxy::LightType::Directional;
-                lightData.direction = direction;
-                lightData.intensity = intensity;
-                sceneProxy->notifyLightDataUpdated(lightIndex);
-
                 uint32_t instanceIndex = directionalLightProxy->getInstanceIndex();
                 auto& instanceData = sceneProxy->getInstanceData(instanceIndex);
                 instanceData.localToWorld.fromDouble4x4(worldMatrix);
                 instanceData.localToWorldRot = float4x4(worldMatrix);
-                sceneProxy->notifyInstanceDataUpdated(lightIndex);
+                sceneProxy->notifyInstanceDataUpdated(instanceIndex);
+
+                uint32_t lightIndex = directionalLightProxy->getLightIndex();
+                auto& lightData = sceneProxy->getLightData(lightIndex);
+                lightData.type = SceneProxy::LightType::Directional;
+                lightData.castShadows = castShadows;
+                lightData.instanceIndex = instanceIndex;
+                lightData.intensity = intensity;
+                sceneProxy->notifyLightDataUpdated(lightIndex);
             }
         );
 
@@ -82,7 +83,7 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [proxyHandle = mProxyHandle,
-            sceneProxyHandle](RenderFrameContext& context)
+            sceneProxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 DirectionalLightProxy* directionalLightProxy = proxyManager.getProxy(proxyHandle);
@@ -105,14 +106,45 @@ namespace hyp
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
             sceneProxyHandle,
-            lightDirection = -transform.getWorldUpVector()](RenderFrameContext& context)
+            worldMatrix = transform.getWorldMatrix(),
+            direction = -transform.getWorldUpVector()](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 DirectionalLightProxy* directionalLightProxy = proxyManager.getProxy(proxyHandle);
+                directionalLightProxy->setDirection(direction);
+
+                SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
+                uint32_t instanceIndex = directionalLightProxy->getInstanceIndex();
+                auto& instanceData = sceneProxy->getInstanceData(instanceIndex);
+                instanceData.localToWorld.fromDouble4x4(worldMatrix);
+                instanceData.localToWorldRot = float4x4(worldMatrix);
+                sceneProxy->notifyInstanceDataUpdated(instanceIndex);
+            }
+        );
+    }
+
+    void DirectionalLight::applyLightIntensity()
+    {
+        if (!mProxyHandle.isValid())
+            return;
+
+        SceneProxyHandle sceneProxyHandle = getScene()->getOrCreateSceneProxy();
+        Context::get().getRenderFrontend().enqueueLambda(
+            [proxyHandle = mProxyHandle,
+            sceneProxyHandle,
+            intensity = getColor() * getIntensity()](FrameContext& context)
+            {
+                auto& proxyManager = context.getProxyManager();
+                DirectionalLightProxy* directionalLightProxy = proxyManager.getProxy(proxyHandle);
+                directionalLightProxy->setIntensity(intensity);
+
+                // 真正喂给 shader 的是 SceneProxy::LightData 这张共享表(所有光源类型公用),
+                // 不是 DirectionalLightProxy 自己的 mIntensity——跟 onTransformUpdate() 更新
+                // InstanceData 是同一个模式, 需要在这里显式写回并标脏
                 SceneProxy* sceneProxy = proxyManager.getProxy(sceneProxyHandle);
                 uint32_t lightIndex = directionalLightProxy->getLightIndex();
                 auto& lightData = sceneProxy->getLightData(lightIndex);
-                lightData.direction = lightDirection;
+                lightData.intensity = intensity;
                 sceneProxy->notifyLightDataUpdated(lightIndex);
             }
         );
@@ -121,9 +153,11 @@ namespace hyp
     void DirectionalLight::setAffectAtmosphere(bool affectAtmosphere)
     {
         mAffectAtmosphere = affectAtmosphere;
+        if (!mProxyHandle.isValid())
+            return;
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
-            affectAtmosphere](RenderFrameContext& context)
+            affectAtmosphere](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 DirectionalLightProxy* directionalLightProxy = proxyManager.getProxy(proxyHandle);
@@ -136,9 +170,11 @@ namespace hyp
     {
         atmosphereSunLightIndex = std::min(atmosphereSunLightIndex, 1u);
         mAtmosphereSunLightIndex = atmosphereSunLightIndex;
+        if (!mProxyHandle.isValid())
+            return;
         Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = mProxyHandle,
-            atmosphereSunLightIndex](RenderFrameContext& context)
+            atmosphereSunLightIndex](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 DirectionalLightProxy* directionalLightProxy = proxyManager.getProxy(proxyHandle);

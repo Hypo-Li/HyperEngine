@@ -4,11 +4,13 @@
 #include "MeshRenderProxy.h"
 #include "DirectionalLightProxy.h"
 #include "AtmosphereProxy.h"
+#include "SkyLightProxy.h"
 #include "GSplatRenderProxy.h"
 #include "GSplatScene.h"
 
-#include <RenderBase/Vulkan/Buffer.h>
-#include <RenderBase/RenderBaseDefines.h>
+#include <RenderBase/RenderProxy.h>
+#include <RHI/Buffer.h>
+#include <RHI/BindGroup.h>
 
 namespace hyp
 {
@@ -32,14 +34,27 @@ namespace hyp
             return mSceneId;
         }
 
-        const vk::Buffer& getInstanceIndicesBuffer() const noexcept
+        const rhi::Buffer& getIndicesBuffer() const noexcept
         {
-            return *mInstanceIndicesBuffer;
+            return *mIndicesBuffer;
         }
 
-        const vk::DescriptorSet& getSceneAndViewDescriptorSet() const noexcept
+        // TranslucentPass 需要在自己专属的 scene-and-view bind group 里(比公共那份多一张
+        // LightVolume 纹理)复用这两个 buffer——它们本来就是 SceneProxy 自己拥有并且已经在用
+        // 的资源, 这里只是多开一个只读入口, 不代表 SceneProxy 对光照体积纹理本身有任何感知
+        const rhi::Buffer& getInstanceDataBuffer() const noexcept
         {
-            return *mSceneAndViewDescriptorSet;
+            return *mInstanceDataBuffer;
+        }
+
+        const rhi::Buffer& getLightDataBuffer() const noexcept
+        {
+            return *mLightDataBuffer;
+        }
+
+        const rhi::BindGroup& getSceneAndViewBindGroup() const noexcept
+        {
+            return *mSceneAndViewBindGroup;
         }
 
         InstanceData& getInstanceData(uint32_t instanceIndex) noexcept
@@ -67,13 +82,10 @@ namespace hyp
         {
             LightType type;
             uint32_t castShadows;
-            uint2 padding0;
-            float3 position;
-            float padding1;
-            float3 direction;
-            float padding2;
+            uint32_t instanceIndex;
+            uint32_t padding0;
             float3 intensity;
-            float padding3;
+            uint32_t padding1;
         };
 
         LightData& getLightData(uint32_t lightIndex) noexcept
@@ -131,6 +143,17 @@ namespace hyp
             return mActiveAtmosphereProxy;
         }
 
+        void addSkyLightProxy(SkyLightProxy* skyLightProxy);
+
+        void removeSkyLightProxy(SkyLightProxy* skyLightProxy);
+
+        std::span<SkyLightProxy* const> getSkyLightProxies() const noexcept
+        {
+            return mSkyLightProxies;
+        }
+
+        SkyLightProxy* getActiveSkyLightProxy() const noexcept;
+
         void addGSplatRenderProxy(GSplatRenderProxy* gsplatRenderProxy);
 
         void setGSplatRenderProxySplatData(GSplatRenderProxy* gsplatRenderProxy, std::vector<GPUSplatData>&& gpuSplatData);
@@ -142,11 +165,11 @@ namespace hyp
             return mGSplatScene.get();
         }
 
-        void updateSceneData(vk::CommandBuffer& cmd);
+        void updateSceneData(rhi::CommandList& cmdList);
 
         std::vector<SceneViewGroup> gatherSceneViewGroups(ViewDataManager& viewDataManager) const;
 
-        static TRef<vk::DescriptorSetLayout> createSceneAndViewDescriptorSetLayout(vk::Device& device);
+        static TRef<rhi::BindGroupLayout> createSceneAndViewBindGroupLayout(BindGroupLayoutCache& cache);
 
     private:
         uint32_t acquireInstanceIndex();
@@ -164,20 +187,22 @@ namespace hyp
         );
 
         static void uploadData(
-            vk::CommandBuffer& cmd,
-            VkBuffer dstBuffer,
-            size_t dstOffset,
-            std::span<const uint8_t> srcData,
+            rhi::CommandList& cmdList,
+            std::span<const std::pair<size_t, size_t>> updatedRanges,
+            size_t elementSize,
+            uint8_t* srcData,
+            rhi::Buffer* dstBuffer,
             StagingAllocator& stagingAllocator
         );
 
     private:
         uint32_t mSceneId = 0;
 
-        TRef<vk::Buffer> mInstanceDataBuffer;
-        TRef<vk::Buffer> mInstanceIndicesBuffer;
-        TRef<vk::Buffer> mLightDataBuffer;
-        TRef<vk::DescriptorSet> mSceneAndViewDescriptorSet;
+        TRef<rhi::Buffer> mIndicesBuffer;
+        TRef<rhi::Buffer> mInstanceDataBuffer;
+        TRef<rhi::Buffer> mLightDataBuffer;
+        TRef<rhi::BindGroupLayout> mSceneAndViewBindGroupLayout;
+        TRef<rhi::BindGroup> mSceneAndViewBindGroup;
 
         std::vector<InstanceData> mInstanceData;
         std::vector<uint32_t> mFreeInstanceIndices;
@@ -196,12 +221,14 @@ namespace hyp
         std::vector<DirectionalLightProxy*> mDirectionalLightProxies;
         std::vector<AtmosphereProxy*> mAtmosphereProxies;
         AtmosphereProxy* mActiveAtmosphereProxy = nullptr;
+        std::vector<SkyLightProxy*> mSkyLightProxies;
+        mutable SkyLightProxy* mActiveSkyLightProxy = nullptr;
 
         std::unique_ptr<GSplatScene> mGSplatScene;
         std::vector<GSplatRenderProxy*> mGSplatRenderProxies;
 
+        static constexpr size_t kBaseIndexCount = 1024;
         static constexpr size_t kBaseInstanceCount = 512;
-        static constexpr size_t kInstanceIndicesMultiple = 4;
         static constexpr size_t kBaseLightCount = 16;
     };
 

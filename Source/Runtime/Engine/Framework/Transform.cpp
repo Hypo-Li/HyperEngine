@@ -393,7 +393,8 @@ namespace hyp
         Quaternion qz = glm::angleAxis(eulerRadians.z, float3{ 0, 0, 1 });
         Quaternion qx = glm::angleAxis(eulerRadians.x, float3{ 1, 0, 0 });
         Quaternion qy = glm::angleAxis(eulerRadians.y, float3{ 0, 1, 0 });
-        result = qy * qx * qz;
+        // Intrinsic 顺序
+        result = qz * qx * qy;
         return result;
     }
 
@@ -404,7 +405,7 @@ namespace hyp
         c->addProperty("Local Rotation", &Transform::mLocalRotation);
         c->addProperty("Local Scale", &Transform::mLocalScale);
         c->addProperty("Parent", &Transform::mParent);
-        c->addProperty("Children", &Transform::mChildren, CopyPolicy::Skip);
+        c->addProperty("Children", &Transform::mChildren, CopyPolicy::Ignore);
         return c;
     }
 }

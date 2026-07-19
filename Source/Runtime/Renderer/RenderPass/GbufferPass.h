@@ -2,7 +2,7 @@
 #include "../SceneView.h"
 #include "../SceneProxy.h"
 #include "../RenderData.h"
-#include "../SceneRendererContext.h"
+#include "../RendererContext.h"
 
 #include <RenderBase/RenderGraph/RenderGraph.h>
 
@@ -13,15 +13,15 @@ namespace hyp
     public:
         static void addToRenderGraph(
             rg::RenderGraph& renderGraph,
-            SceneRendererContext& rendererContext,
+            RendererContext& rendererContext,
             const SceneProxy& scene,
             const SceneView& view,
             const RenderData& renderData
         );
 
     private:
-        static vk::Pipeline* createPipeline(
-            SceneRendererContext& rendererContext,
+        static rhi::Pipeline* createPipeline(
+            RendererContext& rendererContext,
             MaterialProxy& material,
             HString renderTag,
             VertexLayout vertexLayout

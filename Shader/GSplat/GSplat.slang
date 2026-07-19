@@ -13,27 +13,32 @@ StructuredBuffer<GPUSplatData> sGPUSplatDataBuffer;
 [[vk::binding(1, 2)]]
 StructuredBuffer<uint> VisibleSplatIndexBuffer;
 
-struct V2F
-{
-    float2 position;
-    float4 color;
-};
-
+// 新 RHI 的 PrimitiveTopology 没有 Triangle_Fan(WebGPU 不支持),所以这里用 Triangle_Strip 画四边形,
+// 顶点顺序必须是 strip 的 "Z" 字形(左下, 右下, 左上, 右上),不能再用 fan 那种绕一圈的顺序,
+// 否则每个 splat 只会画出四边形里的一个三角形(4 个顶点按 list 只够凑 1 个三角形,第 4 个顶点被丢弃)
 static constexpr float3 kQuadPositions[4] = {
     float3(-1, -1, 0),
     float3(-1,  1, 0),
-    float3( 1,  1, 0),
-    float3( 1, -1, 0)
+    float3( 1, -1, 0),
+    float3( 1,  1, 0)
+};
+
+struct V2F
+{
+    float4 position : SV_Position;
+    float2 quadPosition : TEXCOORD0;
+    float4 color : TEXCOORD1;
 };
 
 [shader("vertex")]
-void VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID, out V2F v2f, out float4 oPosition : SV_Position)
+V2F VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 {
     uint splatIndex = VisibleSplatIndexBuffer[instanceID];
     
     const GPUSplatData splatData = sGPUSplatDataBuffer[splatIndex];
 
-    v2f.position = kQuadPositions[vertexID].xy;
+    V2F v2f;
+    v2f.quadPosition = kQuadPositions[vertexID].xy;
     v2f.color = unpackUnorm4x8ToFloat(splatData.color);
 
     const InstanceData instanceData = sInstanceData[splatData.instanceIndex];
@@ -50,8 +55,8 @@ void VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID, ou
     clipSpace *= 1.0 / clipSpace.w;
     if (any(abs(clipSpace.xyz) > float3(1.0)))
     {
-        oPosition = float4(0, 0, 2.0, 1.0);
-        return;
+        v2f.position = float4(0, 0, 2.0, 1.0);
+        return v2f;
     }
 
     float2 focal = float2(
@@ -94,20 +99,21 @@ void VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID, ou
     float2 minorAxis = l2 * float2(diagonalVector.y, -diagonalVector.x);
 
     float2 vCenter = clipSpace.xy;
-    oPosition = float4(
+    v2f.position = float4(
         vCenter
         + kQuadPositions[vertexID].x * majorAxis * viewData.resolution.zw
         + kQuadPositions[vertexID].y * minorAxis * viewData.resolution.zw,
         clipSpace.z, 1.0
     );
+    return v2f;
 }
 
 [shader("fragment")]
-void FragmentMain(in V2F v2f, out float4 oColor : SV_Target)
+float4 FragmentMain(in V2F v2f) : SV_Target
 {
-    float A = dot(v2f.position, v2f.position);
+    float A = dot(v2f.quadPosition, v2f.quadPosition);
     if (A > 1.0)
         discard;
     float B = exp(-A * 4.0) * v2f.color.a;
-    oColor = float4(v2f.color.rgb, B);
+    return float4(v2f.color.rgb, B);
 }

@@ -2,8 +2,8 @@
 #include "RenderableProxy.h"
 
 #include <Core/Math/Vector.h>
-#include <RenderBase/Vulkan/Buffer.h>
-#include <RenderBase/Vulkan/CommandBuffer.h>
+#include <RHI/Buffer.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -30,6 +30,7 @@ namespace hyp
         float3 sun1Direction;
         float padding3;
         float3 sun1Intensity;
+        float padding4;
     };
 
     class AtmosphereProxy : public RenderableProxy
@@ -43,20 +44,20 @@ namespace hyp
 
         void setSunLight(uint32_t sunIndex, float3 direction, float3 intensity);
 
-        void prepare(vk::CommandBuffer& cmd);
+        void prepare(rhi::CommandList& cmdList);
 
-        vk::Buffer& getParametersBuffer() const noexcept
+        rhi::Buffer& getParametersBuffer() const noexcept
         {
             return *mParametersBuffer;
         }
 
     private:
-        void uploadToGPU(vk::CommandBuffer& cmd);
+        void uploadToGPU(rhi::CommandList& cmdList);
 
     private:
         AtmosphereShaderParameters mParameters;
         bool mParametersDirty = false;
-        TRef<vk::Buffer> mParametersBuffer;
+        TRef<rhi::Buffer> mParametersBuffer;
     };
 
     template <>

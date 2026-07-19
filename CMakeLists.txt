@@ -25,10 +25,12 @@ endif()
 # find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 # target_include_directories(Test PRIVATE ${TINYGLTF_INCLUDE_DIRS})
 
-add_definitions(-DASSET_DIR="${CMAKE_SOURCE_DIR}/Asset")
+add_definitions(-DENGINE_ASSET_DIR="${CMAKE_SOURCE_DIR}/Asset")
+add_definitions(-DPROJECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/Project/Asset")
 add_definitions(-DSHADER_DIR="${CMAKE_SOURCE_DIR}/Shader")
 add_definitions(-DSPIRV_DIR="${CMAKE_SOURCE_DIR}/Shader/Test/SPIRV")
 add_definitions(-DRESOURCE_DIR="${CMAKE_SOURCE_DIR}/Resource")
+add_definitions(-DDERIVED_DATA_DIR="${CMAKE_SOURCE_DIR}/Intermediate/DerivedDataCache")
 
 add_subdirectory("ThirdParty")
 add_subdirectory("Source/Runtime")

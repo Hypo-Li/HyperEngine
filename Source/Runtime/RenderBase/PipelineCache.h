@@ -1,68 +1,68 @@
 #pragma once
 #include "PipelineState.h"
-#include "Vulkan/Pipeline.h"
+#include <RHI/Pipeline.h>
+#include <RHI/Device.h>
 
 namespace hyp
 {
     class PipelineCache
     {
     public:
-        PipelineCache(const vk::Device& device);
+        PipelineCache(const rhi::Device& device);
 
         struct PipelineLayoutKey
         {
-            static constexpr size_t kMaxDescriptorSetLayoutCount = 4;
-            VkDescriptorSetLayout descriptorSetLayouts[kMaxDescriptorSetLayoutCount];
-            uint32_t pushConstantRangeSize = 0;
+            static constexpr size_t kMaxBindGroupLayoutCount = 4;
+            const rhi::BindGroupLayout* bindGroupLayouts[kMaxBindGroupLayoutCount];
 
             bool operator==(const PipelineLayoutKey& other) const noexcept;
         };
 
-        vk::PipelineLayout* getOrCreatePipelineLayout(const PipelineLayoutKey& key);
+        TRef<rhi::PipelineLayout> getOrCreate(const PipelineLayoutKey& key);
 
         struct GraphicsKey
         {
             GraphicsPipelineState pipelineState;
-            vk::PipelineLayout* pipelineLayout;
+            const rhi::PipelineLayout* pipelineLayout;
 
             bool operator==(const GraphicsKey& other) const noexcept;
         };
 
-        vk::Pipeline* getOrCreateGraphicsPipeline(const GraphicsKey& key);
+        TRef<rhi::Pipeline> getOrCreateGraphicsPipeline(const GraphicsKey& key);
 
         struct ComputeKey
         {
             ShaderVariant shader;
-            vk::PipelineLayout* pipelineLayout;
+            const rhi::PipelineLayout* pipelineLayout;
 
             bool operator==(const ComputeKey& other) const noexcept;
         };
 
-        vk::Pipeline* getOrCreateComputePipeline(const ComputeKey& key);
+        TRef<rhi::Pipeline> getOrCreateComputePipeline(const ComputeKey& key);
 
     private:
-        vk::PipelineLayout* createPipelineLayout(const PipelineLayoutKey& key);
+        TRef<rhi::PipelineLayout> createPipelineLayout(const PipelineLayoutKey& key);
 
-        vk::Pipeline* createGraphicsPipeline(const GraphicsKey& key);
+        TRef<rhi::Pipeline> createGraphicsPipeline(const GraphicsKey& key);
 
-        vk::Pipeline* createComputePipeline(const ComputeKey& key);
+        TRef<rhi::Pipeline> createComputePipeline(const ComputeKey& key);
 
     private:
-        const vk::Device& mDevice;
+        const rhi::Device& mDevice;
         struct PipelineLayoutKeyHash
         {
             size_t operator()(const PipelineLayoutKey& key) const noexcept;
         };
-        std::unordered_map<PipelineLayoutKey, TRef<vk::PipelineLayout>, PipelineLayoutKeyHash> mPipelineLayoutMap;
+        std::unordered_map<PipelineLayoutKey, TRef<rhi::PipelineLayout>, PipelineLayoutKeyHash> mPipelineLayoutMap;
         struct GraphicsKeyHash
         {
             size_t operator()(const GraphicsKey& key) const noexcept;
         };
-        std::unordered_map<GraphicsKey, TRef<vk::Pipeline>, GraphicsKeyHash> mGraphicsPipelineMap;
+        std::unordered_map<GraphicsKey, TRef<rhi::Pipeline>, GraphicsKeyHash> mGraphicsPipelineMap;
         struct ComputeKeyHash
         {
             size_t operator()(const ComputeKey& key) const noexcept;
         };
-        std::unordered_map<ComputeKey, TRef<vk::Pipeline>, ComputeKeyHash> mComputePipelineMap;
+        std::unordered_map<ComputeKey, TRef<rhi::Pipeline>, ComputeKeyHash> mComputePipelineMap;
     };
 }

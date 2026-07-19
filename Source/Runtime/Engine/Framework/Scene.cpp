@@ -127,12 +127,12 @@ namespace hyp
 
         SceneProxyHandle proxyHandle = getOrCreateSceneProxy();
         Context::get().getRenderFrontend().enqueueLambda(
-            [proxyHandle](RenderFrameContext& context)
+            [proxyHandle](FrameContext& context)
             {
                 auto& proxyManager = context.getProxyManager();
                 SceneProxy* sceneProxy = proxyManager.getProxy(proxyHandle);
-                auto& sceneRendererContext = Context::get().getSceneRendererContext();
-                SceneRenderer sceneRenderer(sceneRendererContext);
+                auto& rendererContext = Context::get().getRendererContext();
+                SceneRenderer sceneRenderer(rendererContext);
 
                 for (CameraProxy* cameraProxy : sceneProxy->getCameraProxies())
                 {
@@ -141,7 +141,7 @@ namespace hyp
                     {
                         // import render target textures
                         auto& rg = context.getRenderGraph();
-                        rg::TextureHandle rtTextureHandle = rg.importTexture(cameraProxy->getRenderTargetName(), &rt->getImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        rg::TextureHandle rtTextureHandle = rg.importTexture(cameraProxy->getRenderTargetName(), &rt->getTextureView(), rhi::ResourceState::Shader_Sampled);
                         rg.getBlackboard().put(cameraProxy->getRenderTargetName(), rtTextureHandle);
                     }
                     else
@@ -154,7 +154,7 @@ namespace hyp
                     }
                 }
 
-                auto sceneViewGroups = sceneProxy->gatherSceneViewGroups(sceneRendererContext.getViewDataManager());
+                auto sceneViewGroups = sceneProxy->gatherSceneViewGroups(rendererContext.getViewDataManager());
                 sceneRenderer.render(*sceneProxy, sceneViewGroups, context.getRenderGraph());
             }
         );
@@ -293,11 +293,11 @@ namespace hyp
     void Scene::createSceneProxy(SceneProxyHandle handle)
     {
         Context::get().getRenderFrontend().enqueueLambda(
-            [handle](RenderFrameContext& context)
+            [handle](FrameContext& context)
             {
                 context.getProxyManager().createProxy(
                     handle,
-                    Context::get().getSceneRendererContext().getViewDataManager(),
+                    Context::get().getRendererContext().getViewDataManager(),
                     0
                 );
             }
@@ -309,7 +309,7 @@ namespace hyp
         assert(handle.isValid());
 
         Context::get().getRenderFrontend().enqueueLambda(
-            [handle](RenderFrameContext& context)
+            [handle](FrameContext& context)
             {
                 context.getProxyManager().destroyProxy(handle);
             }

@@ -1,16 +1,17 @@
 #pragma once
 #include <optional>
-#include <deque>
+#include <vector>
 
-#include "Vulkan/Buffer.h"
+#include <RHI/Buffer.h>
+#include <RHI/Device.h>
 
 namespace hyp
 {
     struct StagingAllocation
     {
-        VkBuffer buffer;
-        VkDeviceSize offset;
-        VkDeviceSize size;
+        const rhi::Buffer* buffer;
+        uint64_t offset;
+        uint64_t size;
         void* mappedData;
     };
 
@@ -19,56 +20,51 @@ namespace hyp
     public:
         using Allocation = StagingAllocation;
 
-        StagingAllocator(const vk::Device& device, VkDeviceSize ringBufferSize);
+        StagingAllocator(const rhi::Device& device, uint32_t pageSize, uint32_t maxPageCount);
 
         ~StagingAllocator();
 
-        inline size_t getRingBufferSize() const noexcept
-        {
-            return mRingBuffer->getSize();
-        }
+        std::optional<Allocation> tryAllocate(size_t size, uint32_t alignment = 16);
 
-        std::optional<Allocation> tryAllocateFromRingBuffer(VkDeviceSize size, VkDeviceSize alignment = 16);
+        Allocation forceAllocate(size_t size, uint32_t alignment = 16);
 
-        Allocation allocateSeparateBuffer(VkDeviceSize size);
+        void commitAllocations(uint64_t signalValue);
 
-        std::optional<Allocation> tryAllocate(VkDeviceSize size, VkDeviceSize alignment = 16);
-
-        Allocation forceAllocate(VkDeviceSize size, VkDeviceSize alignment = 16);
-
-        // 提交 command buffer 后, 调用该方法记录已分配内存的释放时间
-        void commitAllocations(uint64_t submittedTimelineValue);
-
-        // 每帧开始前调用该方法, 确保 Staging Manager 有尽可能多的可用空间
-        void reclaimAllocation(uint64_t timelineValue) noexcept;
+        void reclaimAllocations(uint64_t currentValue);
 
     private:
-        inline static VkDeviceSize alignUp(VkDeviceSize value, VkDeviceSize alignment)
-        {
-            return (value + alignment - 1) & ~(alignment - 1);
-        }
+        std::optional<Allocation> tryAllocateFromPages(size_t size, uint32_t alignment);
+
+        Allocation allocateTransient(size_t size);
 
     private:
-        size_t mHead{ 0 };
-        size_t mTail{ 0 };
-        TRef<vk::Buffer> mRingBuffer;
-        void* mRingBufferMappedData{ nullptr };
+        const rhi::Device& mDevice;
+        uint32_t mPageSize;
+        uint32_t mMaxPageCount;
 
-        struct RingBlockRecord
+        struct Page
         {
-            VkDeviceSize size;
+            TRef<rhi::Buffer> buffer;
+            uint32_t offset = 0;
+            bool isPending = false;
+            void* mappedData = nullptr;
+        };
+        std::vector<Page> mPages;
+
+        struct PageRecord
+        {
+            uint32_t pageIndex = 0;
             uint64_t signalValue = ~0ull;
         };
-        std::vector<RingBlockRecord> mCurrentFrameRingBlocks;
-        std::deque<RingBlockRecord> mInFlightRingBlocks;
+        std::vector<PageRecord> mPendingPages;
+        std::vector<PageRecord> mSubmittedPages;
 
-        struct SeparateBlockRecord
+        struct TransientRecord
         {
-            TRef<vk::Buffer> buffer;
+            TRef<rhi::Buffer> buffer;
             uint64_t signalValue = ~0ull;
         };
-        std::vector<SeparateBlockRecord> mCurrentFrameSeparateBlocks;
-        std::deque<SeparateBlockRecord> mInFlightSeparateBlocks;
-
+        std::vector<TransientRecord> mPendingTransients;
+        std::vector<TransientRecord> mSubmittedTransients;
     };
 }

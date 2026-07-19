@@ -3,7 +3,7 @@
 
 #include "SceneProxy.h"
 #include "SceneView.h"
-#include "SceneRendererContext.h"
+#include "RendererContext.h"
 
 #include <RenderBase/RenderGraph/RenderGraph.h>
 
@@ -14,7 +14,7 @@ namespace hyp
     public:
         static void addToRenderGraph(
             rg::RenderGraph& renderGraph,
-            SceneRendererContext& rendererContext,
+            RendererContext& rendererContext,
             const SceneProxy& scene,
             const SceneView& view,
             const RenderData& renderData
@@ -26,7 +26,7 @@ namespace hyp
     public:
         static void addToRenderGraph(
             rg::RenderGraph& renderGraph,
-            SceneRendererContext& rendererContext,
+            RendererContext& rendererContext,
             const SceneProxy& scene,
             std::span<const SceneView> views,
             std::span<const RenderData> renderData,

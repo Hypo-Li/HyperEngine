@@ -14,7 +14,13 @@
         "basisu",
         "python3",
         "pybind11",
-        "joltphysics"
+        "joltphysics",
+        "tinyply",
+        "xxhash",
+        {
+            "name": "dawn",
+            "features": ["vulkan", "d3d12"]
+        }
     ],
     "overrides": [
         { "name": "python3", "version": "3.12.13#1" }

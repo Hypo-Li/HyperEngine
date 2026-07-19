@@ -1,8 +1,8 @@
 #pragma once
 #include <Core/Math/Vector.h>
 #include <RenderBase/RenderBackend.h>
-#include <RenderBase/Vulkan/Buffer.h>
-#include <RenderBase/Vulkan/CommandBuffer.h>
+#include <RHI/Buffer.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -25,9 +25,9 @@ namespace hyp
 
         void removeGSplat(uint32_t gsplatId);
 
-        void prepare(vk::CommandBuffer& cmd);
+        void prepare(rhi::CommandList& cmdList);
 
-        vk::Buffer& getSplatDataBuffer() const noexcept
+        rhi::Buffer& getSplatDataBuffer() const noexcept
         {
             return *mSplatDataBuffer;
         }
@@ -38,11 +38,11 @@ namespace hyp
         }
 
     private:
-        void flushPendingOperations(vk::CommandBuffer& cmd);
+        void flushPendingOperations(rhi::CommandList& cmdcmdList);
 
     private:
         RenderBackend& mRenderBackend;
-        TRef<vk::Buffer> mSplatDataBuffer;
+        TRef<rhi::Buffer> mSplatDataBuffer;
 
         struct GSplatInfo
         {

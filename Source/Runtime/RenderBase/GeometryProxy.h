@@ -1,9 +1,10 @@
 #pragma once
 #include "RenderProxy.h"
 #include "VertexLayout.h"
-#include "Vulkan/Buffer.h"
-#include "Vulkan/CommandBuffer.h"
 #include "StagingAllocator.h"
+
+#include <RHI/Buffer.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -20,9 +21,9 @@ namespace hyp
         GeometryProxy(
             VertexLayout vertexLayout,
             std::vector<uint8_t> vertexData,
-            std::vector<VkDeviceSize>&& vertexBindingOffsets,
+            std::vector<uint64_t>&& vertexBindingOffsets,
             std::vector<uint8_t> indexData,
-            VkIndexType indexType,
+            rhi::IndexType indexType,
             std::vector<Section>&& sections
         );
 
@@ -43,24 +44,24 @@ namespace hyp
             return static_cast<uint32_t>(mSections.size());
         }
 
-        void prepare(vk::CommandBuffer& cmd);
+        void prepare(rhi::CommandList& cmdList);
 
-        void bind(vk::CommandBuffer& cmd) const noexcept;
+        void bind(rhi::CommandList& cmdList) const noexcept;
 
-        void draw(vk::CommandBuffer& cmd, uint32_t sectionIdx, uint32_t instanceCount, uint32_t firstInstance) const noexcept;
+        void draw(rhi::CommandList& cmdList, uint32_t sectionIdx, uint32_t instanceCount, uint32_t firstInstance) const noexcept;
 
     private:
-        void flushUploads(vk::CommandBuffer& cmd);
+        void flushUploads(rhi::CommandList& cmdList);
 
     private:
         uint32_t mId;
         VertexLayout mVertexLayout;
-        TRef<vk::Buffer> mBuffer;
+        TRef<rhi::Buffer> mBuffer;
         // 用于bindVertexBuffers，避免每次调用都创建临时数组
-        std::vector<VkBuffer> mCachedBufferHandles;
-        std::vector<VkDeviceSize> mVertexBindingOffsets;
+        std::vector<rhi::Buffer*> mCachedBuffers;
+        std::vector<uint64_t> mVertexBindingOffsets;
         size_t mIndexOffset;
-        VkIndexType mIndexType;
+        rhi::IndexType mIndexType;
         std::vector<Section> mSections;
 
         struct PendingUpload

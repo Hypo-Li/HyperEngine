@@ -4,10 +4,9 @@
 #include <Core/Math/Vector.h>
 #include <Core/Math/Matrix.h>
 #include <Core/Math/Frustum.h>
-#include <RenderBase/Vulkan/Buffer.h>
-#include <RenderBase/Vulkan/CommandBuffer.h>
-#include <RenderBase/RenderBaseDefines.h>
 #include <RenderBase/RenderBackend.h>
+#include <RHI/Buffer.h>
+#include <RHI/CommandList.h>
 
 namespace hyp
 {
@@ -168,12 +167,14 @@ namespace hyp
     public:
         ViewDataManager(RenderBackend& renderBackend);
 
+        ~ViewDataManager() = default;
+
         uint32_t getViewDataAlignedSize() const noexcept
         {
             return mViewDataAlignedSize;
         }
 
-        vk::Buffer& getViewDataBuffer() const noexcept
+        rhi::Buffer& getViewDataBuffer() const noexcept
         {
             return *mViewDataBuffer;
         }
@@ -188,7 +189,7 @@ namespace hyp
         void releaseViewId(uint32_t viewId);
 
         void updateViewData(
-            vk::CommandBuffer& cmd,
+            rhi::CommandList& cmd,
             std::span<const uint32_t> viewIds,
             std::span<const ViewData> viewData
         );
@@ -196,9 +197,10 @@ namespace hyp
     private:
         RenderBackend& mRenderBackend;
         uint32_t mViewDataAlignedSize = 0;
-        TRef<vk::Buffer> mViewDataBuffer;
+        TRef<rhi::Buffer> mViewDataBuffer;
         uint32_t mNextViewId = 0;
         std::vector<uint32_t> mFreeViewIds;
         static constexpr uint32_t kMaxViews = 64;
+        static constexpr uint32_t kStorageBufferOffsetAlignment = 256;
     };
 }

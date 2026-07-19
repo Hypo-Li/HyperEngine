@@ -16,7 +16,8 @@ namespace hyp
             PixelFormat format,
             bool isSRGB,
             CompressionPreset compressionPreset,
-            bool generateMips = true
+            bool generateMips = true,
+            uint32_t mipLevels = 0
         );
 
     protected:
@@ -24,4 +25,11 @@ namespace hyp
     };
 
     template <> Type* Reflection::createType<TextureCube>();
+
+    std::vector<float3> equirectMapToCubemap(
+        std::span<const float3> equirectMapPixels,
+        uint32_t width, uint32_t height,
+        uint32_t cubemapSize,
+        float maxLuminance = 1e6f
+    );
 }

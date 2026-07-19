@@ -7,11 +7,11 @@ namespace hyp
     {
         auto& device = renderBackend.getDevice();
         {
-            vk::Buffer::CreateInfo bufferInfo;
-            bufferInfo.size = sizeof(GPUSplatData) * (1 << 20);
-            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mSplatDataBuffer = new vk::Buffer(device, bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
-            mSplatCapacity = static_cast<uint32_t>(bufferInfo.size / sizeof(GPUSplatData));
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = sizeof(GPUSplatData) * (1 << 20);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Src | rhi::BufferUsage::Transfer_Dst;
+            mSplatDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
+            mSplatCapacity = static_cast<uint32_t>(bufferDesc.size / sizeof(GPUSplatData));
         }
     }
 
@@ -21,7 +21,8 @@ namespace hyp
             [splatDataBuffer = std::move(mSplatDataBuffer)]() mutable
             {
                 splatDataBuffer = nullptr;
-            }
+            },
+            kMaxFramesInFlight
         );
     }
 
@@ -42,7 +43,7 @@ namespace hyp
             mFreeGSplatIds.pop_back();
         }
         uint32_t count = static_cast<uint32_t>(splatData.size());
-        mGSplatInfos[gsplatId] = { UINT32_MAX, count }; // 新增项用offset为UINT32_MAX表示未初始化
+        mGSplatInfos[gsplatId] = { UINT32_MAX, count };
 
         mPendingOperations.emplace_back(OpType::Add, gsplatId, std::move(splatData));
         mTotalSplatCount += count;
@@ -60,20 +61,19 @@ namespace hyp
         mGSplatInfos[gsplatId].count = 0;
     }
 
-    void GSplatScene::prepare(vk::CommandBuffer& cmd)
+    void GSplatScene::prepare(rhi::CommandList& cmdList)
     {
         if (!mPendingOperations.empty())
         {
-            flushPendingOperations(cmd);
+            flushPendingOperations(cmdList);
         }
     }
 
-    void GSplatScene::flushPendingOperations(vk::CommandBuffer& cmd)
+    void GSplatScene::flushPendingOperations(rhi::CommandList& cmdList)
     {
         if (mPendingOperations.empty())
             return;
 
-        // 1. 操作预处理, 先遍历PendingOperation队列, 如果一个id先Add后Remove, 则可以将这两个操作都移除
         std::vector<uint8_t> toRemove(mPendingOperations.size(), 0);
         for (size_t i = 0; i < mPendingOperations.size(); ++i)
         {
@@ -90,7 +90,6 @@ namespace hyp
             }
         }
 
-        // 原地过滤, 移除可以抵消的操作
         size_t write = 0;
         for (size_t i = 0; i < mPendingOperations.size(); ++i)
         {
@@ -104,10 +103,6 @@ namespace hyp
         if (mPendingOperations.empty())
             return;
 
-        // 2. 计算新布局:
-        //   a. 遍历gsplatInfos, 剔除需要删除的项目, 计算剩余项(offset != UINT32_MAX且count != 0)在紧实状态下的新offset
-        //   b. 计算所有新增项的offset;
-        //   c. 计算总容量需求
         struct OldLayout
         {
             uint32_t offset;
@@ -156,7 +151,6 @@ namespace hyp
 
         assert(mTotalSplatCount == currentOffset);
 
-        // 根据oldLayouts合并regions
         std::vector<GSplatInfo> srcGSplatInfos;
         std::vector<GSplatInfo> dstGSplatInfos;
         srcGSplatInfos.reserve(oldLayouts.size());
@@ -181,61 +175,56 @@ namespace hyp
             }
         }
 
-        // 3 根据容量需求判断是否需要扩容,
-        // 如果扩容, 则可以直接一步到位, 把每一项复制到对应offset的地方
-        // 否则, 需要进行原位拷贝/impact
         if (mSplatCapacity < mTotalSplatCount)
         {
-            TRef<vk::Buffer> oldSplatDataBuffer = mSplatDataBuffer;
+            TRef<rhi::Buffer> oldSplatDataBuffer = mSplatDataBuffer;
             mSplatCapacity = std::max(mTotalSplatCount, mSplatCapacity * 2);
-            vk::Buffer::CreateInfo bufferInfo;
-            bufferInfo.size = mSplatCapacity * sizeof(GPUSplatData);
-            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            mSplatDataBuffer = new vk::Buffer(mRenderBackend.getDevice(), bufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = static_cast<uint64_t>(mSplatCapacity) * sizeof(GPUSplatData);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Src | rhi::BufferUsage::Transfer_Dst;
+            mSplatDataBuffer = mRenderBackend.getDevice().createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
 
-            // 拷贝原有数据
             if (!srcGSplatInfos.empty())
             {
-                std::vector<VkBufferCopy> copyRegions(srcGSplatInfos.size());
+                std::vector<rhi::BufferCopyRegion> copyRegions(srcGSplatInfos.size());
                 for (uint32_t i = 0; i < copyRegions.size(); ++i)
                 {
                     auto& copy = copyRegions[i];
-                    copy.srcOffset = srcGSplatInfos[i].offset * sizeof(GPUSplatData);
-                    copy.dstOffset = dstGSplatInfos[i].offset * sizeof(GPUSplatData);
-                    copy.size = srcGSplatInfos[i].count * sizeof(GPUSplatData);
+                    copy.srcOffset = static_cast<uint64_t>(srcGSplatInfos[i].offset) * sizeof(GPUSplatData);
+                    copy.dstOffset = static_cast<uint64_t>(dstGSplatInfos[i].offset) * sizeof(GPUSplatData);
+                    copy.size = static_cast<uint64_t>(srcGSplatInfos[i].count) * sizeof(GPUSplatData);
                 }
-                cmd.copyBuffer(
-                    oldSplatDataBuffer->getHandle(),
-                    mSplatDataBuffer->getHandle(),
+                cmdList.copyBuffer(
+                    oldSplatDataBuffer.get(),
+                    mSplatDataBuffer.get(),
                     copyRegions
                 );
             }
 
-            // 添加新数据
             if (totalAddedCount != 0)
             {
                 auto& stagingAllocator = mRenderBackend.getStagingAllocator();
-                auto allocation = stagingAllocator.forceAllocate(totalAddedCount * sizeof(GPUSplatData));
+                auto allocation = stagingAllocator.forceAllocate(static_cast<uint64_t>(totalAddedCount) * sizeof(GPUSplatData));
                 uint32_t stagingOffset = 0;
                 for (const auto& op : mPendingOperations)
                 {
                     if (op.type == OpType::Add)
                     {
                         std::memcpy(
-                            static_cast<uint8_t*>(allocation.mappedData) + stagingOffset * sizeof(GPUSplatData),
+                            static_cast<uint8_t*>(allocation.mappedData) + static_cast<uint64_t>(stagingOffset) * sizeof(GPUSplatData),
                             op.data.data(),
                             op.data.size() * sizeof(GPUSplatData)
                         );
                         stagingOffset += static_cast<uint32_t>(op.data.size());
                     }
                 }
-                VkBufferCopy copyRegion = {};
+                rhi::BufferCopyRegion copyRegion;
                 copyRegion.srcOffset = allocation.offset;
-                copyRegion.dstOffset = addedDstOffset * sizeof(GPUSplatData);
-                copyRegion.size = totalAddedCount * sizeof(GPUSplatData);
-                cmd.copyBuffer(
+                copyRegion.dstOffset = static_cast<uint64_t>(addedDstOffset) * sizeof(GPUSplatData);
+                copyRegion.size = static_cast<uint64_t>(totalAddedCount) * sizeof(GPUSplatData);
+                cmdList.copyBuffer(
                     allocation.buffer,
-                    mSplatDataBuffer->getHandle(),
+                    mSplatDataBuffer.get(),
                     { &copyRegion, 1 }
                 );
             }
@@ -250,57 +239,49 @@ namespace hyp
         }
         else
         {
-            // 如果不需要扩容, 则需要进行原位紧实 + 拷贝新数据
             uint32_t aliveTotalCount = addedDstOffset;
             bool alreadyCompact = (srcGSplatInfos.size() == 1 &&
                                     srcGSplatInfos[0].offset == 0 &&
                                     srcGSplatInfos[0].count == aliveTotalCount);
             if (aliveTotalCount && !alreadyCompact)
             {
-                // 创建辅助 Buffer
-                vk::Buffer::CreateInfo auxBufferInfo;
-                auxBufferInfo.size = aliveTotalCount * sizeof(GPUSplatData);
-                auxBufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                TRef<vk::Buffer> auxBuffer = new vk::Buffer(mRenderBackend.getDevice(), auxBufferInfo, VMA_MEMORY_USAGE_GPU_ONLY);
+                rhi::BufferDesc auxBufferDesc;
+                auxBufferDesc.size = static_cast<uint64_t>(aliveTotalCount) * sizeof(GPUSplatData);
+                auxBufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Src | rhi::BufferUsage::Transfer_Dst;
+                TRef<rhi::Buffer> auxBuffer = mRenderBackend.getDevice().createBuffer(auxBufferDesc, rhi::MemoryType::Gpu_Only);
 
-                // 把存活数据按新 offset 复制到辅助 buffer
-                std::vector<VkBufferCopy> copyRegions(srcGSplatInfos.size());
+                std::vector<rhi::BufferCopyRegion> copyRegions(srcGSplatInfos.size());
                 for (uint32_t i = 0; i < copyRegions.size(); ++i)
                 {
                     auto& copy = copyRegions[i];
-                    copy.srcOffset = srcGSplatInfos[i].offset * sizeof(GPUSplatData);
-                    copy.dstOffset = dstGSplatInfos[i].offset * sizeof(GPUSplatData);
-                    copy.size = srcGSplatInfos[i].count * sizeof(GPUSplatData);
+                    copy.srcOffset = static_cast<uint64_t>(srcGSplatInfos[i].offset) * sizeof(GPUSplatData);
+                    copy.dstOffset = static_cast<uint64_t>(dstGSplatInfos[i].offset) * sizeof(GPUSplatData);
+                    copy.size = static_cast<uint64_t>(srcGSplatInfos[i].count) * sizeof(GPUSplatData);
                 }
-                cmd.copyBuffer(
-                    mSplatDataBuffer->getHandle(),
-                    auxBuffer->getHandle(),
+                cmdList.copyBuffer(
+                    mSplatDataBuffer.get(),
+                    auxBuffer.get(),
                     copyRegions
                 );
 
-                VkBufferMemoryBarrier2 auxBarrier = {};
-                auxBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-                auxBarrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-                auxBarrier.dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-                auxBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                auxBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                auxBarrier.buffer = auxBuffer->getHandle();
+                rhi::BufferBarrier auxBarrier;
+                auxBarrier.buffer = auxBuffer.get();
                 auxBarrier.offset = 0;
-                auxBarrier.size = VK_WHOLE_SIZE;
-                cmd.pipelineBarrier2({ &auxBarrier, 1 });
+                auxBarrier.size = rhi::kWholeBuffer;
+                auxBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+                auxBarrier.newState = rhi::ResourceState::Transfer_Src;
+                cmdList.insertBarriers({ &auxBarrier, 1 });
 
-                // 从辅助 buffer 把紧凑的整块数据 拷贝到原始 buffer 开头
-                VkBufferCopy restoreRegion = {};
+                rhi::BufferCopyRegion restoreRegion;
                 restoreRegion.srcOffset = 0;
                 restoreRegion.dstOffset = 0;
-                restoreRegion.size = aliveTotalCount * sizeof(GPUSplatData);
-                cmd.copyBuffer(
-                    auxBuffer->getHandle(),
-                    mSplatDataBuffer->getHandle(),
+                restoreRegion.size = static_cast<uint64_t>(aliveTotalCount) * sizeof(GPUSplatData);
+                cmdList.copyBuffer(
+                    auxBuffer.get(),
+                    mSplatDataBuffer.get(),
                     { &restoreRegion, 1 }
                 );
 
-                // 延迟销毁辅助 buffer
                 mRenderBackend.getDeferredTaskQueue().push(
                     [auxBuffer]() mutable
                     {
@@ -310,53 +291,43 @@ namespace hyp
                 );
             }
 
-            // 上传新增数据
             if (totalAddedCount != 0)
             {
                 auto& stagingAllocator = mRenderBackend.getStagingAllocator();
-                auto allocation = stagingAllocator.forceAllocate(totalAddedCount * sizeof(GPUSplatData));
+                auto allocation = stagingAllocator.forceAllocate(static_cast<uint64_t>(totalAddedCount) * sizeof(GPUSplatData));
                 uint32_t stagingOffset = 0;
                 for (const auto& op : mPendingOperations)
                 {
                     if (op.type == OpType::Add)
                     {
                         std::memcpy(
-                            static_cast<uint8_t*>(allocation.mappedData) + stagingOffset * sizeof(GPUSplatData),
+                            static_cast<uint8_t*>(allocation.mappedData) + static_cast<uint64_t>(stagingOffset) * sizeof(GPUSplatData),
                             op.data.data(),
                             op.data.size() * sizeof(GPUSplatData)
                         );
                         stagingOffset += static_cast<uint32_t>(op.data.size());
                     }
                 }
-                VkBufferCopy copyRegion = {};
+                rhi::BufferCopyRegion copyRegion;
                 copyRegion.srcOffset = allocation.offset;
-                copyRegion.dstOffset = addedDstOffset * sizeof(GPUSplatData);
-                copyRegion.size = totalAddedCount * sizeof(GPUSplatData);
-                cmd.copyBuffer(
+                copyRegion.dstOffset = static_cast<uint64_t>(addedDstOffset) * sizeof(GPUSplatData);
+                copyRegion.size = static_cast<uint64_t>(totalAddedCount) * sizeof(GPUSplatData);
+                cmdList.copyBuffer(
                     allocation.buffer,
-                    mSplatDataBuffer->getHandle(),
+                    mSplatDataBuffer.get(),
                     { &copyRegion, 1 }
                 );
             }
         }
 
-        // 最后统一添加barrier
-        VkBufferMemoryBarrier2 barrier = {};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = mSplatDataBuffer->getHandle();
+        rhi::BufferBarrier barrier;
+        barrier.buffer = mSplatDataBuffer.get();
         barrier.offset = 0;
-        barrier.size = VK_WHOLE_SIZE;
-        cmd.pipelineBarrier2({ &barrier, 1 });
+        barrier.size = rhi::kWholeBuffer;
+        barrier.oldState = rhi::ResourceState::Transfer_Dst;
+        barrier.newState = rhi::ResourceState::Shader_Storage_Read;
+        cmdList.insertBarriers({ &barrier, 1 });
 
-        // 4. 将Remove的id加入freeIds
         for (const auto& op : mPendingOperations)
         {
             if (op.type == OpType::Remove)

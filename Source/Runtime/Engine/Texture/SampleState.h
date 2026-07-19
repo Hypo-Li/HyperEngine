@@ -14,12 +14,16 @@ namespace hyp
         Anisotropic,
     };
 
+    template <> Type* Reflection::createType<Filter>();
+
     enum class AddressMode
     {
         Repeat,
         Clamp,
         Mirror,
     };
+
+    template <> Type* Reflection::createType<AddressMode>();
 
     struct SampleState
     {
@@ -30,6 +34,8 @@ namespace hyp
 
         bool operator==(const SampleState& other) const noexcept;
     };
+
+    template <> Type* Reflection::createType<SampleState>();
 
     struct SampleStateHash
     {
@@ -51,10 +57,4 @@ namespace hyp
     private:
         std::unordered_map<SampleState, SamplerProxyHandle, SampleStateHash> mSamplerProxyHandleMap;
     };
-
-    template <> Type* Reflection::createType<Filter>();
-
-    template <> Type* Reflection::createType<AddressMode>();
-
-    template <> Type* Reflection::createType<SampleState>();
 }

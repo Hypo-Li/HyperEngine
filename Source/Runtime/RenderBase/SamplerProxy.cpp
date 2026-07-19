@@ -3,25 +3,31 @@
 
 namespace hyp
 {
-    SamplerProxy::SamplerProxy(const vk::Sampler::CreateInfo& samplerInfo)
+    SamplerProxy::SamplerProxy(const rhi::SamplerDesc& desc)
     {
-        auto& device = getRenderBackend().getDevice();
-        mSampler = device.getSamplerCache().get(samplerInfo);
+        auto& renderBackend = getRenderBackend();
+        auto& device = renderBackend.getDevice();
+        mSampler = renderBackend.getSamplerCache().getOrCreate(desc);
 
-        auto& bindlessRegistry = getRenderBackend().getBindlessRegistry();
-        mBindlessHandle = bindlessRegistry.registerSampler(mSampler->getHandle());
+        if (device.getFeatures().bindless)
+        {
+            auto& bindlessRegistry = renderBackend.getBindlessRegistry();
+            mBindlessHandle = bindlessRegistry.registerSampler(mSampler);
+        }
     }
 
     SamplerProxy::~SamplerProxy() noexcept
     {
-        auto& bindlessRegistry = getRenderBackend().getBindlessRegistry();
+        auto& renderBackend = getRenderBackend();
+        bool bindless = renderBackend.getDevice().getFeatures().bindless;
 
-        getRenderBackend().getDeferredTaskQueue().push(
+        renderBackend.getDeferredTaskQueue().push(
             [sampler = std::move(mSampler),
-            bindlessRegistry,
+            bindlessRegistry = bindless ? &renderBackend.getBindlessRegistry() : nullptr,
             bindlessHandle = std::move(mBindlessHandle)]() mutable
             {
-                bindlessRegistry.unregister(bindlessHandle);
+                if (bindlessRegistry && bindlessHandle.isValid())
+                    bindlessRegistry->unregister(bindlessHandle);
                 sampler = nullptr;
             },
             kMaxFramesInFlight

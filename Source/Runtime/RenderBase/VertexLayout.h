@@ -1,8 +1,7 @@
 #pragma once
-#include "Vulkan/Pipeline.h"
-
 #include <Core/Common/EnumBitwise.h>
 #include <Core/Common/Hash.h>
+#include <RHI/Pipeline.h>
 
 namespace hyp
 {
@@ -10,6 +9,7 @@ namespace hyp
     {
         Unknown = static_cast<uint8_t>(-1),
         Static_Mesh = 0,
+        Skeletal_Mesh = 1,
     };
 
     enum class VertexAttributeMask : uint32_t
@@ -60,8 +60,8 @@ namespace hyp
         }
 
         void writeVertexLayoutBindingsAndAttributes(
-            std::vector<VkVertexInputBindingDescription>& bindings,
-            std::vector<VkVertexInputAttributeDescription>& attributes
+            std::vector<rhi::VertexInputBinding>& bindings,
+            std::vector<rhi::VertexInputAttribute>& attributes
         ) const;
 
         const std::string& getVertexAttributeGetters() const;

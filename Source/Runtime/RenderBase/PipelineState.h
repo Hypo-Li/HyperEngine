@@ -6,82 +6,85 @@
 
 namespace hyp
 {
-    static constexpr VkStencilOpState kDefaultStencilOpState = VkStencilOpState{
-        VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_NEVER,
-        0, 0, 0
+    static constexpr rhi::StencilOpState kDefaultStencilOpState = rhi::StencilOpState{
+        rhi::StencilOp::Keep,
+        rhi::StencilOp::Keep,
+        rhi::StencilOp::Keep,
+        rhi::CompareOp::Always,
+        0,
+        0
     };
 
     class StencilState
     {
     public:
-        virtual VkStencilOpState getFront() const noexcept = 0;
+        virtual rhi::StencilOpState getFront() const noexcept = 0;
 
-        virtual VkStencilOpState getBack() const noexcept = 0;
+        virtual rhi::StencilOpState getBack() const noexcept = 0;
 
-        template <VkStencilOpState Front = kDefaultStencilOpState, VkStencilOpState Back = kDefaultStencilOpState>
+        template <rhi::StencilOpState Front = kDefaultStencilOpState, rhi::StencilOpState Back = kDefaultStencilOpState>
         static StencilState* get() noexcept;
     };
 
-    template <VkStencilOpState Front, VkStencilOpState Back>
+    template <rhi::StencilOpState Front, rhi::StencilOpState Back>
     class TStencilState : public StencilState
     {
     public:
-        virtual VkStencilOpState getFront() const noexcept override
+        virtual rhi::StencilOpState getFront() const noexcept override
         {
             return Front;
         }
 
-        virtual VkStencilOpState getBack() const noexcept override
+        virtual rhi::StencilOpState getBack() const noexcept override
         {
             return Back;
         }
     };
 
-    template <VkStencilOpState Front, VkStencilOpState Back>
+    template <rhi::StencilOpState Front, rhi::StencilOpState Back>
     StencilState* StencilState::get() noexcept
     {
         static TStencilState<Front, Back> stencilState;
         return &stencilState;
     }
 
-    using AttachmentBlendState = VkPipelineColorBlendAttachmentState;
-    static constexpr AttachmentBlendState kDefaultAttachmentBlendState = AttachmentBlendState{
-        VK_FALSE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
-        VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, vk::kColorComponentAll
+    static constexpr rhi::ColorBlendAttachmentState kDefaultColorBlendAttachmentState = rhi::ColorBlendAttachmentState{
+        false, rhi::BlendFactor::One, rhi::BlendFactor::Zero, rhi::BlendOp::Add,
+        rhi::BlendFactor::One, rhi::BlendFactor::Zero, rhi::BlendOp::Add, 0xFF
     };
 
     class ColorBlendState
     {
     public:
-        virtual AttachmentBlendState getAttachmentBlendState(uint8_t index) const noexcept = 0;
+        virtual rhi::ColorBlendAttachmentState getAttachmentBlendState(uint8_t index) const noexcept = 0;
 
         template <
-            AttachmentBlendState Attachment0 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment1 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment2 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment3 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment4 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment5 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment6 = kDefaultAttachmentBlendState,
-            AttachmentBlendState Attachment7 = kDefaultAttachmentBlendState
+            rhi::ColorBlendAttachmentState Attachment0 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment1 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment2 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment3 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment4 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment5 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment6 = kDefaultColorBlendAttachmentState,
+            rhi::ColorBlendAttachmentState Attachment7 = kDefaultColorBlendAttachmentState
         >
         static ColorBlendState* get() noexcept;
     };
 
     template <
-        AttachmentBlendState Attachment0,
-        AttachmentBlendState Attachment1,
-        AttachmentBlendState Attachment2,
-        AttachmentBlendState Attachment3,
-        AttachmentBlendState Attachment4,
-        AttachmentBlendState Attachment5,
-        AttachmentBlendState Attachment6,
-        AttachmentBlendState Attachment7
+        rhi::ColorBlendAttachmentState Attachment0,
+        rhi::ColorBlendAttachmentState Attachment1,
+        rhi::ColorBlendAttachmentState Attachment2,
+        rhi::ColorBlendAttachmentState Attachment3,
+        rhi::ColorBlendAttachmentState Attachment4,
+        rhi::ColorBlendAttachmentState Attachment5,
+        rhi::ColorBlendAttachmentState Attachment6,
+        rhi::ColorBlendAttachmentState Attachment7
     >
     class TColorBlendState : public ColorBlendState
     {
     public:
-        virtual AttachmentBlendState getAttachmentBlendState(uint8_t index) const noexcept override
+        virtual rhi::ColorBlendAttachmentState getAttachmentBlendState(uint8_t index) const noexcept override
         {
             switch (index)
             {
@@ -93,20 +96,20 @@ namespace hyp
             case 5: return Attachment5;
             case 6: return Attachment6;
             case 7: return Attachment7;
-            default: return kDefaultAttachmentBlendState;
+            default: return kDefaultColorBlendAttachmentState;
             }
         }
     };
 
     template <
-        AttachmentBlendState Attachment0,
-        AttachmentBlendState Attachment1,
-        AttachmentBlendState Attachment2,
-        AttachmentBlendState Attachment3,
-        AttachmentBlendState Attachment4,
-        AttachmentBlendState Attachment5,
-        AttachmentBlendState Attachment6,
-        AttachmentBlendState Attachment7
+        rhi::ColorBlendAttachmentState Attachment0,
+        rhi::ColorBlendAttachmentState Attachment1,
+        rhi::ColorBlendAttachmentState Attachment2,
+        rhi::ColorBlendAttachmentState Attachment3,
+        rhi::ColorBlendAttachmentState Attachment4,
+        rhi::ColorBlendAttachmentState Attachment5,
+        rhi::ColorBlendAttachmentState Attachment6,
+        rhi::ColorBlendAttachmentState Attachment7
     >
     ColorBlendState* ColorBlendState::get() noexcept
     {
@@ -126,39 +129,39 @@ namespace hyp
     class AttachmentFormats
     {
     public:
-        virtual VkFormat getColorFormat(uint8_t index) const noexcept = 0;
+        virtual rhi::TextureFormat getColorFormat(uint8_t index) const noexcept = 0;
 
-        virtual VkFormat getDepthStencilFormat() const noexcept = 0;
+        virtual rhi::TextureFormat getDepthStencilFormat() const noexcept = 0;
 
         template <
-            VkFormat DepthStencilFormat,
-            VkFormat ColorFormat0 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat1 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat2 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat3 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat4 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat5 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat6 = VK_FORMAT_UNDEFINED,
-            VkFormat ColorFormat7 = VK_FORMAT_UNDEFINED
+            rhi::TextureFormat DepthStencilFormat,
+            rhi::TextureFormat ColorFormat0 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat1 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat2 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat3 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat4 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat5 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat6 = rhi::TextureFormat::Undefined,
+            rhi::TextureFormat ColorFormat7 = rhi::TextureFormat::Undefined
         >
         static AttachmentFormats* get() noexcept;
     };
 
     template <
-        VkFormat DepthStencilFormat,
-        VkFormat ColorFormat0,
-        VkFormat ColorFormat1,
-        VkFormat ColorFormat2,
-        VkFormat ColorFormat3,
-        VkFormat ColorFormat4,
-        VkFormat ColorFormat5,
-        VkFormat ColorFormat6,
-        VkFormat ColorFormat7
+        rhi::TextureFormat DepthStencilFormat,
+        rhi::TextureFormat ColorFormat0,
+        rhi::TextureFormat ColorFormat1,
+        rhi::TextureFormat ColorFormat2,
+        rhi::TextureFormat ColorFormat3,
+        rhi::TextureFormat ColorFormat4,
+        rhi::TextureFormat ColorFormat5,
+        rhi::TextureFormat ColorFormat6,
+        rhi::TextureFormat ColorFormat7
     >
     class TAttachmentFormats : public AttachmentFormats
     {
     public:
-        virtual VkFormat getColorFormat(uint8_t index) const noexcept override
+        virtual rhi::TextureFormat getColorFormat(uint8_t index) const noexcept override
         {
             switch (index)
             {
@@ -172,26 +175,26 @@ namespace hyp
             case 7: return ColorFormat7;
             default:
                 assert(false && "Color format out of range");
-                return VK_FORMAT_UNDEFINED;
+                return rhi::TextureFormat::Undefined;
             }
         }
 
-        virtual VkFormat getDepthStencilFormat() const noexcept override
+        virtual rhi::TextureFormat getDepthStencilFormat() const noexcept override
         {
             return DepthStencilFormat;
         }
     };
 
     template <
-        VkFormat DepthStencilFormat,
-        VkFormat ColorFormat0,
-        VkFormat ColorFormat1,
-        VkFormat ColorFormat2,
-        VkFormat ColorFormat3,
-        VkFormat ColorFormat4,
-        VkFormat ColorFormat5,
-        VkFormat ColorFormat6,
-        VkFormat ColorFormat7
+        rhi::TextureFormat DepthStencilFormat,
+        rhi::TextureFormat ColorFormat0,
+        rhi::TextureFormat ColorFormat1,
+        rhi::TextureFormat ColorFormat2,
+        rhi::TextureFormat ColorFormat3,
+        rhi::TextureFormat ColorFormat4,
+        rhi::TextureFormat ColorFormat5,
+        rhi::TextureFormat ColorFormat6,
+        rhi::TextureFormat ColorFormat7
     >
     static AttachmentFormats* AttachmentFormats::get() noexcept
     {
@@ -208,56 +211,6 @@ namespace hyp
         > attachmentFormats;
         return &attachmentFormats;
     }
-
-    enum class PolygonMode
-    {
-        Fill,
-        Line,
-        Point
-    };
-
-    enum class Topology
-    {
-        Point_List,
-        Line_List,
-        Line_Strip,
-        Triangle_List,
-        Triangle_Strip,
-        Triangle_Fan,
-    };
-
-    enum class SampleCount
-    {
-        Count_1,
-        Count_2,
-        Count_4,
-        Count_8,
-    };
-
-    enum class CullMode
-    {
-        None,
-        Front,
-        Back,
-    };
-
-    enum class FrontFace
-    {
-        Counter_Clockwise,
-        Clockwise
-    };
-
-    enum class CompareOp
-    {
-        Never,
-        Less,
-        Equal,
-        Less_Or_Equal,
-        Greater,
-        Not_Equal,
-        Greater_Or_Equal,
-        Always
-    };
 
     struct GraphicsPipelineState
     {
@@ -276,9 +229,17 @@ namespace hyp
         ColorBlendState* colorBlendState;
         AttachmentFormats* attachmentFormats;
 
+        GraphicsPipelineState()
+        {
+            std::memset(this, 0, sizeof(GraphicsPipelineState));
+            shader = ShaderVariant{};
+            vertexLayout = VertexLayout{};
+        }
+
         bool operator==(const GraphicsPipelineState& other) const noexcept
         {
-            return shader == other.shader &&
+            return
+                shader == other.shader &&
                 vertexLayout == other.vertexLayout &&
                 polygonMode == other.polygonMode &&
                 topology == other.topology &&
@@ -286,6 +247,8 @@ namespace hyp
                 cullMode == other.cullMode &&
                 frontFace == other.frontFace &&
                 depthTestEnable == other.depthTestEnable &&
+                depthWriteEnable == other.depthWriteEnable &&
+                depthCompareOp == other.depthCompareOp &&
                 stencilTestEnable == other.stencilTestEnable &&
                 stencilState == other.stencilState &&
                 colorBlendState == other.colorBlendState &&
@@ -310,6 +273,8 @@ namespace std
             hyp::Hash::combine(seed, state.cullMode);
             hyp::Hash::combine(seed, state.frontFace);
             hyp::Hash::combine(seed, state.depthTestEnable);
+            hyp::Hash::combine(seed, state.depthWriteEnable);
+            hyp::Hash::combine(seed, state.depthCompareOp);
             hyp::Hash::combine(seed, state.stencilTestEnable);
             hyp::Hash::combine(seed, state.stencilState);
             hyp::Hash::combine(seed, state.colorBlendState);

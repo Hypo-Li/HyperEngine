@@ -69,7 +69,7 @@ namespace hyp
             uint32_t itemCount;
             float minScreenPercentage;
         };
-        void setDrawItems(std::vector<DrawItem> drawItems, std::vector<LOD> lods) noexcept
+        void setDrawItems(std::vector<DrawItem>&& drawItems, std::vector<LOD>&& lods) noexcept
         {
             mDrawItems = std::move(drawItems);
             mLODs = std::move(lods);

@@ -1,18 +1,19 @@
 #pragma once
 #include "RenderProxy.h"
 #include "BindlessRegistry.h"
-#include "Vulkan/Sampler.h"
+
+#include <RHI/Sampler.h>
 
 namespace hyp
 {
     class SamplerProxy : public RenderProxy
     {
     public:
-        SamplerProxy(const vk::Sampler::CreateInfo& samplerInfo);
+        SamplerProxy(const rhi::SamplerDesc& desc);
 
         ~SamplerProxy() noexcept;
 
-        vk::Sampler& getSampler() const noexcept
+        rhi::Sampler& getSampler() const noexcept
         {
             return *mSampler;
         }
@@ -23,7 +24,7 @@ namespace hyp
         }
 
     private:
-        TRef<vk::Sampler> mSampler;
+        TRef<rhi::Sampler> mSampler;
         BindlessHandle mBindlessHandle;
     };
 

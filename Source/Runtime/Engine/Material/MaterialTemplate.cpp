@@ -1,8 +1,6 @@
 #include "MaterialTemplate.h"
 #include "MaterialInstance.h"
 
-#include <format>
-
 #include "../Context.h"
 #include <RenderBase/RenderSystem.h>
 #include <RenderBase/MaterialProxy.h>
@@ -131,19 +129,11 @@ namespace hyp
         mShaderHandleDirty = true;
     }
 
-    void MaterialTemplate::addShaderMacro(HString name, HString value)
+    void MaterialTemplate::setVertexPositionOffsetSource(std::string vertexPositionOffsetSource) noexcept
     {
-        mShaderMacros.emplace_back(name, value);
+        mVertexPositionOffsetSource = std::move(vertexPositionOffsetSource);
         mDirtyFlags |= DirtyFlags::Pipeline;
-    }
-
-    void MaterialTemplate::removeShaderMacro(HString name)
-    {
-        mShaderMacros.erase(std::remove_if(mShaderMacros.begin(), mShaderMacros.end(), [name](const ShaderMacro& macro)
-        {
-            return macro.name == name;
-        }), mShaderMacros.end());
-        mDirtyFlags |= DirtyFlags::Pipeline;
+        mShaderHandleDirty = true;
     }
 
     void MaterialTemplate::setDoubleSided(bool doubleSided) noexcept
@@ -194,15 +184,19 @@ namespace hyp
             mShaderHandle = materialShaderManager.allocateHandle();
             mShaderHandleDirty = false;
             renderFrontend.enqueueLambda(
-                [materialSource = makeParameterDefines() + mMaterialSource,
-                shaderHandle = mShaderHandle
-                ](RenderFrameContext& context)
+                [shaderHandle = mShaderHandle,
+                materialSource = mMaterialSource,
+                vertexPositionOffsetSource = mVertexPositionOffsetSource,
+                parameterMetadata = makeParameterMetadata()
+                ](FrameContext& context)
                 {
                     auto& materialShaderManager = context.getMaterialShaderManager();
                     materialShaderManager.createMaterialShader(
                         shaderHandle,
                         "MaterialShader",
-                        materialSource
+                        materialSource,
+                        vertexPositionOffsetSource,
+                        parameterMetadata
                     );
                 }
             );
@@ -226,7 +220,10 @@ namespace hyp
         attributes.domain = mMaterialDomain;
         attributes.shadingModel = mShadingModel;
         attributes.blendMode = mBlendMode;
+        attributes.alphaCutoff = mAlphaCutoff;
         attributes.doubleSided = mDoubleSided;
+        attributes.tangentSpaceNormal = mTangentSpaceNormal;
+        attributes.hasVertexPositionOffset = hasVertexPositionOffset();
 
         MaterialShaderHandle materialShaderHandle = getOrCreateMaterialShader();
 
@@ -238,9 +235,8 @@ namespace hyp
             [handle,
             attributes,
             materialShaderHandle,
-            shaderMacros = mShaderMacros,
             parameters = std::move(proxyParams),
-            textureBindings = std::move(textureBindings)](RenderFrameContext& context) mutable
+            textureBindings = std::move(textureBindings)](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 resolveTextureBindings(parameters, textureBindings, proxyManager);
@@ -252,7 +248,6 @@ namespace hyp
                     handle,
                     attributes,
                     materialShader,
-                    std::move(shaderMacros),
                     parameters
                 );
             }
@@ -271,7 +266,7 @@ namespace hyp
         materialShaderManager.freeHandle(mShaderHandle);
 
         renderFrontend.enqueueLambda(
-            [shaderHandle = mShaderHandle](RenderFrameContext& context)
+            [shaderHandle = mShaderHandle](FrameContext& context)
             {
                 auto& materialShaderManager = context.getMaterialShaderManager();
                 materialShaderManager.unrefMaterialShader(shaderHandle);
@@ -296,7 +291,7 @@ namespace hyp
             [proxyHandle,
             parameters = std::move(proxyParams),
             textureBindings = std::move(textureBindings)
-            ](RenderFrameContext& context) mutable
+            ](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 resolveTextureBindings(parameters, textureBindings, proxyManager);
@@ -312,7 +307,10 @@ namespace hyp
         attributes.domain = mMaterialDomain;
         attributes.shadingModel = mShadingModel;
         attributes.blendMode = mBlendMode;
+        attributes.alphaCutoff = mAlphaCutoff;
         attributes.doubleSided = mDoubleSided;
+        attributes.tangentSpaceNormal = mTangentSpaceNormal;
+        attributes.hasVertexPositionOffset = hasVertexPositionOffset();
 
         MaterialShaderHandle materialShaderHandle = getOrCreateMaterialShader();
 
@@ -324,9 +322,8 @@ namespace hyp
             [handle = getMaterialProxyHandle(),
             attributes,
             materialShaderHandle,
-            shaderMacros = mShaderMacros,
             parameters = std::move(proxyParams),
-            textureBindings = std::move(textureBindings)](RenderFrameContext& context) mutable
+            textureBindings = std::move(textureBindings)](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
                 resolveTextureBindings(parameters, textureBindings, proxyManager);
@@ -337,105 +334,38 @@ namespace hyp
                 materialProxy->update(
                     attributes,
                     materialShader,
-                    std::move(shaderMacros),
                     parameters
                 );
             }
         );
     }
 
-    std::string_view getParameterTypeName(MaterialParameterType type)
+    std::vector<MaterialParameterMetadata> MaterialTemplate::makeParameterMetadata() const
     {
-        switch (type)
-        {
-        case MaterialParameterType::Bool:  return "bool";
-        case MaterialParameterType::Int: return "int";
-        case MaterialParameterType::Float: return "float";
-        case MaterialParameterType::Float2: return "float2";
-        case MaterialParameterType::Float3: return "float3";
-        case MaterialParameterType::Float4: return "float4";
-        default: return "unknow";
-        }
-    }
-
-    std::string MaterialTemplate::makeParameterDefines()
-    {
-        std::string parameterDefines;
-        if (mParameters.empty())
-            return parameterDefines;
-        parameterDefines.reserve(1024);
-
-        std::string macroPart;
-        macroPart.reserve(512);
-
-        parameterDefines += "struct MaterialParameters\n{\n";
+        std::vector<MaterialParameterMetadata> metadata;
+        metadata.reserve(mParameters.size());
         for (const auto& parameter : mParameters)
         {
-            auto type = parameter.value.getType();
-            auto name = parameter.name.toStringView();
-
-            if (isTextureParameterType(type))
-            {
-                std::format_to(std::back_inserter(parameterDefines),
-                "    uint {}TextureIndex;\n    uint {}SamplerIndex;\n", name, name);
-                switch (type)
-                {
-                case MaterialParameterType::Texture2D:
-                {
-                    std::format_to(std::back_inserter(macroPart),
-                        "#define {}Texture BindlessTexture2Ds[uMaterialParameters.{}TextureIndex]\n",
-                        name, name
-                    );
-                    break;
-                }
-                case MaterialParameterType::Texture2DArray:
-                {
-                    std::format_to(std::back_inserter(macroPart),
-                        "#define {}Texture BindlessTexture2DArrays[uMaterialParameters.{}TextureIndex]\n",
-                        name, name
-                    );
-                    break;
-                }
-                case MaterialParameterType::Texture3D:
-                {
-                    std::format_to(std::back_inserter(macroPart),
-                        "#define {}Texture BindlessTexture3Ds[uMaterialParameters.{}TextureIndex]\n",
-                        name, name
-                    );
-                    break;
-                }
-                case MaterialParameterType::TextureCube:
-                {
-                    std::format_to(std::back_inserter(macroPart),
-                        "#define {}Texture BindlessTextureCubes[uMaterialParameters.{}TextureIndex]\n",
-                        name, name
-                    );
-                    break;
-                }
-                }
-                std::format_to(std::back_inserter(macroPart),
-                    "#define {}Sampler BindlessSamplers[uMaterialParameters.{}SamplerIndex]\n",
-                    name, name
-                );
-            }
-            else
-            {
-                const auto typeName = getParameterTypeName(type);
-                std::format_to(std::back_inserter(parameterDefines),
-                    "    {} {};\n", typeName, name);
-                std::format_to(std::back_inserter(macroPart),
-                    "#define {} uMaterialParameters.{}\n", name, name);
-            }
+            MaterialParameterMetadata meta;
+            meta.name = parameter.name;
+            meta.type = parameter.value.getType();
+            metadata.push_back(meta);
         }
-        parameterDefines += "};\n[[vk::binding(0, 2)]]\nConstantBuffer<MaterialParameters> uMaterialParameters;\n";
-        parameterDefines += macroPart;
-
-        return parameterDefines;
+        return metadata;
     }
-    
+
     template <> Type* Reflection::createType<MaterialTemplate>()
     {
         auto c = new TClass<MaterialTemplate, Material>("MaterialTemplate");
+        c->addProperty("Material Domain", &MaterialTemplate::mMaterialDomain);
+        c->addProperty("Blend Mode", &MaterialTemplate::mBlendMode);
+        c->addProperty("Alpha Cutoff", &MaterialTemplate::mAlphaCutoff);
+        c->addProperty("Shading Model", &MaterialTemplate::mShadingModel);
+        c->addProperty("Parameters", &MaterialTemplate::mParameters);
+        c->addProperty("Material Source", &MaterialTemplate::mMaterialSource);
+        c->addProperty("Vertex Position Offset Source", &MaterialTemplate::mVertexPositionOffsetSource);
+        c->addProperty("Double Sided", &MaterialTemplate::mDoubleSided);
+        c->addProperty("Tangent Space Normal", &MaterialTemplate::mTangentSpaceNormal);
         return c;
     }
 }

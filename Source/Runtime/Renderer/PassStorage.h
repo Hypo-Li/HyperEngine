@@ -2,7 +2,6 @@
 #include <unordered_map>
 #include <typeindex>
 #include <any>
-#include <cassert>
 
 namespace hyp
 {
@@ -10,6 +9,10 @@ namespace hyp
     {
         using PairTypeIndex = std::pair<std::type_index, std::type_index>;
     public:
+        PassStorage() = default;
+
+        ~PassStorage() = default;
+
         template <typename KEY, typename VALUE>
         VALUE& getOrCreate()
         {

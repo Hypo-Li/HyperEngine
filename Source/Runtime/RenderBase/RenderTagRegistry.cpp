@@ -21,15 +21,16 @@ namespace hyp
     RenderTagRegistry::RenderTagRegistry()
     {
         mBuiltinOpaqueMask = registerTag(BuiltinRenderTags::Opaque, SHADER_DIR "/Material/Opaque.slang", readShaderTemplate(SHADER_DIR "/Material/Opaque.slang"));
-        mBuiltinTranslucentMask = registerTag(BuiltinRenderTags::Translucent, SHADER_DIR "/Material/Opaque.slang", readShaderTemplate(SHADER_DIR "/Material/Opaque.slang"));
-        mBuiltinShadowDepthMask = registerTag(BuiltinRenderTags::ShadowDepth, SHADER_DIR "/Material/ShadowDepth.slang", readShaderTemplate(SHADER_DIR "/Material/ShadowDepth.slang"));
-        mBuiltinDepthOnlyMask = registerTag(BuiltinRenderTags::DepthOnly, SHADER_DIR "/Material/ShadowDepth.slang", readShaderTemplate(SHADER_DIR "/Material/ShadowDepth.slang"));
+        mBuiltinTranslucentMask = registerTag(BuiltinRenderTags::Translucent, SHADER_DIR "/Material/Translucent.slang", readShaderTemplate(SHADER_DIR "/Material/Translucent.slang"));
+        mBuiltinShadowDepthMask = registerTag(BuiltinRenderTags::ShadowDepth, SHADER_DIR "/Material/ShadowDepth.slang", readShaderTemplate(SHADER_DIR "/Material/ShadowDepth.slang"), RenderTagFlags::Geometry_Only);
+        mBuiltinDepthOnlyMask = registerTag(BuiltinRenderTags::DepthOnly, SHADER_DIR "/Material/ShadowDepth.slang", readShaderTemplate(SHADER_DIR "/Material/ShadowDepth.slang"), RenderTagFlags::Geometry_Only);
     }
 
     uint32_t RenderTagRegistry::registerTag(
         HString renderTag,
         const std::string& shaderFileName,
-        const std::string& shaderTemplate
+        const std::string& shaderTemplate,
+        RenderTagFlags flags
     )
     {
         auto it = mRenderTagMap.find(renderTag);
@@ -39,10 +40,19 @@ namespace hyp
             entry.renderMask = 1u << mRenderTagCount;
             entry.shaderFileName = shaderFileName;
             entry.shaderTemplate = shaderTemplate;
+            entry.flags = flags;
             mRenderTagCount++;
             return entry.renderMask;
         }
         return it->second.renderMask;
+    }
+
+    bool RenderTagRegistry::hasFlags(HString renderTag, RenderTagFlags flags) const noexcept
+    {
+        auto it = mRenderTagMap.find(renderTag);
+        if (it == mRenderTagMap.end())
+            return false;
+        return enumHasAllFlags(it->second.flags, flags);
     }
 
     uint32_t RenderTagRegistry::getRenderMask(HString renderTag)
@@ -65,5 +75,29 @@ namespace hyp
         return mRenderTagMap.at(renderTag).shaderTemplate;
     }
 
+    uint32_t RenderTagRegistry::getApplicableRenderMask(MaterialDomain domain, BlendMode blendMode) const noexcept
+    {
+        uint32_t renderMask = 0u;
+        switch (domain)
+        {
+        case MaterialDomain::Surface:
+        {
+            if (blendMode == BlendMode::Opaque || blendMode == BlendMode::Masked)
+            {
+                renderMask |= mBuiltinOpaqueMask;
+                renderMask |= mBuiltinDepthOnlyMask;
+                renderMask |= mBuiltinShadowDepthMask;
+            }
+            else
+            {
+                renderMask |= mBuiltinTranslucentMask;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        return renderMask;
+    }
 
 }
