@@ -5,6 +5,8 @@
 #include <slang.h>
 #include <slang-com-ptr.h>
 
+#include <regex>
+
 using namespace slang;
 using namespace Slang;
 
@@ -18,6 +20,28 @@ namespace hyp
             createGlobalSession(globalSession.writeRef());
         }
         return globalSession;
+    }
+
+    // TODO: 等 vendor 的 Slang 版本原生支持 [[vk::push_constant]] 到 WGSL `immediate` 地址空间
+    // (见 gpuweb PR #5423)的翻译之后, 删掉这个函数和调用点。现在 Slang 吐出来的是一个没有
+    // @group/@binding 的裸 var<uniform>, WGSL 规范要求资源变量必须带这两个属性, Dawn 编译期
+    // 直接报 "resource variables require '@group' and '@binding' attributes"。
+    // CompilePassShader.cmake 对预编译的 PassShader 已经做了同样的字符串替换(把这一条声明patch
+    // 成 var<immediate>), 这里是运行时编译材质 shader(Opaque/Translucent 等)时的等价实现,
+    // 按材质源码里 [[vk::push_constant]] 声明的字段名做定点替换, 不是无差别的全局文本替换。
+    static std::string patchPushConstantForWgsl(const char* source, std::string wgslText)
+    {
+        static const std::regex kPushConstantDeclRegex(
+            R"(\[\[vk::push_constant\]\][ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;)"
+        );
+        std::cmatch declMatch;
+        if (!std::regex_search(source, declMatch, kPushConstantDeclRegex))
+            return wgslText;
+
+        std::string pushConstantName = declMatch[1].str();
+        std::regex uniformDeclRegex("var<uniform> (" + pushConstantName + "_[0-9]+) :");
+        wgslText = std::regex_replace(wgslText, uniformDeclRegex, "var<immediate> $1 :");
+        return "requires immediate_address_space;\n" + wgslText;
     }
 
     std::vector<std::vector<uint8_t>> ShaderCompiler::compileToSpirvs(
@@ -271,9 +295,9 @@ namespace hyp
             }
 
             const char* text = static_cast<const char*>(wgslBlob->getBufferPointer());
-            size_t length = std::strlen(text);
-            const uint8_t* begin = reinterpret_cast<const uint8_t*>(text);
-            const uint8_t* end = begin + length + 1;
+            std::string wgslText = patchPushConstantForWgsl(source, std::string(text));
+            const uint8_t* begin = reinterpret_cast<const uint8_t*>(wgslText.data());
+            const uint8_t* end = begin + wgslText.size() + 1;
             result.emplace_back(begin, end);
         }
 

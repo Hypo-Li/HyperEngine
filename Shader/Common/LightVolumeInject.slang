@@ -18,15 +18,15 @@ StructuredBuffer<float4> SkyLightPackedSHCoeff;
 
 [[vk::binding(1, 2)]]
 [format("rgba16f")]
-RWTexture3D<float4> LightVolumeR;
+WTexture3D<float4> LightVolumeR;
 
 [[vk::binding(2, 2)]]
 [format("rgba16f")]
-RWTexture3D<float4> LightVolumeG;
+WTexture3D<float4> LightVolumeG;
 
 [[vk::binding(3, 2)]]
 [format("rgba16f")]
-RWTexture3D<float4> LightVolumeB;
+WTexture3D<float4> LightVolumeB;
 
 struct LightVolumeImmediateData
 {
@@ -46,7 +46,7 @@ void ComputeMain(uint3 id : SV_DispatchThreadID)
 
     // 1 阶系数就是 packedSH[0..2] 本身, 天光空间不变, 直接原样复制进每个体素, 不需要按某个
     // 固定法线求值——法线相关的重建挪到 Translucent.slang 采样时再做, 这样才是真正的方向性数据
-    LightVolumeR[id] = SkyLightPackedSHCoeff[0];
-    LightVolumeG[id] = SkyLightPackedSHCoeff[1];
-    LightVolumeB[id] = SkyLightPackedSHCoeff[2];
+    LightVolumeR.Store(id, SkyLightPackedSHCoeff[0]);
+    LightVolumeG.Store(id, SkyLightPackedSHCoeff[1]);
+    LightVolumeB.Store(id, SkyLightPackedSHCoeff[2]);
 }

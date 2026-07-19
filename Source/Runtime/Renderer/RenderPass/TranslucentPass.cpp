@@ -2,6 +2,7 @@
 #include "RenderPassUtils.h"
 
 #include <RenderBase/RenderBackend.h>
+#include <Core/Common/LogSystem.h>
 
 #include <LightVolumeInject.generated.h>
 
@@ -475,11 +476,11 @@ namespace hyp
                 postBarrier.newState = rhi::ResourceState::Shader_Storage_Read;
                 cmd.insertBarriers({ &postBarrier, 1 });
 
+                uint32_t viewDataDynamicOffset = rendererContext.getViewDataManager().getViewDataDynamicOffset(data.viewId);
+
                 context.beginPass();
 
                 setViewportAndScissor(cmd, data.viewport);
-
-                uint32_t viewDataDynamicOffset = rendererContext.getViewDataManager().getViewDataDynamicOffset(data.viewId);
 
                 // 第一版只做太阳(方向光)直接光照, 最多取 2 盏——跟 AtmosphereParameters 的
                 // sun0/sun1 约定一致, 见 Translucent.slang 顶部注释
@@ -544,6 +545,14 @@ namespace hyp
 
                     drawItem.geometry->draw(cmd, drawItem.sectionIndex, 1, i);
                 }
+
+                cmd.setBindGroup(
+                    1,
+                    rhi::PipelineBindPoint::Graphics,
+                    &rendererContext.getGlobalPipelineLayout(),
+                    &data.scene->getSceneAndViewBindGroup(),
+                    { &viewDataDynamicOffset, 1 }
+                );
             },
             rg::PassFlags::Skip_Begin_Pass
         );

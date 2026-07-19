@@ -13,6 +13,17 @@ namespace hyp
 {
     namespace
     {
+        // WebGPU 要求 copyBufferToTexture 的 bytesPerRow 必须是 256 的整数倍(Vulkan 没有这个
+        // 限制, 之前只在 Vulkan 上测过没暴露出来)——这里的占位纹理都只有 1x1/极小尺寸, 实际一行
+        // 数据远小于 256 字节, 必须把 staging buffer 里每一行按 256 对齐着摆放, 只在每行开头写
+        // 真正的像素数据, 复制时 bytesPerRow 传对齐后的值
+        static constexpr uint32_t kTextureRowAlignment = 256;
+
+        constexpr uint32_t alignUp(uint32_t value, uint32_t alignment)
+        {
+            return (value + alignment - 1) & ~(alignment - 1);
+        }
+
         // Resource/DfgLut.dds 用 ThirdParty/dds_image 读, 不用自己写 DDS 解析器。只认
         // DXGI_FORMAT_R16G16_FLOAT 这一种格式(跟 evaluateIBL() 期望的 (scale, bias) LUT 对应),
         // 其它格式当成加载失败处理
@@ -72,7 +83,8 @@ namespace hyp
         outTexture = device.createTexture(desc, rhi::MemoryType::Gpu_Only);
         outView = outTexture->createView(rhi::makeTextureDefaultViewDesc(desc));
 
-        auto allocation = stagingAllocator.forceAllocate(sizeof(color));
+        uint32_t bytesPerRow = alignUp(sizeof(color), kTextureRowAlignment);
+        auto allocation = stagingAllocator.forceAllocate(bytesPerRow);
         std::memcpy(allocation.mappedData, color, sizeof(color));
 
         rhi::TextureBarrier preBarrier;
@@ -84,7 +96,7 @@ namespace hyp
 
         rhi::BufferTextureCopyRegion copyRegion;
         copyRegion.bufferOffset = allocation.offset;
-        copyRegion.bytesPerRow = 4;
+        copyRegion.bytesPerRow = bytesPerRow;
         copyRegion.rowsPerTexture = 1;
         copyRegion.slice = { rhi::TextureAspect::Color, 0, 0, 1 };
         copyRegion.textureOffset = { 0, 0, 0 };
@@ -115,7 +127,8 @@ namespace hyp
         mBlackTexture3DView = mBlackTexture3D->createView(rhi::makeTextureDefaultViewDesc(desc));
 
         uint16_t blackTexel[4] = { 0, 0, 0, 0 };
-        auto allocation = stagingAllocator.forceAllocate(sizeof(blackTexel));
+        uint32_t bytesPerRow = alignUp(sizeof(blackTexel), kTextureRowAlignment);
+        auto allocation = stagingAllocator.forceAllocate(bytesPerRow);
         std::memcpy(allocation.mappedData, blackTexel, sizeof(blackTexel));
 
         rhi::TextureBarrier preBarrier;
@@ -127,7 +140,7 @@ namespace hyp
 
         rhi::BufferTextureCopyRegion copyRegion;
         copyRegion.bufferOffset = allocation.offset;
-        copyRegion.bytesPerRow = sizeof(blackTexel);
+        copyRegion.bytesPerRow = bytesPerRow;
         copyRegion.rowsPerTexture = 1;
         copyRegion.slice = { rhi::TextureAspect::Color, 0, 0, 1 };
         copyRegion.textureOffset = { 0, 0, 0 };
@@ -158,10 +171,11 @@ namespace hyp
         mBlackTextureCubeView = mBlackTextureCube->createView(rhi::makeTextureDefaultViewDesc(desc));
 
         uint16_t blackTexel[4] = { 0, 0, 0, 0 };
-        auto allocation = stagingAllocator.forceAllocate(sizeof(blackTexel) * 6);
+        uint32_t bytesPerRow = alignUp(sizeof(blackTexel), kTextureRowAlignment);
+        auto allocation = stagingAllocator.forceAllocate(bytesPerRow * 6);
         for (uint32_t layer = 0; layer < 6; ++layer)
         {
-            std::memcpy(static_cast<uint8_t*>(allocation.mappedData) + layer * sizeof(blackTexel), blackTexel, sizeof(blackTexel));
+            std::memcpy(static_cast<uint8_t*>(allocation.mappedData) + layer * bytesPerRow, blackTexel, sizeof(blackTexel));
         }
 
         rhi::TextureBarrier preBarrier;
@@ -173,7 +187,7 @@ namespace hyp
 
         rhi::BufferTextureCopyRegion copyRegion;
         copyRegion.bufferOffset = allocation.offset;
-        copyRegion.bytesPerRow = sizeof(blackTexel);
+        copyRegion.bytesPerRow = bytesPerRow;
         copyRegion.rowsPerTexture = 1;
         copyRegion.slice = { rhi::TextureAspect::Color, 0, 0, 6 };
         copyRegion.textureOffset = { 0, 0, 0 };
