@@ -26,9 +26,3 @@ add_pass_shader(PassShaders Atmosphere "${CMAKE_SOURCE_DIR}/Shader/Atmosphere/At
 add_pass_shader(PassShaders RadixSortUpsweep "${CMAKE_SOURCE_DIR}/Shader/Common/RadixSort/Upsweep.slang")
 add_pass_shader(PassShaders RadixSortSpine "${CMAKE_SOURCE_DIR}/Shader/Common/RadixSort/Spine.slang")
 add_pass_shader(PassShaders RadixSortDownsweep "${CMAKE_SOURCE_DIR}/Shader/Common/RadixSort/Downsweep.slang")
-
-# GSplat2(Source/Test/GSplat2, ChunkAllocator 驱动的稀疏 LOD 流式加载原型): 独立于生产版本的
-# Shader/GSplat/* —— 剔除 shader 需要感知 chunk 布局, 渲染 shader 没有 instance 变换,
-# 因此单独放在 Shader/GSplat2/ 目录, 用不同的 NAME 避免和上面的 Culling/GSplat 撞掉
-add_pass_shader(PassShaders GSplat2Culling "${CMAKE_SOURCE_DIR}/Shader/GSplat2/Culling.slang")
-add_pass_shader(PassShaders GSplat2Render "${CMAKE_SOURCE_DIR}/Shader/GSplat2/GSplat.slang")
