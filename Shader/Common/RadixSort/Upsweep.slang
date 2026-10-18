@@ -4,7 +4,7 @@ import Constants;
 // 累加进全局直方图,为 Spine 阶段的前缀和做准备
 //
 // 绑定到 group 0(而不是其它 pass 通用的 group 2):这个 shader 完全用不到全局的 group0(GlobalData)/
-// group1(SceneAndView),C++ 侧给它用的是只含自己这一个 BindGroupLayout 的精简 PipelineLayout
+// group1(View),C++ 侧给它用的是只含自己这一个 BindGroupLayout 的精简 PipelineLayout
 [[vk::binding(0, 0)]]
 StructuredBuffer<uint> ElementCounts;
 

@@ -2,6 +2,7 @@
 #include "../SceneView.h"
 #include "../SceneProxy.h"
 #include "../SkyLightProxy.h"
+#include "../AtmosphereProxy.h"
 #include "../RenderData.h"
 #include "../RendererContext.h"
 
@@ -18,7 +19,8 @@ namespace hyp
             const SceneProxy& scene,
             const SceneView& view,
             const RenderData& renderData,
-            SkyLightProxy* activeSkyLight
+            SkyLightProxy* activeSkyLight,
+            const AtmosphereProxy* atmosphere
         );
 
     private:
@@ -27,7 +29,7 @@ namespace hyp
             MaterialProxy& material,
             HString renderTag,
             VertexLayout vertexLayout,
-            const rhi::BindGroupLayout& sceneAndViewLayout
+            const rhi::BindGroupLayout& viewLayout
         );
     };
 }

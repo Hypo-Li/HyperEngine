@@ -1,5 +1,5 @@
 #pragma once
-#include <volk.h>
+#include "VolkInclude.h"
 
 #include "Features.h"
 #include "Memory.h"
@@ -13,24 +13,31 @@ namespace hyp::vk
     class RenderPassCache;
     class FramebufferCache;
     class PipelineCache;
+
+    struct DeviceDispatch
+    {
+        PFN_vkCmdBeginRenderingKHR cmdBeginRendering = nullptr;
+        PFN_vkCmdEndRenderingKHR cmdEndRendering = nullptr;
+        PFN_vkCmdPipelineBarrier2KHR cmdPipelineBarrier2 = nullptr;
+        PFN_vkGetSemaphoreCounterValueKHR getSemaphoreCounterValue = nullptr;
+        PFN_vkWaitSemaphoresKHR waitSemaphores = nullptr;
+        PFN_vkSignalSemaphoreKHR signalSemaphore = nullptr;
+    };
+
     class Device : public rhi::Device
     {
     public:
         Device(
             const rhi::ContextDesc& desc,
             VkInstance instance,
-            VkPhysicalDevice physicalDevice
+            VkPhysicalDevice physicalDevice,
+            uint32_t instanceApiVersion,
+            bool physicalDeviceProperties2
         );
 
         ~Device();
 
         void waitIdle() const override;
-
-        TRef<rhi::Buffer> createBuffer(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const override;
-
-        TRef<rhi::Texture> createTexture(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const override;
-
-        TRef<rhi::Sampler> createSampler(const rhi::SamplerDesc& desc) const override;
 
         TRef<rhi::BindGroupLayout> createBindGroupLayout(std::span<const rhi::BindGroupLayoutEntry> entries) const override;
 
@@ -70,6 +77,16 @@ namespace hyp::vk
         VkDevice getHandle() const noexcept
         {
             return mDevice;
+        }
+
+        uint32_t getApiVersion() const noexcept
+        {
+            return mApiVersion;
+        }
+
+        const DeviceDispatch& getDispatch() const noexcept
+        {
+            return mDispatch;
         }
 
         struct QueueInfo
@@ -124,11 +141,20 @@ namespace hyp::vk
             return *mPipelineCache;
         }
 
+    protected:
+        TRef<rhi::Buffer> createBufferImpl(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const override;
+
+        TRef<rhi::Texture> createTextureImpl(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const override;
+
+        TRef<rhi::Sampler> createSamplerImpl(const rhi::SamplerDesc& desc) const override;
+
     private:
         VkInstance mInstance = VK_NULL_HANDLE;
         VkPhysicalDevice mPhysicalDevice = VK_NULL_HANDLE;
 
         VkDevice mDevice = VK_NULL_HANDLE;
+        uint32_t mApiVersion = VK_API_VERSION_1_0;
+        DeviceDispatch mDispatch;
         QueueInfo mGraphicsQueueInfo;
         VkCommandPool mGraphicsCommandPool = VK_NULL_HANDLE;
         QueueInfo mComputeQueueInfo;

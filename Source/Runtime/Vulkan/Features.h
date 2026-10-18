@@ -1,7 +1,7 @@
 #pragma once
 #include <RHI/Features.h>
 
-#include <volk.h>
+#include "VolkInclude.h"
 #include <deque>
 #include <any>
 #include <vector>
@@ -92,6 +92,12 @@ namespace hyp::vk
                 return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
             else if constexpr (std::is_same_v<T, VkPhysicalDeviceDescriptorIndexingFeatures>)
                 return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+            else if constexpr (std::is_same_v<T, VkPhysicalDeviceLineRasterizationFeaturesKHR>)
+                return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR;
+            else if constexpr (std::is_same_v<T, VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT>)
+                return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT;
+            else if constexpr (std::is_same_v<T, VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR>)
+                return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
         }
 
     private:
@@ -112,10 +118,17 @@ namespace hyp::vk
         T shaderDrawParameters = DefaultValue;
         T timelineSemaphore = DefaultValue;
         T separateDepthStencilLayouts = DefaultValue;
+        T maintenance1 = DefaultValue;
+        T storageBufferStorageClass = DefaultValue;
+        // MASKED 材质分支的 discard(见 EditorPick.slang/ShadowDepth.slang)被 Slang 编译成
+        // SPIR-V 的 OpDemoteToHelperInvocation, 没有不用这个指令的退路, 所以是必选项, 不是
+        // lineRasterization 那种可以静默关掉的可选特性
+        T shaderDemoteToHelperInvocation = DefaultValue;
 
         // optional
         T synchronization2 = DefaultValue;
         T dynamicRendering = DefaultValue;
+        T lineRasterization = DefaultValue;
     };
 
     using FeatureRequirements = TFeatures<rhi::FeaturePolicy, rhi::FeaturePolicy::Ignored>;
@@ -123,6 +136,8 @@ namespace hyp::vk
 
     void getSupportedFeatures(
         uint32_t apiVersion,
+        uint32_t instanceApiVersion,
+        bool physicalDeviceProperties2,
         VkPhysicalDevice physicalDevice,
         rhi::FeatureSupport& features,
         FeatureSupport& vkFeatures

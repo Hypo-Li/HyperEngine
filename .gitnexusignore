@@ -1,0 +1,9 @@
+ThirdParty/
+third_party/
+
+Build/
+build/
+out/
+
+*.json
+*.asset

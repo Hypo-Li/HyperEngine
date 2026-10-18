@@ -1,5 +1,5 @@
 #pragma once
-#include "RenderProxy.h"
+#include "ResourceProxy.h"
 #include "BindlessRegistry.h"
 #include "StagingAllocator.h"
 
@@ -8,7 +8,7 @@
 
 namespace hyp
 {
-    class TextureProxy : public RenderProxy
+    class TextureProxy : public ResourceProxy
     {
     public:
         TextureProxy(const rhi::TextureDesc& desc);
@@ -17,7 +17,7 @@ namespace hyp
 
         void stageUpload(std::vector<uint8_t>&& data, uint32_t mipCount, uint32_t baseLayer = 0, uint32_t layerCount = 1);
 
-        void prepare(rhi::CommandList& cmdList);
+        bool prepare(rhi::CommandList& cmdList) override;
 
         rhi::Texture& getTexture() const noexcept
         {

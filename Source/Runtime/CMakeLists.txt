@@ -1,6 +1,8 @@
 option(HYP_SINGLE_THREADED_RENDERING "Use single-threaded rendering (no render thread)" OFF)
 
 include("${CMAKE_SOURCE_DIR}/CMake/AddSmartLibrary.cmake")
+include("${CMAKE_SOURCE_DIR}/CMake/CopyLinuxRuntimeDeps.cmake")
+include("${CMAKE_SOURCE_DIR}/CMake/GenerateDevConfig.cmake")
 
 include_directories(
     "${CMAKE_SOURCE_DIR}/Source/Runtime"
@@ -8,7 +10,6 @@ include_directories(
 
 add_subdirectory("Core")
 add_subdirectory("Engine")
-add_subdirectory("HypImGui")
 add_subdirectory("Platform")
 add_subdirectory("RHI")
 add_subdirectory("Vulkan")
@@ -23,5 +24,8 @@ if(HYP_SINGLE_THREADED_RENDERING)
     target_compile_definitions(Engine PUBLIC HYP_SINGLE_THREADED_RENDERING)
 endif()
 
-set(RUNTIME_TARGETS Core Engine HypImGui Platform RHI Vulkan WebGPU RenderBase Renderer PassShaders PyHyperEngine PyHyperEngineStatic)
+set(RUNTIME_TARGETS Core Engine Platform RHI Vulkan WebGPU RenderBase Renderer PassShaders)
+if (TARGET PyHyperEngine)
+    list(APPEND RUNTIME_TARGETS PyHyperEngine PyHyperEngineStatic)
+endif()
 set_property(TARGET ${RUNTIME_TARGETS} PROPERTY FOLDER "Runtime")

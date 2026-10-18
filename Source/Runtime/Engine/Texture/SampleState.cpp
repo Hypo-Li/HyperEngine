@@ -1,10 +1,4 @@
 #include "SampleState.h"
-#include "../Context.h"
-
-#include <Core/Common/Hash.h>
-#include <RenderBase/SamplerCache.h>
-#include <RenderBase/RenderFrontend.h>
-#include <RenderBase/SamplerProxy.h>
 
 namespace hyp
 {
@@ -15,6 +9,7 @@ namespace hyp
         e->addValue("Bilinear", Filter::Bilinear);
         e->addValue("Trilinear", Filter::Trilinear);
         e->addValue("Anisotropic", Filter::Anisotropic);
+        e->addValue("Global", Filter::Global);
         return e;
     }
 
@@ -27,14 +22,6 @@ namespace hyp
         return e;
     }
 
-    bool SampleState::operator==(const SampleState& other) const noexcept
-    {
-        return filter == other.filter &&
-            addressModeU == other.addressModeU &&
-            addressModeV == other.addressModeV &&
-            addressModeW == other.addressModeW;
-    }
-
     template <> Type* Reflection::createType<SampleState>()
     {
         auto s = new TStructure<SampleState>("SampleState");
@@ -43,52 +30,6 @@ namespace hyp
         s->addProperty("Address Mode V", &SampleState::addressModeV);
         s->addProperty("Address Mode W", &SampleState::addressModeW);
         return s;
-    }
-
-    size_t SampleStateHash::operator()(const SampleState& key) const noexcept
-    {
-        size_t seed = 0;
-        Hash::combine(seed, key.filter);
-        Hash::combine(seed, key.addressModeU);
-        Hash::combine(seed, key.addressModeV);
-        Hash::combine(seed, key.addressModeW);
-        return seed;
-    }
-
-    SampleStateManager::~SampleStateManager()
-    {
-        auto& renderFrontend = Context::get().getRenderFrontend();
-        std::vector<SamplerProxyHandle> proxyHandles;
-        proxyHandles.reserve(mSamplerProxyHandleMap.size());
-        for (auto [sampleState, proxyHandle] : mSamplerProxyHandleMap)
-        {
-            proxyHandles.push_back(proxyHandle);
-            renderFrontend.freeProxyHandle(proxyHandle);
-        }
-        mSamplerProxyHandleMap.clear();
-
-        renderFrontend.enqueueLambda(
-            [proxyHandles = std::move(proxyHandles)](FrameContext& context)
-            {
-                auto& proxyManager = context.getProxyManager();
-                for (auto proxyHandle : proxyHandles)
-                {
-                    proxyManager.destroyProxy(proxyHandle);
-                }
-            }
-        );
-    }
-
-    SamplerProxyHandle SampleStateManager::getOrCreateSamplerProxy(const SampleState& sampleState)
-    {
-        auto it = mSamplerProxyHandleMap.find(sampleState);
-        if (it != mSamplerProxyHandleMap.end())
-        {
-            return it->second;
-        }
-        SamplerProxyHandle proxyHandle = createSamplerProxy(sampleState);
-        mSamplerProxyHandleMap[sampleState] = proxyHandle;
-        return proxyHandle;
     }
 
     static rhi::AddressMode toRHIAddressMode(AddressMode addressMode) noexcept
@@ -102,13 +43,16 @@ namespace hyp
         }
     }
 
-    SamplerProxyHandle SampleStateManager::createSamplerProxy(const SampleState& sampleState)
+    rhi::SamplerDesc makeSamplerDesc(const SampleState& sampleState, const GlobalSamplerSettings& globalSettings) noexcept
     {
-        auto& renderFrontend = Context::get().getRenderFrontend();
-        SamplerProxyHandle proxyHandle = renderFrontend.allocateProxyHandle<ProxyType::Sampler>();
+        // globalSettings.defaultFilter 本身不应该是 Global(config.json 手填错了才可能出现),
+        // 这里不递归解析、直接兜底成 Trilinear, 避免自我引用死循环
+        Filter filter = sampleState.filter == Filter::Global
+            ? (globalSettings.defaultFilter == Filter::Global ? Filter::Trilinear : globalSettings.defaultFilter)
+            : sampleState.filter;
 
         rhi::SamplerDesc samplerDesc;
-        switch (sampleState.filter)
+        switch (filter)
         {
         case Filter::Point:
         {
@@ -137,7 +81,7 @@ namespace hyp
             samplerDesc.magFilter = rhi::Filter::Linear;
             samplerDesc.mipmapMode = rhi::MipmapMode::Linear;
             samplerDesc.anisotropyEnable = true;
-            samplerDesc.maxAnisotropy = 16.0f;
+            samplerDesc.maxAnisotropy = globalSettings.maxAnisotropy;
             break;
         }
         default:
@@ -150,14 +94,7 @@ namespace hyp
         samplerDesc.addressModeU = toRHIAddressMode(sampleState.addressModeU);
         samplerDesc.addressModeV = toRHIAddressMode(sampleState.addressModeV);
         samplerDesc.addressModeW = toRHIAddressMode(sampleState.addressModeW);
-
-        renderFrontend.enqueueLambda(
-            [proxyHandle, samplerDesc](FrameContext& context)
-            {
-                context.getProxyManager().createProxy(proxyHandle, samplerDesc);
-            }
-        );
-
-        return proxyHandle;
+        samplerDesc.mipLodBias = globalSettings.mipLodBias;
+        return samplerDesc;
     }
 }

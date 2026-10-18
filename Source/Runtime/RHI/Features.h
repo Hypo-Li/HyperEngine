@@ -18,6 +18,7 @@ namespace hyp::rhi
         T independentBlend = DefaultValue;
         T dualSourceBlend = DefaultValue;
         T multiViewport = DefaultValue;
+        T depthClamp = DefaultValue;
 
         // Shader
         T shaderInt16 = DefaultValue;
@@ -27,6 +28,7 @@ namespace hyp::rhi
         T shaderAtomics = DefaultValue;
         T shaderFloatAtomics = DefaultValue;
         T subgroup = DefaultValue;
+        T computeShaderDerivatives = DefaultValue;
 
         // Texture
         T depth32FloatStencil8 = DefaultValue;

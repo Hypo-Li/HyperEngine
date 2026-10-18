@@ -9,8 +9,12 @@
 #   NAME          - identifier prefix used for the generated array/string names
 #   SHADER_DIR    - include search path passed to slangc (-I)
 #   DEBUG_SYMBOLS - "1" to keep debug info (-g2, matches Debug config), "0"/unset to strip it (Release)
-#   SPIRV_OPT_LEVEL - optional, overrides the SPIRV -O level (default 3). 涉及 wave/subgroup 操作的
-#                     shader 在怀疑 -O3 触发编译器 bug 时可以调低,比如 RadixSort 系列
+#   HYP_SPIRV_VERSION - SPIR-V target version (default 1.5)
+#   HYP_WGSL_VERSION  - WGSL target version (currently only "latest")
+#   SPIRV_OPT_LEVEL - optional, overrides the SPIRV -O level (default: 0 when DEBUG_SYMBOLS=="1",
+#                     3 otherwise). 涉及 wave/subgroup 操作、怀疑被优化触发编译器 bug 的 shader
+#                     (比如 RadixSort 系列)可以显式传这个参数固定成某个值,不随 DEBUG_SYMBOLS 变
+#   SLANG_DEFINES - optional, "|" 分隔的 NAME=VALUE 列表, 每一项以 -D NAME=VALUE 传给 slangc
 
 if(NOT DEFINED SLANGC OR NOT DEFINED INPUT OR NOT DEFINED OUTPUT OR NOT DEFINED NAME OR NOT DEFINED SHADER_DIR)
     message(FATAL_ERROR "CompilePassShader.cmake requires SLANGC, INPUT, OUTPUT, NAME, SHADER_DIR")
@@ -22,10 +26,131 @@ if(DEBUG_SYMBOLS STREQUAL "1")
 endif()
 
 if(NOT DEFINED SPIRV_OPT_LEVEL)
-    set(SPIRV_OPT_LEVEL "3")
+    if(DEBUG_SYMBOLS STREQUAL "1")
+        set(SPIRV_OPT_LEVEL "0")
+    else()
+        set(SPIRV_OPT_LEVEL "3")
+    endif()
+endif()
+
+if(NOT DEFINED HYP_SPIRV_VERSION)
+    set(HYP_SPIRV_VERSION "1.5")
+endif()
+set(_HYP_VALID_SPIRV_VERSIONS "1.0" "1.3" "1.5" "1.6")
+if(NOT HYP_SPIRV_VERSION IN_LIST _HYP_VALID_SPIRV_VERSIONS)
+    message(FATAL_ERROR "Unsupported HYP_SPIRV_VERSION '${HYP_SPIRV_VERSION}'. Expected one of: 1.0, 1.3, 1.5, 1.6")
+endif()
+string(REPLACE "." "_" SPIRV_PROFILE_SUFFIX "${HYP_SPIRV_VERSION}")
+set(SPIRV_PROFILE "spirv_${SPIRV_PROFILE_SUFFIX}")
+
+if(NOT DEFINED HYP_WGSL_VERSION)
+    set(HYP_WGSL_VERSION "latest")
+endif()
+if(NOT HYP_WGSL_VERSION STREQUAL "latest")
+    message(FATAL_ERROR "Unsupported HYP_WGSL_VERSION '${HYP_WGSL_VERSION}'. Only 'latest' is currently supported")
+endif()
+
+set(SLANG_DEFINE_ARGS "")
+if(DEFINED SLANG_DEFINES)
+    string(REPLACE "|" ";" SLANG_DEFINE_LIST "${SLANG_DEFINES}")
+    foreach(SLANG_DEFINE ${SLANG_DEFINE_LIST})
+        list(APPEND SLANG_DEFINE_ARGS -D "${SLANG_DEFINE}")
+    endforeach()
 endif()
 
 file(READ "${INPUT}" SOURCE_TEXT)
+
+# 递归展开本地 #include "..."(相对当前文件目录解析, 跟 slangc 对引号 include 的语义一致),
+# 拼出跟 SOURCE_TEXT 等价但包含所有间接依赖内容的一份文本, 供下面 PUSH_CONSTANT_NAME 检测使用——
+# entry 文件(比如 SSAOHalfRes.slang)本身可能不含字面的 [[vk::push_constant]], 声明实际
+# 写在它 #include 的共享文件(SSAOCommon.slang)里, 只扫 SOURCE_TEXT 会检测不到
+function(hyp_gather_include_text FILE_PATH SEEN_LIST OUT_VAR)
+    if("${FILE_PATH}" IN_LIST SEEN_LIST)
+        set(${OUT_VAR} "" PARENT_SCOPE)
+        return()
+    endif()
+    list(APPEND SEEN_LIST "${FILE_PATH}")
+
+    if(NOT EXISTS "${FILE_PATH}")
+        set(${OUT_VAR} "" PARENT_SCOPE)
+        return()
+    endif()
+    file(READ "${FILE_PATH}" FILE_TEXT)
+    set(COMBINED_TEXT "${FILE_TEXT}")
+
+    get_filename_component(FILE_DIR "${FILE_PATH}" DIRECTORY)
+    string(REGEX MATCHALL "#include[ \t]+\"[^\"]+\"" INCLUDE_LINES "${FILE_TEXT}")
+    foreach(INCLUDE_LINE ${INCLUDE_LINES})
+        string(REGEX REPLACE "#include[ \t]+\"([^\"]+)\"" "\\1" INCLUDE_REL_PATH "${INCLUDE_LINE}")
+        get_filename_component(INCLUDE_ABS_PATH "${FILE_DIR}/${INCLUDE_REL_PATH}" ABSOLUTE)
+        hyp_gather_include_text("${INCLUDE_ABS_PATH}" "${SEEN_LIST}" NESTED_TEXT)
+        string(APPEND COMBINED_TEXT "\n${NESTED_TEXT}")
+    endforeach()
+
+    set(${OUT_VAR} "${COMBINED_TEXT}" PARENT_SCOPE)
+endfunction()
+
+hyp_gather_include_text("${INPUT}" "" SOURCE_TEXT_WITH_INCLUDES)
+
+# Slang's WGSL backend lowers [format("...")] storage textures of several formats to
+# texture_storage_*<rgba32float, ...>, even though SPIR-V reflection correctly reports the real
+# storage format. Dawn then rejects the pipeline because the shader format disagrees with the
+# bind-group layout. `half` is not a workaround: WGSL texture element types are restricted to
+# f32/i32/u32 and Slang rejects WTexture2D<half>.
+#
+# Patch only reflected storage bindings of the affected formats, identified by their exact
+# group, binding index and source resource name. A multi-stage shader may expose the binding in
+# only one stage, so absence from the current stage is valid; when present, verify the rewritten
+# declaration before embedding the WGSL.
+#   CONTENT_VAR - name of the variable holding the WGSL text; rewritten in the caller's scope
+#   GROUP       - bind group index the INDICES were collected from
+#   PREFIX      - "BINDING_" / "BINDING_S0_", the accumulated-table variable prefix for INDICES
+function(hyp_patch_wgsl_storage_formats CONTENT_VAR GROUP PREFIX INDICES INPUT_FILE STAGE_NAME)
+    set(CONTENT "${${CONTENT_VAR}}")
+    foreach(IDX IN LISTS INDICES)
+        if(NOT "${${PREFIX}${IDX}_TYPE}" STREQUAL "Storage_Texture")
+            continue()
+        endif()
+
+        set(FORMAT "${${PREFIX}${IDX}_STORAGEFORMAT}")
+        set(WGSL_FORMAT "")
+        if(FORMAT STREQUAL "R16_SFLOAT")
+            set(WGSL_FORMAT "r16float")
+        elseif(FORMAT STREQUAL "R16_UNORM")
+            set(WGSL_FORMAT "r16unorm")
+        elseif(FORMAT STREQUAL "R8_UNORM")
+            set(WGSL_FORMAT "r8unorm")
+        elseif(FORMAT STREQUAL "RG8_UNORM")
+            set(WGSL_FORMAT "rg8unorm")
+        elseif(FORMAT STREQUAL "R8_UINT")
+            set(WGSL_FORMAT "r8uint")
+        elseif(FORMAT STREQUAL "B10G11R11_UFLOAT_PACK32")
+            set(WGSL_FORMAT "rg11b10ufloat")
+        elseif(FORMAT STREQUAL "A2BGR10_UNORM_PACK32")
+            set(WGSL_FORMAT "rgb10a2unorm")
+        endif()
+        if(WGSL_FORMAT STREQUAL "")
+            continue()
+        endif()
+
+        set(BINDING_NAME "${${PREFIX}${IDX}_NAME}")
+        set(DECL_PATTERN
+            "(@binding\\(${IDX}\\) @group\\(${GROUP}\\) var ${BINDING_NAME}_[0-9]+ : texture_storage_[^<]+)<[^,>]+,")
+        string(REGEX MATCH "${DECL_PATTERN}" DECL_MATCH "${CONTENT}")
+        if(DECL_MATCH)
+            string(REGEX REPLACE "${DECL_PATTERN}" "\\1<${WGSL_FORMAT}," CONTENT "${CONTENT}")
+
+            set(VERIFY_PATTERN
+                "@binding\\(${IDX}\\) @group\\(${GROUP}\\) var ${BINDING_NAME}_[0-9]+ : texture_storage_[^<]+<${WGSL_FORMAT},")
+            string(REGEX MATCH "${VERIFY_PATTERN}" VERIFY_MATCH "${CONTENT}")
+            if(NOT VERIFY_MATCH)
+                message(FATAL_ERROR
+                    "Failed to patch WGSL ${FORMAT} storage binding '${BINDING_NAME}' at group ${GROUP} binding ${IDX} in ${INPUT_FILE} (${STAGE_NAME})")
+            endif()
+        endif()
+    endforeach()
+    set(${CONTENT_VAR} "${CONTENT}" PARENT_SCOPE)
+endfunction()
 
 set(STAGE_NAMES vertex fragment compute)
 set(STAGE_ENTRY_vertex "VertexMain")
@@ -46,7 +171,7 @@ file(MAKE_DIRECTORY "${TMP_DIR}")
 # 引擎里所有 PassShader 一律用 [[vk::push_constant]](和资源绑定的 [[vk::binding(...)]] 保持
 # 同一套 vk:: 前缀写法), 不用不带前缀的 [[push_constant]]——这个正则只认前者
 set(PUSH_CONSTANT_NAME "")
-string(REGEX MATCH "\\[\\[vk::push_constant\\]\\][ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;" PC_MATCH "${SOURCE_TEXT}")
+string(REGEX MATCH "\\[\\[vk::push_constant\\]\\][ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;" PC_MATCH "${SOURCE_TEXT_WITH_INCLUDES}")
 if(CMAKE_MATCH_1)
     set(PUSH_CONSTANT_NAME "${CMAKE_MATCH_1}")
 endif()
@@ -89,20 +214,21 @@ foreach(STAGE ${STAGE_NAMES})
     set(SPIRV_HEADER "${TMP_DIR}/${NAME}_${LABEL}.spirv.tmp.h")
     set(SPIRV_DEPFILE "${TMP_DIR}/${NAME}_${LABEL}.spirv.d")
     set(STAGE_REFLECTION_JSON "${TMP_DIR}/${NAME}_${LABEL}.reflect.json")
-    # SPIRV_OPT_LEVEL 默认 3: 和迁移前运行时编译(ShaderCompiler::compileToSpirvs, optimize=true ->
-    # SLANG_OPTIMIZATION_LEVEL_MAXIMAL)保持一致,不然默认的 -O1 生成的指令序列不同,对大气积分这类浮点敏感
-    # 代码会产生可见的数值偏差。个别涉及 wave/subgroup 操作、怀疑被 -O3 优化破坏正确性的 shader(RadixSort)
-    # 可以通过 add_pass_shader 的 SPIRV_OPT_LEVEL 参数单独调低。
+    # Release 默认 -O3 而不是 slangc 自己的默认 -O1, 是因为 -O1 生成的指令序列不同,
+    # 对大气积分这类浮点敏感代码会产生可见的数值偏差。
     # -matrix-layout-row-major: 迁移前运行时编译显式设置了 sessionDesc.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_ROW_MAJOR,
     # slangc CLI 不指定时默认是 column-major——ViewData/InstanceData 等 buffer 里的矩阵(worldToViewRot/viewToClip 等)
     # 会被按错误的主序读取,导致 view/相机相关的计算全错(大气 LUT 颜色偏差的真正根因)
     execute_process(
         COMMAND "${SLANGC}" "${INPUT}"
             -entry "${ENTRY}" -stage "${STAGE}"
-            -target spirv -profile spirv_1_5
+            -target spirv -profile "${SPIRV_PROFILE}"
+            -D RHI_BACKEND=RHI_BACKEND_VULKAN
+            ${SLANG_DEFINE_ARGS}
             -I "${SHADER_DIR}"
             -O${SPIRV_OPT_LEVEL}
             -matrix-layout-row-major
+            -warnings-as-errors 31000
             ${DEBUG_INFO_FLAGS}
             -source-embed-style u32
             -source-embed-name "k${NAME}_${LABEL}_Spirv"
@@ -115,10 +241,6 @@ foreach(STAGE ${STAGE_NAMES})
     if(NOT SPIRV_RESULT EQUAL 0)
         message(FATAL_ERROR "slangc failed compiling ${INPUT} (${STAGE}, spirv): ${SPIRV_ERROR}")
     endif()
-    file(READ "${SPIRV_HEADER}" SPIRV_CONTENT)
-    file(REMOVE "${SPIRV_HEADER}")
-    string(APPEND GENERATED_CONTENT "    inline ${SPIRV_CONTENT}\n")
-
     # ---- reflection: 从这个 stage 的反射 JSON 里挑出 set 2(pass 级 bind group)的资源绑定,
     # 和跨 stage 的累积表合并。覆盖 constantBuffer、2D/Cube 纹理(含深度纹理)、samplerState、
     # structuredBuffer(只读/RW)这几类, 其余资源种类暂时跳过不登记, 遇到时再补。
@@ -157,9 +279,26 @@ foreach(STAGE ${STAGE_NAMES})
             set(P_SUPPORTED TRUE)
             set(P_SAMPLER_TYPE "Filtering")
             set(P_STORAGE_FORMAT "Undefined")
+            set(P_MULTISAMPLE "false")
+
+            set(P_HAS_UNFILTERABLE_FLOAT FALSE)
+            set(P_UNFILTERABLE_FLOAT_APPLIED FALSE)
+            string(JSON P_ATTR_COUNT ERROR_VARIABLE ATTR_COUNT_ERR LENGTH "${REFLECT_JSON}" parameters ${PIDX} userAttribs)
+            if(NOT ATTR_COUNT_ERR AND P_ATTR_COUNT GREATER 0)
+                math(EXPR P_ATTR_LAST "${P_ATTR_COUNT} - 1")
+                foreach(AIDX RANGE 0 ${P_ATTR_LAST})
+                    string(JSON P_ATTR_NAME GET "${REFLECT_JSON}" parameters ${PIDX} userAttribs ${AIDX} name)
+                    if(P_ATTR_NAME STREQUAL "UnfilterableFloat")
+                        set(P_HAS_UNFILTERABLE_FLOAT TRUE)
+                    endif()
+                endforeach()
+            endif()
             if(P_TYPE_KIND STREQUAL "constantBuffer")
                 set(P_BINDING_TYPE "Uniform_Buffer")
-                set(P_ACCESS "Read_Write")
+                # ConstantBuffer<T> 在 slang/HLSL 里天生只读, 语法上没有任何写入方式——手写
+                # BindGroupLayoutEntry 的地方(GlobalBindings.cpp/MaterialProxy.cpp 等)全部
+                # 用的 Read_Only, 这里理应保持一致
+                set(P_ACCESS "Read_Only")
                 set(P_VIEW_TYPE "Texture_View_2D")
                 set(P_SAMPLE_TYPE "Float")
             elseif(P_TYPE_KIND STREQUAL "samplerState")
@@ -168,9 +307,14 @@ foreach(STAGE ${STAGE_NAMES})
                 set(P_VIEW_TYPE "Texture_View_2D")
                 set(P_SAMPLE_TYPE "Float")
                 # 反射 JSON 分辨不出 SamplerState(filtering)和 SamplerComparisonState(comparison)——
-                # 两者都只有 {"kind":"samplerState"}, 没有额外字段。engine 里目前只有比较采样器
-                # 这一种特例(阴影 PCF), 一律先按 Filtering 处理, 真用到 comparison sampler 的
-                # pass 迁移时如果对不上, 需要在 C++ 侧手动 override, 而不是指望反射猜出来。
+                # 两者都只有 {"kind":"samplerState"}, 没有额外字段。engine 里目前没有用到比较采样器,
+                # 真用到时需要在 C++ 侧手动 override, 不能指望反射猜出来。
+                # WebGPU 要求配合深度纹理 Gather/Load 的 sampler 声明成 Non_Filtering; 引擎里
+                # "Point" 命名的 sampler 都是 SamplerCache 里 mag/min/mipmap 全 Nearest 的那种, 按名字识别即可。
+                string(FIND "${P_NAME}" "Point" P_NAME_HAS_POINT)
+                if(NOT P_NAME_HAS_POINT EQUAL -1)
+                    set(P_SAMPLER_TYPE "Non_Filtering")
+                endif()
             elseif(P_TYPE_KIND STREQUAL "resource")
                 string(JSON P_BASE_SHAPE ERROR_VARIABLE SHAPE_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type baseShape)
                 if(SHAPE_ERR)
@@ -183,6 +327,13 @@ foreach(STAGE ${STAGE_NAMES})
                     # 和 Storage_Texture, 不能只看 baseShape(两者的 baseShape 是一样的)。
                     string(JSON P_TEX_ACCESS ERROR_VARIABLE TEX_ACCESS_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type access)
                     string(JSON P_ARRAY ERROR_VARIABLE ARRAY_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type array)
+                    # Texture2DMS<T> 反射出来的 baseShape 仍然是 "texture2D", 只是多一个
+                    # "multisample": true 字段(见 slangc -reflection-json 的实际输出), 不是
+                    # 单独的 baseShape 值。
+                    string(JSON P_IS_MULTISAMPLE ERROR_VARIABLE MULTISAMPLE_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type multisample)
+                    if(NOT MULTISAMPLE_ERR AND P_IS_MULTISAMPLE)
+                        set(P_MULTISAMPLE "true")
+                    endif()
 
                     if(P_BASE_SHAPE STREQUAL "textureCube")
                         set(P_VIEW_TYPE "Texture_View_Cube")
@@ -211,24 +362,64 @@ foreach(STAGE ${STAGE_NAMES})
                             set(P_STORAGE_FORMAT "B10G11R11_UFLOAT_PACK32")
                         elseif(P_FORMAT_STR STREQUAL "rgba8")
                             set(P_STORAGE_FORMAT "RGBA8_UNORM")
+                        elseif(P_FORMAT_STR STREQUAL "rgb10_a2")
+                            set(P_STORAGE_FORMAT "A2BGR10_UNORM_PACK32")
                         elseif(P_FORMAT_STR STREQUAL "r32f")
                             set(P_STORAGE_FORMAT "R32_SFLOAT")
+                        elseif(P_FORMAT_STR STREQUAL "rg32f")
+                            set(P_STORAGE_FORMAT "RG32_SFLOAT")
+                        elseif(P_FORMAT_STR STREQUAL "r32ui")
+                            set(P_STORAGE_FORMAT "R32_UINT")
+                        elseif(P_FORMAT_STR STREQUAL "r8ui")
+                            set(P_STORAGE_FORMAT "R8_UINT")
+                        elseif(P_FORMAT_STR STREQUAL "r16")
+                            set(P_STORAGE_FORMAT "R16_UNORM")
+                        elseif(P_FORMAT_STR STREQUAL "r16f")
+                            set(P_STORAGE_FORMAT "R16_SFLOAT")
+                        elseif(P_FORMAT_STR STREQUAL "r8")
+                            set(P_STORAGE_FORMAT "R8_UNORM")
+                        elseif(P_FORMAT_STR STREQUAL "rg8")
+                            set(P_STORAGE_FORMAT "RG8_UNORM")
                         else()
                             message(FATAL_ERROR "${INPUT}: storage texture '${P_NAME}' has unmapped format '${P_FORMAT_STR}' - add it to CompilePassShader.cmake's format table")
                         endif()
                     else()
                         set(P_BINDING_TYPE "Sampled_Texture")
                         set(P_ACCESS "Read_Only")
-                        # 反射拿不到 DepthTexture2D 这个专属类型——它和 Texture2D<float>(单通道颜色纹理)
-                        # 反射出来的 JSON 完全一样(resultType 都是单个 scalar), 没有任何字段能区分两者。
-                        # 只能退而求其次, 用资源名字里是否包含 "Depth" 作为约定俗成的信号, 而不是单靠
-                        # resultType 是不是 scalar 来判断(否则单通道颜色纹理会被误判成深度纹理)。
+                        # resultType 的标量类型信息(scalarType: "float32"/"uint32"/"int32" 等)在
+                        # JSON 里的位置分两种形状: Texture2D<uint> 这种单通道纹理 resultType 本身
+                        # 就是 {"kind":"scalar","scalarType":"uint32"}; Texture2D<float4> 这种
+                        # 多通道纹理 resultType 是 {"kind":"vector","elementType":{"kind":"scalar",
+                        # "scalarType":"float32"}}, 标量类型多包了一层 elementType。两种形状都要
+                        # 处理, 不能只看 vector 这一种(单通道的 Texture2D<uint>/DepthTexture2D
+                        # 都会落到 scalar 分支)。
                         string(JSON P_RESULT_KIND ERROR_VARIABLE RESULT_KIND_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type resultType kind)
-                        string(FIND "${P_NAME}" "Depth" P_NAME_HAS_DEPTH)
-                        if(NOT RESULT_KIND_ERR AND P_RESULT_KIND STREQUAL "scalar" AND NOT P_NAME_HAS_DEPTH EQUAL -1)
-                            set(P_SAMPLE_TYPE "Depth")
+                        set(P_SCALAR_TYPE "")
+                        if(NOT RESULT_KIND_ERR AND P_RESULT_KIND STREQUAL "scalar")
+                            string(JSON P_SCALAR_TYPE ERROR_VARIABLE SCALAR_TYPE_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type resultType scalarType)
+                        elseif(NOT RESULT_KIND_ERR AND P_RESULT_KIND STREQUAL "vector")
+                            string(JSON P_SCALAR_TYPE ERROR_VARIABLE SCALAR_TYPE_ERR GET "${REFLECT_JSON}" parameters ${PIDX} type resultType elementType scalarType)
+                        endif()
+
+                        if(P_SCALAR_TYPE MATCHES "^uint")
+                            set(P_SAMPLE_TYPE "Uint")
+                        elseif(P_SCALAR_TYPE MATCHES "^int")
+                            set(P_SAMPLE_TYPE "Sint")
                         else()
-                            set(P_SAMPLE_TYPE "Float")
+                            # 浮点标量纹理反射拿不到 DepthTexture2D 这个专属类型——它和
+                            # Texture2D<float>(单通道颜色纹理)反射出来的 JSON 完全一样(resultType
+                            # 都是单个 float32 scalar), 没有任何字段能区分两者。只能退而求其次,
+                            # 用资源名字里是否包含 "Depth" 作为约定俗成的信号, 而不是单靠 resultType
+                            # 是不是 scalar 来判断(否则单通道颜色纹理会被误判成深度纹理)。
+                            string(FIND "${P_NAME}" "Depth" P_NAME_HAS_DEPTH)
+                            if(P_RESULT_KIND STREQUAL "scalar" AND NOT P_NAME_HAS_DEPTH EQUAL -1)
+                                set(P_SAMPLE_TYPE "Depth")
+                            elseif(P_HAS_UNFILTERABLE_FLOAT)
+                                set(P_SAMPLE_TYPE "Unfilterable_Float")
+                                set(P_UNFILTERABLE_FLOAT_APPLIED TRUE)
+                            else()
+                                set(P_SAMPLE_TYPE "Float")
+                            endif()
                         endif()
                     endif()
                 elseif(P_BASE_SHAPE STREQUAL "structuredBuffer")
@@ -248,6 +439,10 @@ foreach(STAGE ${STAGE_NAMES})
                 endif()
             else()
                 set(P_SUPPORTED FALSE)
+            endif()
+
+            if(P_HAS_UNFILTERABLE_FLOAT AND NOT P_UNFILTERABLE_FLOAT_APPLIED)
+                message(FATAL_ERROR "${INPUT}: [UnfilterableFloat] on '${P_NAME}' - only valid on a sampled float color texture")
             endif()
 
             if(NOT P_SUPPORTED)
@@ -271,6 +466,7 @@ foreach(STAGE ${STAGE_NAMES})
                     set(BINDING_S0_${P_INDEX}_SAMPLETYPE "${P_SAMPLE_TYPE}")
                     set(BINDING_S0_${P_INDEX}_SAMPLERTYPE "${P_SAMPLER_TYPE}")
                     set(BINDING_S0_${P_INDEX}_STORAGEFORMAT "${P_STORAGE_FORMAT}")
+                    set(BINDING_S0_${P_INDEX}_MULTISAMPLE "${P_MULTISAMPLE}")
                     set(BINDING_S0_${P_INDEX}_STAGES "${LABEL}")
                 else()
                     list(APPEND BINDING_S0_${P_INDEX}_STAGES "${LABEL}")
@@ -286,6 +482,7 @@ foreach(STAGE ${STAGE_NAMES})
                     set(BINDING_${P_INDEX}_SAMPLETYPE "${P_SAMPLE_TYPE}")
                     set(BINDING_${P_INDEX}_SAMPLERTYPE "${P_SAMPLER_TYPE}")
                     set(BINDING_${P_INDEX}_STORAGEFORMAT "${P_STORAGE_FORMAT}")
+                    set(BINDING_${P_INDEX}_MULTISAMPLE "${P_MULTISAMPLE}")
                     set(BINDING_${P_INDEX}_STAGES "${LABEL}")
                 else()
                     list(APPEND BINDING_${P_INDEX}_STAGES "${LABEL}")
@@ -293,6 +490,10 @@ foreach(STAGE ${STAGE_NAMES})
             endif()
         endforeach()
     endif()
+
+    file(READ "${SPIRV_HEADER}" SPIRV_CONTENT)
+    file(REMOVE "${SPIRV_HEADER}")
+    string(APPEND GENERATED_CONTENT "    inline ${SPIRV_CONTENT}\n")
 
     file(READ "${SPIRV_DEPFILE}" SPIRV_DEP_CONTENT)
     file(REMOVE "${SPIRV_DEPFILE}")
@@ -312,10 +513,12 @@ foreach(STAGE ${STAGE_NAMES})
         COMMAND "${SLANGC}" "${INPUT}"
             -entry "${ENTRY}" -stage "${STAGE}"
             -target wgsl
-            -D RHI_BACKEND_WEBGPU=1
+            -D RHI_BACKEND=RHI_BACKEND_WEBGPU
+            ${SLANG_DEFINE_ARGS}
             -I "${SHADER_DIR}"
             -O0
             -matrix-layout-row-major
+            -warnings-as-errors 31000
             ${DEBUG_INFO_FLAGS}
             -depfile "${WGSL_DEPFILE}"
             -o "${WGSL_RAW}"
@@ -345,6 +548,9 @@ foreach(STAGE ${STAGE_NAMES})
         string(REGEX REPLACE "var<uniform> (${PUSH_CONSTANT_NAME}_[0-9]+) :" "var<immediate> \\1 :" WGSL_CONTENT "${WGSL_CONTENT}")
         string(PREPEND WGSL_CONTENT "requires immediate_address_space;\n")
     endif()
+
+    hyp_patch_wgsl_storage_formats(WGSL_CONTENT 2 "BINDING_" "${ALL_BINDING_INDICES}" "${INPUT}" "${STAGE}")
+    hyp_patch_wgsl_storage_formats(WGSL_CONTENT 0 "BINDING_S0_" "${ALL_BINDING_INDICES_S0}" "${INPUT}" "${STAGE}")
 
     # escape into a C string literal: backslashes, then quotes, then newlines (order matters)
     string(REPLACE "\\" "\\\\" WGSL_CONTENT "${WGSL_CONTENT}")
@@ -384,7 +590,7 @@ if(EMIT_COUNT GREATER 0)
         list(JOIN ${EMIT_PREFIX}${IDX}_STAGES " | hyp::rhi::ShaderStage::" STAGE_FLAGS_EXPR)
         string(PREPEND STAGE_FLAGS_EXPR "hyp::rhi::ShaderStage::")
         string(APPEND GENERATED_CONTENT
-            "        { \"${${EMIT_PREFIX}${IDX}_NAME}\", ${IDX}, hyp::rhi::BindingType::${${EMIT_PREFIX}${IDX}_TYPE}, hyp::rhi::BindingAccess::${${EMIT_PREFIX}${IDX}_ACCESS}, 1, hyp::rhi::TextureViewType::${${EMIT_PREFIX}${IDX}_VIEWTYPE}, hyp::rhi::TextureFormat::${${EMIT_PREFIX}${IDX}_STORAGEFORMAT}, hyp::rhi::TextureSampleType::${${EMIT_PREFIX}${IDX}_SAMPLETYPE}, hyp::rhi::SamplerBindingType::${${EMIT_PREFIX}${IDX}_SAMPLERTYPE}, ${STAGE_FLAGS_EXPR} },\n"
+            "        { \"${${EMIT_PREFIX}${IDX}_NAME}\", ${IDX}, hyp::rhi::BindingType::${${EMIT_PREFIX}${IDX}_TYPE}, hyp::rhi::BindingAccess::${${EMIT_PREFIX}${IDX}_ACCESS}, 1, hyp::rhi::TextureViewType::${${EMIT_PREFIX}${IDX}_VIEWTYPE}, hyp::rhi::TextureFormat::${${EMIT_PREFIX}${IDX}_STORAGEFORMAT}, hyp::rhi::TextureSampleType::${${EMIT_PREFIX}${IDX}_SAMPLETYPE}, ${${EMIT_PREFIX}${IDX}_MULTISAMPLE}, hyp::rhi::SamplerBindingType::${${EMIT_PREFIX}${IDX}_SAMPLERTYPE}, ${STAGE_FLAGS_EXPR} },\n"
         )
     endforeach()
     string(APPEND GENERATED_CONTENT "    };\n\n")

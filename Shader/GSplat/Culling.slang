@@ -1,5 +1,8 @@
 #include "../Common/Binding.slang"
 
+[[vk::binding(0, 3)]]
+StructuredBuffer<InstanceData> sInstanceData;
+
 struct GPUSplatData
 {
     float3 position;
@@ -52,17 +55,20 @@ bool isSplatVisible(uint splatIndex, in ViewData viewData, out float distance)
 
     const GPUSplatData splatData = GPUSplatDataBuffer[splatIndex];
     const InstanceData instanceData = sInstanceData[splatData.instanceIndex];
+    if ((instanceData.flags & InstanceFlags::Visible) == InstanceFlags::None)
+        return false;
+
     const float3 splatPosition = splatData.position;
-    float4x4 localToView;
-    calculateLocalToView(
-        instanceData.localToWorld,
+    float4x4 objectToView;
+    calculateObjectToView(
+        instanceData.objectToWorld,
         viewData.worldToViewRot,
         viewData.cameraOrigin,
-        localToView
+        objectToView
     );
 
-    float4 viewSpace = mul(float4(splatData.position, 1), localToView);
-    float4 clipSpace = mul(viewSpace, viewData.viewToClip);
+    float4 viewSpace = mul(float4(splatData.position, 1), objectToView);
+    float4 clipSpace = mul(viewSpace, viewData.viewToClipUnjittered);
     if (any(abs(clipSpace.xyz) > clipSpace.w))
         return false;
 
@@ -72,14 +78,14 @@ bool isSplatVisible(uint splatIndex, in ViewData viewData, out float distance)
         0.5 * ViewDataBuffer.resolution.x * ViewDataBuffer.viewToClip[0][0],
         0.5 * ViewDataBuffer.resolution.y * ViewDataBuffer.viewToClip[1][1]
     );
-    float4x4 localToWorld = float4x4(
+    float4x4 objectToWorld = float4x4(
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
         0, 0, 0, 1
     );
-    float4x4 localToView = mul(localToWorld, ViewDataBuffer.worldToView);
-    float4 viewSpace = mul(float4(splatData.position, 1), localToView);
+    float4x4 objectToView = mul(objectToWorld, ViewDataBuffer.worldToView);
+    float4 viewSpace = mul(float4(splatData.position, 1), objectToView);
 
     float3x3 J = float3x3(
         focal.x / viewSpace.z, 0.0, -(focal.x * viewSpace.x) / (viewSpace.z * viewSpace.z),
@@ -87,7 +93,7 @@ bool isSplatVisible(uint splatIndex, in ViewData viewData, out float distance)
         0.0, 0.0, 0.0
     );
 
-    float3x3 W = transpose(float3x3(localToView));
+    float3x3 W = transpose(float3x3(objectToView));
 
     float3x3 T = mul(J, W);
     float2 u1 = unpackHalf2x16ToFloat(splatData.sigma[0]);
@@ -162,8 +168,7 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID, uint groupLocalIndex : SV
     const uint splatIndex = globalID.x;
 
     float distance;
-    ViewData viewData =sViewData[0];
-    const bool visible = isSplatVisible(splatIndex, viewData, distance);
+    const bool visible = isSplatVisible(splatIndex, uViewData, distance);
 
     const uint4 ballot = WaveActiveBallot(visible);
 

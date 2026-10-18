@@ -3,7 +3,7 @@
 
 namespace hyp
 {
-    static constexpr uint32_t kBindlessBindingOffset = 1; // FrameData
+    static constexpr uint32_t kBindlessBindingOffset = 2; // binding 1 留空, 保持 Binding.slang 里 bindless 数组的 binding 号不变
     static constexpr uint32_t kTexture2DBinding = uint32_t(BindlessBinding::Texture2D) + kBindlessBindingOffset;
     static constexpr uint32_t kTexture2DArrayBinding = uint32_t(BindlessBinding::Texture2DArray) + kBindlessBindingOffset;
     static constexpr uint32_t kTexture3DBinding = uint32_t(BindlessBinding::Texture3D) + kBindlessBindingOffset;

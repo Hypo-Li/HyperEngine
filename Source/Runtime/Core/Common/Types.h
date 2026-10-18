@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <optional>
 
 namespace hyp
@@ -44,15 +45,15 @@ namespace hyp
 
         if constexpr (ALLOC_FREQ == AllocateFrequency::High)
         {
-            count = std::max(count, 512ull);
+            count = std::max<size_t>(count, 512);
         }
         else if constexpr (ALLOC_FREQ == AllocateFrequency::Medium)
         {
-            count = std::max(count, 128ull);
+            count = std::max<size_t>(count, 128);
         }
         else if constexpr (ALLOC_FREQ == AllocateFrequency::Low)
         {
-            count = std::max(count, 32ull);
+            count = std::max<size_t>(count, 32);
         }
 
         // 确保对象数量是 16 的倍数

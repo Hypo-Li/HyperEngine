@@ -40,27 +40,48 @@ namespace hyp::wgpu
     Device::Device(const rhi::ContextDesc& desc, WGPUInstance instance, WGPUAdapter adapter)
         : mInstance(instance), mAdapter(adapter)
     {
+        mShaderCompileTarget = { rhi::ShaderCodeFormat::Wgsl, 0, 0 };
+
         wgpuAdapterAddRef(mAdapter);
 
+        // Query supported features.
         rhi::FeatureSupport supportedFeatures;
         FeatureSupport supportedWgpuFeatures;
         getSupportedFeatures(mAdapter, mInstance, supportedFeatures, supportedWgpuFeatures);
 
+        // Resolve application required/optional features.
         mFeatures = rhi::resolveFeatures(supportedFeatures, desc.featureRequirements);
 
-        std::vector<WGPUFeatureName> requiredFeatures = buildRequiredFeatureList(mFeatures, supportedWgpuFeatures);
+        // Resolve WebGPU backend required/optional features.
+        FeatureRequirements wgpuRequirements;
+        // WGSL immediate_address_space: 允许声明 var<immediate>, 数据由 setImmediates() 经命令编码器直接传入,
+        // 大小由 GPUPipelineLayoutDescriptor.immediateSize 指定
+        wgpuRequirements.immediateAddressSpace = rhi::FeaturePolicy::Required;
+        // texture-formats-tier1: 新增 16 位 unorm/snorm 格式并为 r8/rg8/r16/rg16/rgb10a2/rg11b10ufloat
+        // 开放 read-only/write-only 的 storage texture, 完整清单见 https://gpuweb.github.io/gpuweb/#texture-formats-tier1
+        wgpuRequirements.textureFormatsTier1 = rhi::FeaturePolicy::Required;
+        // texture-formats-tier2: 为 r8unorm/uint/sint、rgba8unorm/uint/sint、r16uint/sint/float、rgba16uint/sint/float、
+        // rgba32uint/sint/float 开放 read-write 的 storage texture 访问
+        wgpuRequirements.textureFormatsTier2 = rhi::FeaturePolicy::Required;
+        // float32-filterable: 让 r32float、rg32float、rgba32float 纹理可以做 filtering 采样
+        wgpuRequirements.float32Filterable = rhi::FeaturePolicy::Required;
+        // primitive-index: 片元着色器可读 @builtin(primitive_index), VisBuffer 写三角形序号用
+        wgpuRequirements.primitiveIndex = rhi::FeaturePolicy::Required;
+        mWgpuFeatures = resolveWgpuFeatures(supportedWgpuFeatures, wgpuRequirements);
+
+        std::vector<WGPUFeatureName> requiredFeatures = buildRequiredFeatureList(mFeatures, mWgpuFeatures);
 
         WGPULimits supportedLimits = {};
         wgpuAdapterGetLimits(adapter, &supportedLimits);
         WGPULimits requiredLimits = WGPU_LIMITS_INIT;
-        static constexpr uint64_t kRequiredMaxBufferSize = 512 * 1024 * 1024;
+        static constexpr uint64_t kRequiredMaxBufferSize = 2ull * 1024ull * 1024ull * 1024ull;
         if (supportedLimits.maxBufferSize < kRequiredMaxBufferSize)
         {
             LOG_WARN("WebGPU supported max buffer size is less than required size");
         }
         requiredLimits.maxBufferSize = std::min(supportedLimits.maxBufferSize, kRequiredMaxBufferSize);
 
-        static constexpr uint64_t kRequiredMaxStorageBufferBindingSize = 512 * 1024 * 1024;
+        static constexpr uint64_t kRequiredMaxStorageBufferBindingSize = 2ull * 1024ull * 1024ull * 1024ull;
         if (supportedLimits.maxStorageBufferBindingSize < kRequiredMaxStorageBufferBindingSize)
         {
             LOG_WARN("WebGPU supported max storage buffer binding size is less than required size");
@@ -68,6 +89,28 @@ namespace hyp::wgpu
         requiredLimits.maxStorageBufferBindingSize = std::min(
             supportedLimits.maxStorageBufferBindingSize,
             kRequiredMaxStorageBufferBindingSize
+        );
+
+        // maxColorAttachmentBytesPerSample: 渲染管线输出时, 所有 color attachment 每个采样点所需字节数之和的上限, 规范默认值为 32
+        static constexpr uint32_t kRequiredMaxColorAttachmentBytesPerSample = 64;
+        if (supportedLimits.maxColorAttachmentBytesPerSample < kRequiredMaxColorAttachmentBytesPerSample)
+        {
+            LOG_WARN("WebGPU supported max color attachment bytes per sample is less than required size");
+        }
+        requiredLimits.maxColorAttachmentBytesPerSample = std::min(
+            supportedLimits.maxColorAttachmentBytesPerSample,
+            kRequiredMaxColorAttachmentBytesPerSample
+        );
+
+        // maxTextureDimension2D: dimension 为 "2d" 的纹理 size.width 和 size.height 的上限, 规范默认值为 8192
+        static constexpr uint32_t kRequiredMaxTextureDimension2D = 16384;
+        if (supportedLimits.maxTextureDimension2D < kRequiredMaxTextureDimension2D)
+        {
+            LOG_WARN("WebGPU supported max texture dimension 2D is less than required size");
+        }
+        requiredLimits.maxTextureDimension2D = std::min(
+            supportedLimits.maxTextureDimension2D,
+            kRequiredMaxTextureDimension2D
         );
 
         WGPUDawnCacheDeviceDescriptor cacheDesc = createDawnCacheDeviceDescriptor();
@@ -122,17 +165,17 @@ namespace hyp::wgpu
         }
     }
 
-    TRef<rhi::Buffer> Device::createBuffer(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const
+    TRef<rhi::Buffer> Device::createBufferImpl(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const
     {
         return new Buffer(*this, desc, memoryType);
     }
 
-    TRef<rhi::Texture> Device::createTexture(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const
+    TRef<rhi::Texture> Device::createTextureImpl(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const
     {
         return new Texture(*this, desc, memoryType);
     }
 
-    TRef<rhi::Sampler> Device::createSampler(const rhi::SamplerDesc& desc) const
+    TRef<rhi::Sampler> Device::createSamplerImpl(const rhi::SamplerDesc& desc) const
     {
         return new Sampler(*this, desc);
     }

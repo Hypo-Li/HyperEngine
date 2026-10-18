@@ -12,6 +12,7 @@ namespace hyp::wgpu
         case rhi::TextureType::Texture_2D:   return WGPUTextureDimension_2D;
         case rhi::TextureType::Texture_3D:   return WGPUTextureDimension_3D;
         case rhi::TextureType::Texture_Cube: return WGPUTextureDimension_2D;
+        case rhi::TextureType::Texture_2D_Array: return WGPUTextureDimension_2D;
         default:                             return WGPUTextureDimension_2D;
         }
     }
@@ -88,7 +89,7 @@ namespace hyp::wgpu
         wgpuTextureSetLabel(mTexture, label);
     }
 
-    TRef<rhi::TextureView> Texture::createView(const rhi::TextureViewDesc& desc)
+    TRef<rhi::TextureView> Texture::createViewImpl(const rhi::TextureViewDesc& desc)
     {
         incViewCount();
         return new TextureView(*this, desc);

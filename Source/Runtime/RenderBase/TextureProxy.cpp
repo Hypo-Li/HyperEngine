@@ -72,6 +72,7 @@ namespace hyp
         pendingUpload.slice.layerCount = layerCount;
         pendingUpload.stagingAllocation.reset();
         pendingUpload.data = std::move(data);
+        markNeedsPrepare();
 
         rhi::TextureFormatBlockInfo blockInfo = rhi::getTextureFormatBlockInfo(mTexture->getDesc().format);
         uint3 baseExtent = mTexture->getDesc().extent;
@@ -108,7 +109,7 @@ namespace hyp
         pendingUpload.data.swap(alignedData);
     }
 
-    void TextureProxy::prepare(rhi::CommandList& cmdList)
+    bool TextureProxy::prepare(rhi::CommandList& cmdList)
     {
         if (!mInitialized)
         {
@@ -126,6 +127,7 @@ namespace hyp
         {
             flushUploads(cmdList);
         }
+        return mPendingUploads.empty();
     }
 
     void TextureProxy::flushUploads(rhi::CommandList& cmdList)

@@ -1,4 +1,5 @@
 #pragma once
+#include <Core/Common/HString.h>
 #include <Core/Math/Vector.h>
 #include <Core/Math/Quaternion.h>
 #include <Core/Math/Matrix.h>
@@ -11,6 +12,15 @@ namespace hyp
         Keep_World,
         Keep_Local,
         Reset_Local,
+    };
+
+    // Socket 挂载用——由骨骼所有者(比如 SkeletalMeshRenderer)实现, 通过 Transform::
+    // setSocketProvider() 挂在自己的 Transform 上(见下面 mSocketProvider 的注释)。
+    // 子节点的 mSocketName 非空时, Transform 会问自己的 mParent->mSocketProvider(如果有)
+    // 按这个名字解出的世界变换, 代替 mParent 自己的刚性世界变换去做局部偏移的合成
+    struct ISocketProvider
+    {
+        virtual bool getSocketWorldTransform(HString socketName, double3& outPosition, Quaternion& outRotation, float3& outScale) const = 0;
     };
 
     class Transform : public Object
@@ -84,6 +94,12 @@ namespace hyp
             return nullptr;
         }
 
+        // 没有父节点时没有同级可言: get 返回 0, set 返回 false
+        size_t getSiblingIndex() const noexcept;
+
+        // index 是移动之后的最终位置, 超出范围按末尾处理
+        bool setSiblingIndex(size_t index);
+
         static constexpr float3 ForwardVector = { 0, 1, 0 };
 
         static constexpr float3 UpVector = { 0, 0, 1 };
@@ -107,8 +123,47 @@ namespace hyp
             return mVersion;
         }
 
+        // 子节点侧: 非空时, 这个 Transform 在合成世界变换时会优先问 mParent->mSocketProvider
+        // (如果有)按这个名字解出的世界变换当"有效父级", 解不出来(没设置 provider、或者
+        // provider 没查到同名挂点)时退回普通刚性父节点——表现完全跟没设置一样, setParent()
+        // 不会清空这个字段(挂载关系换了父级但挂点名字通常还想保留)
+        HString getSocketName() const noexcept
+        {
+            return mSocketName;
+        }
+
+        void setSocketName(HString socketName) noexcept;
+
+        // 父节点侧: 骨骼所有者(比如 SkeletalMeshRenderer)在 onRegister()/onUnregister() 里
+        // 调用, 声明"我能替挂在我身上的子节点解析 socket 名字"。跟 mSocketName 是完全独立的
+        // 两份数据, 分别装在关系的两端
+        ISocketProvider* getSocketProvider() const noexcept
+        {
+            return mSocketProvider;
+        }
+
+        void setSocketProvider(ISocketProvider* provider) noexcept;
+
+        // 递归标脏所有子孙节点的世界变换缓存——本来是内部维护自身不变量用的(setLocalPosition()
+        // 这类调用), 没有任何前置条件, 公开出来同样给外部驱动方(比如骨骼动画)在结果变化后
+        // 调用, 好让依赖 pull 的子树缓存重算
+        void markChildrenWorldDirty() noexcept;
+
+        virtual void postCopy() override;
+
+        virtual void finalizeCopy() override;
+
+        virtual void postLoad() override;
+
+        virtual void finalizeLoad() override;
+
     private:
-        void notifyChildrenDirtyWorld() noexcept;
+        // mParent 非空时, 算出用于合成局部偏移的"有效父级"世界变换——mSocketName 非空且
+        // mParent->mSocketProvider 能解析出对应挂点时, 用挂点的世界变换代替 mParent 自己的
+        // 刚性世界变换, 否则就是普通的 mParent->getWorld*()。updateWorldFromLocal() 和四个
+        // world 系列 setter 共用这一处判断, 保证读(pull 世界变换)和写(world setter 反解
+        // local)用的是同一个参照系, 不会出现两边不一致
+        void getEffectiveParentTransform(double3& outPosition, Quaternion& outRotation, float3& outScale) const noexcept;
 
         void updateWorldFromLocal() const noexcept;
 
@@ -139,6 +194,12 @@ namespace hyp
 
         Transform* mParent = nullptr;
         std::vector<Transform*> mChildren;
+
+        HString mSocketName;
+
+        // 不参与反射——运行时装配数据, 由骨骼所有者在自己注册/反注册时设置/清空, 复制/反
+        // 序列化出来的新 Transform 始终从 nullptr 开始, 等对应组件 onRegister() 时自己补上
+        ISocketProvider* mSocketProvider = nullptr;
 
         uint32_t mVersion = 0;
     };

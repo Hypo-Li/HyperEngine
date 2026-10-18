@@ -2,6 +2,7 @@
 #include "Device.h"
 
 #include <Core/Common/LogSystem.h>
+#include <Platform/Platform.h>
 
 #include <filesystem>
 #include <fstream>
@@ -26,7 +27,7 @@ namespace hyp::vk
             {
                 std::snprintf(hex + i * 2, 3, "%02x", uuid[i]);
             }
-            return std::filesystem::path(DERIVED_DATA_DIR) / "PipelineCache" / (std::string(hex, hex + VK_UUID_SIZE * 2) + ".bin");
+            return Platform::getExecutableDir() / "Cache" / "PipelineCache" / (std::string(hex, hex + VK_UUID_SIZE * 2) + ".bin");
         }
     }
 
@@ -45,7 +46,8 @@ namespace hyp::vk
             std::ifstream file(path, std::ios::binary);
             if (file)
             {
-                initialData.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+                initialData.resize(static_cast<size_t>(fileSize));
+                file.read(reinterpret_cast<char*>(initialData.data()), static_cast<std::streamsize>(fileSize));
             }
         }
 

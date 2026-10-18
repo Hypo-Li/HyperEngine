@@ -8,7 +8,7 @@
 
 namespace hyp
 {
-    class AtmospherePass
+    class AtmosphereLutPass
     {
     public:
         static void addToRenderGraph(
@@ -49,8 +49,12 @@ namespace hyp
             const SceneView& view,
             const AtmosphereProxy& atmosphere
         );
+    };
 
-        static void addAtmospherePass(
+    class AtmospherePass
+    {
+    public:
+        static void addToRenderGraph(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
             const SceneProxy& scene,
@@ -58,6 +62,7 @@ namespace hyp
             const AtmosphereProxy& atmosphere
         );
 
+    private:
         static rhi::Pipeline* createAtmospherePipeline(
             RendererContext& rendererContext,
             ShaderVariant shaderVariant,

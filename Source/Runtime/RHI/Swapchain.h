@@ -7,6 +7,7 @@ namespace hyp::rhi
     {
         Headless,
         Win32,
+        Xcb,
         Xlib,
         Wayland,
         Web,
@@ -26,6 +27,11 @@ namespace hyp::rhi
                 void* display;
                 uint64_t window;
             } xlib;
+
+            struct {
+                void* connection;
+                uint32_t window;
+            } xcb;
 
             struct {
                 void* display;
@@ -73,7 +79,7 @@ namespace hyp::rhi
 
         virtual TextureView* getCurrentTextureView() const = 0;
 
-        virtual TextureFormat getSwapchainTextureFormat() const = 0;
+        virtual TextureFormat getSurfaceTextureFormat() const = 0;
 
         virtual uint2 getExtent() const = 0;
 

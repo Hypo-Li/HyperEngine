@@ -1,8 +1,8 @@
 namespace hyp
 {
     template <typename Declared, typename Owner>
-    TProperty<Declared, Owner>::TProperty(HString name, MemberPtr memberPtr, CopyPolicy copyPolicy)
-        : Property(name, copyPolicy), mMemberPtr(memberPtr) {
+    TProperty<Declared, Owner>::TProperty(HString name, MemberPtr memberPtr, CopyPolicy copyPolicy, PropertyFlags flags)
+        : Property(name, copyPolicy, flags), mMemberPtr(memberPtr) {
     }
 
     template <typename Declared, typename Owner>
@@ -12,9 +12,18 @@ namespace hyp
     }
 
     template <typename Declared, typename Owner>
-    void TProperty<Declared, Owner>::setValue(void* instance, const void* value) const
+    void TProperty<Declared, Owner>::setRawValue(void* instance, const void* value) const
     {
         static_cast<Owner*>(instance)->*mMemberPtr = *static_cast<const Declared*>(value);
+    }
+
+    template <typename Declared, typename Owner>
+    void TProperty<Declared, Owner>::setValue(void* instance, const void* value) const
+    {
+        if (mSetter)
+            mSetter(*static_cast<Owner*>(instance), *static_cast<const Declared*>(value));
+        else
+            setRawValue(instance, value);
     }
 
     template <typename Declared, typename Owner>

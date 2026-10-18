@@ -1,6 +1,7 @@
 #include "BlobCache.h"
 
 #include <Core/Common/Hash.h>
+#include <Platform/Platform.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -15,10 +16,10 @@ namespace hyp::wgpu
         // 理解其结构, 用 xxHash64 重新哈希一遍拿到定长文件名即可, 和 ShaderCache 的做法一致
         std::filesystem::path getCacheFilePath(const void* key, size_t keySize)
         {
-            uint64_t hash = Hash::compute(key, keySize, Hash::Algorithm::xxHash64);
+            uint64_t hash = Hash::compute(key, keySize, Hash::Algorithm64::xxHash);
             char hex[17];
             std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(hash));
-            std::filesystem::path dir = std::filesystem::path(DERIVED_DATA_DIR) / "DawnCache" / std::string(hex, hex + 2);
+            std::filesystem::path dir = Platform::getExecutableDir() / "Cache" / "DawnCache" / std::string(hex, hex + 2);
             return dir / (std::string(hex) + ".bin");
         }
 

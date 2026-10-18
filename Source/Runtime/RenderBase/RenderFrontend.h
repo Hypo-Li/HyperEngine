@@ -11,6 +11,7 @@
 
 #include "ProxyHandle.h"
 #include "RenderCommandQueue.h"
+#include "SamplerProxy.h"
 #include "Shader.h"
 
 namespace hyp
@@ -20,6 +21,13 @@ namespace hyp
     {
     public:
         RenderFrontend(RenderBackend& backend);
+
+        void shutdown();
+
+        SamplerProxyHandle getOrCreateSamplerProxy(const rhi::SamplerDesc& desc)
+        {
+            return mSamplerProxyCache.getOrCreate(desc);
+        }
 
         template <typename T>
         void enqueueCommand(T&& command)
@@ -44,7 +52,7 @@ namespace hyp
 
         void endFrame();
 
-        void render(double time, float deltaTime);
+        void render(float deltaTime);
 
         template <typename T, typename Callback>
         void onFutureReady(std::future<T>&& future, Callback&& callback)
@@ -93,10 +101,10 @@ namespace hyp
     private:
         RenderBackend& mBackend;
 #ifndef HYP_SINGLE_THREADED_RENDERING
-        static constexpr uint32_t kMaxQueuedFrames = 2;
         std::counting_semaphore<kMaxQueuedFrames> mFrameSemaphore{ kMaxQueuedFrames };
 #endif
         ProxyHandleAllocator mProxyHandleAllocator;
+        SamplerProxyCache mSamplerProxyCache;
         std::vector<std::function<bool()>> mPendingFutures;
     };
 }

@@ -6,9 +6,7 @@ namespace hyp
     class BinarySaver : public BinaryArchive
     {
     public:
-        BinarySaver() = default;
-
-        bool isLoading() const override;
+        BinarySaver(bool isCooking = false);
 
         void serialize(bool* value, size_t count = 1) override;
         void serialize(char* value, size_t count = 1) override;

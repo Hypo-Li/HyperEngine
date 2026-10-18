@@ -5,11 +5,14 @@
 
 namespace hyp
 {
+    inline constexpr uint32_t kMaxTexCoordCount = 4;
+
     enum class VertexLayoutType : uint8_t
     {
         Unknown = static_cast<uint8_t>(-1),
         Static_Mesh = 0,
         Skeletal_Mesh = 1,
+        Quad = 2,
     };
 
     enum class VertexAttributeMask : uint32_t
@@ -23,12 +26,8 @@ namespace hyp
         TexCoord1       = 1 << 5,
         TexCoord2       = 1 << 6,
         TexCoord3       = 1 << 7,
-        TexCoord4       = 1 << 8,
-        TexCoord5       = 1 << 9,
-        TexCoord6       = 1 << 10,
-        TexCoord7       = 1 << 11,
-        Bone_Weight0    = 1 << 12,
-        Bone_Weight1    = 1 << 13,
+        Bone_Weight0    = 1 << 8,
+        Bone_Weight1    = 1 << 9,
     };
     ENABLE_ENUM_CLASS_BITWISE(VertexAttributeMask)
 
@@ -64,10 +63,10 @@ namespace hyp
             std::vector<rhi::VertexInputAttribute>& attributes
         ) const;
 
-        const std::string& getVertexAttributeGetters() const;
+        const std::string& getVertexAttributeImplementation() const;
 
     private:
-        std::string generateVertexAttributeGetters() const;
+        std::string generateVertexAttributeImplementation() const;
 
     private:
         struct VertexLayoutKey
@@ -98,7 +97,7 @@ namespace hyp
         struct VertexLayoutInfo
         {
             uint32_t id;
-            std::string vertexAttributeGetters;
+            std::string vertexAttributeImplementation;
         };
 
         using VertexLayoutTable = std::unordered_map<VertexLayoutKey, VertexLayoutInfo, VertexLayoutKeyHash>;

@@ -1,8 +1,11 @@
 #pragma once
+#include <filesystem>
+
 #include <Core/Common/HString.h>
 #include <Core/Common/EnumBitwise.h>
 
 #include "MaterialTypes.h"
+#include "VertexLayout.h"
 
 namespace hyp
 {
@@ -12,6 +15,8 @@ namespace hyp
         static const HString Translucent;
         static const HString ShadowDepth;
         static const HString DepthOnly;
+        static const HString CardCapture;
+        static const HString SkyBackground;
     };
 
     // render tag 的可选特性标记,注册时声明,后续新特性直接在这里加新位,不再需要给
@@ -32,7 +37,7 @@ namespace hyp
     class RenderTagRegistry
     {
     public:
-        RenderTagRegistry();
+        explicit RenderTagRegistry(const std::filesystem::path& shaderDir);
 
         uint32_t registerTag(
             HString renderTag,
@@ -45,18 +50,21 @@ namespace hyp
 
         uint32_t getRenderMask(HString renderTag);
 
-        // Domain+BlendMode -> 适用的内置 renderTag mask,是"这个材质该编译哪些变体"的唯一权威判断,
-        // 渲染线程(MaterialProxy)和逻辑线程(MaterialTemplate)都必须用这一份,不要各写一份过滤逻辑
-        uint32_t getApplicableRenderMask(MaterialDomain domain, BlendMode blendMode) const noexcept;
+        // Domain+BlendMode -> 这个材质要编译的内置 renderTag mask
+        uint32_t getBuiltinRenderMask(MaterialDomain domain, BlendMode blendMode) const noexcept;
 
-        const std::string& getShaderFileName(HString renderTag);
+        std::string makeShaderSource(HString renderTag, const std::string& materialImplementation, VertexLayout vertexLayout) const;
 
-        const std::string& getShaderTemplate(HString renderTag);
+        const std::string& getShaderFileName(HString renderTag) const;
+
+        const std::string& getShaderTemplate(HString renderTag) const;
 
         uint32_t getRenderTagCount() const noexcept
         {
             return mRenderTagCount;
         }
+
+        std::vector<HString> getRenderTags() const;
 
         uint32_t getBuiltinOpaqueMask() const noexcept
         {
@@ -78,6 +86,16 @@ namespace hyp
             return mBuiltinDepthOnlyMask;
         }
 
+        uint32_t getBuiltinCardCaptureMask() const noexcept
+        {
+            return mBuiltinCardCaptureMask;
+        }
+
+        uint32_t getBuiltinSkyBackgroundMask() const noexcept
+        {
+            return mBuiltinSkyBackgroundMask;
+        }
+
     private:
         uint32_t mRenderTagCount = 0;
         struct Entry
@@ -93,5 +111,7 @@ namespace hyp
         uint32_t mBuiltinTranslucentMask;
         uint32_t mBuiltinShadowDepthMask;
         uint32_t mBuiltinDepthOnlyMask;
+        uint32_t mBuiltinCardCaptureMask;
+        uint32_t mBuiltinSkyBackgroundMask;
     };
 }

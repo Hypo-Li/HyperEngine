@@ -41,6 +41,7 @@ namespace hyp::vk
         {
         case rhi::AttachmentStoreOp::Store:     return VK_ATTACHMENT_STORE_OP_STORE;
         case rhi::AttachmentStoreOp::Dont_Care: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        case rhi::AttachmentStoreOp::None:      return VK_ATTACHMENT_STORE_OP_NONE;
         default:                                return VK_ATTACHMENT_STORE_OP_DONT_CARE;
         }
     }
@@ -211,7 +212,7 @@ namespace hyp::vk
             accessMask = VK_ACCESS_HOST_READ_BIT;
             break;
         case rhi::ResourceState::Present:
-            stageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            stageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             accessMask = 0;
             break;
         case rhi::ResourceState::None:
@@ -405,6 +406,14 @@ namespace hyp::vk
             accessMask = VK_ACCESS_2_NONE;
             break;
         }
+    }
+
+    // NVIDIA 驱动 617.14 在源阶段为空的 barrier 之后会丢掉对更早 compute dispatch 的等待
+    template <typename StageFlags>
+    static void replaceEmptyComputeBarrierSource(rhi::ResourceState oldState, StageFlags dstStageMask, StageFlags& srcStageMask) noexcept
+    {
+        if (oldState == rhi::ResourceState::None && (dstStageMask & VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT))
+            srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
 
     static VkImageLayout getImageLayout(rhi::ResourceState state, bool presentSrc = false) noexcept
@@ -877,10 +886,19 @@ namespace hyp::vk
 
     void CommandList::beginRenderPassBackend(rhi::RenderArea renderArea, const rhi::DepthStencilAttachmentInfo& depthStencilAttachment, std::span<const rhi::ColorAttachmentInfo> colorAttachments)
     {
+        if (colorAttachments.size() > RenderPassKey::kMaxColorAttachments)
+        {
+            LOG_ERROR(
+                "Vulkan render pass supports at most {} color attachments, got {}",
+                RenderPassKey::kMaxColorAttachments,
+                colorAttachments.size()
+            );
+            return;
+        }
+
         if (mDynamicRendering)
         {
-            VkRenderingAttachmentInfo vkColorAttachments[8];
-            assert(colorAttachments.size() <= 8);
+            std::array<VkRenderingAttachmentInfo, RenderPassKey::kMaxColorAttachments> vkColorAttachments{};
             for (uint32_t i = 0; i < colorAttachments.size(); ++i)
             {
                 const auto& src = colorAttachments[i];
@@ -935,18 +953,18 @@ namespace hyp::vk
             renderingInfo.renderArea.extent = { renderArea.width, renderArea.height };
             renderingInfo.layerCount = 1;
             renderingInfo.colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size());
-            renderingInfo.pColorAttachments = vkColorAttachments;
+            renderingInfo.pColorAttachments = vkColorAttachments.data();
             renderingInfo.pDepthAttachment = pDepthAttachment;
             renderingInfo.pStencilAttachment = pStencilAttachment;
 
-            vkCmdBeginRendering(mCommandBuffer, &renderingInfo);
+            getVkDevice().getDispatch().cmdBeginRendering(mCommandBuffer, &renderingInfo);
         }
         else
         {
-            std::array<VkFormat, 8> colorFormats{};
-            std::array<VkAttachmentLoadOp, 8> colorLoadOps{};
-            std::array<VkAttachmentStoreOp, 8> colorStoreOps{};
-            std::array<VkImageView, 8> colorViews{};
+            std::array<VkFormat, RenderPassKey::kMaxColorAttachments> colorFormats{};
+            std::array<VkAttachmentLoadOp, RenderPassKey::kMaxColorAttachments> colorLoadOps{};
+            std::array<VkAttachmentStoreOp, RenderPassKey::kMaxColorAttachments> colorStoreOps{};
+            std::array<VkImageView, RenderPassKey::kMaxColorAttachments> colorViews{};
 
             for (uint32_t i = 0; i < colorAttachments.size(); ++i)
             {
@@ -1002,7 +1020,7 @@ namespace hyp::vk
                 sampleCount
             );
 
-            std::array<VkImageView, 9> attachments{};
+            std::array<VkImageView, RenderPassKey::kMaxColorAttachments + 1> attachments{};
             uint32_t attachmentCount = static_cast<uint32_t>(colorAttachments.size());
             for (uint32_t i = 0; i < colorAttachments.size(); ++i)
             {
@@ -1057,7 +1075,7 @@ namespace hyp::vk
     {
         if (mDynamicRendering)
         {
-            vkCmdEndRendering(mCommandBuffer);
+            getVkDevice().getDispatch().cmdEndRendering(mCommandBuffer);
         }
         else
         {
@@ -1124,6 +1142,7 @@ namespace hyp::vk
                 barrier.dstAccessMask = 0;
                 getBufferPipelineStageAndAccessMask2(src.oldState, barrier.srcStageMask, barrier.srcAccessMask);
                 getBufferPipelineStageAndAccessMask2(src.newState, barrier.dstStageMask, barrier.dstAccessMask);
+                replaceEmptyComputeBarrierSource(src.oldState, barrier.dstStageMask, barrier.srcStageMask);
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.buffer = src.buffer ? static_cast<const Buffer*>(src.buffer)->getHandle() : VK_NULL_HANDLE;
@@ -1155,6 +1174,7 @@ namespace hyp::vk
                 barrier.dstAccessMask = 0;
                 getTexturePipelineStageAndAccessMask2(src.oldState, barrier.srcStageMask, barrier.srcAccessMask);
                 getTexturePipelineStageAndAccessMask2(src.newState, barrier.dstStageMask, barrier.dstAccessMask);
+                replaceEmptyComputeBarrierSource(src.oldState, barrier.dstStageMask, barrier.srcStageMask);
                 barrier.oldLayout = getImageLayout(src.oldState, src.oldState == rhi::ResourceState::Present);
                 barrier.newLayout = getImageLayout(src.newState);
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1176,7 +1196,7 @@ namespace hyp::vk
                 dependencyInfo.imageMemoryBarrierCount = static_cast<uint32_t>(vkImageBarriers.size());
                 dependencyInfo.pImageMemoryBarriers = vkImageBarriers.data();
 
-                vkCmdPipelineBarrier2(mCommandBuffer, &dependencyInfo);
+                getVkDevice().getDispatch().cmdPipelineBarrier2(mCommandBuffer, &dependencyInfo);
             }
         }
         else
@@ -1202,6 +1222,7 @@ namespace hyp::vk
                 VkPipelineStageFlags localDstStage = 0;
                 getBufferPipelineStageAndAccessMask(src.oldState, localSrcStage, barrier.srcAccessMask);
                 getBufferPipelineStageAndAccessMask(src.newState, localDstStage, barrier.dstAccessMask);
+                replaceEmptyComputeBarrierSource(src.oldState, localDstStage, localSrcStage);
                 srcStage |= localSrcStage;
                 dstStage |= localDstStage;
 
@@ -1223,7 +1244,7 @@ namespace hyp::vk
 
                 VkImageMemoryBarrier barrier = {};
                 barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                barrier.oldLayout = getImageLayout(src.oldState);
+                barrier.oldLayout = getImageLayout(src.oldState, src.oldState == rhi::ResourceState::Present);
                 barrier.newLayout = getImageLayout(src.newState);
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1234,6 +1255,7 @@ namespace hyp::vk
                 VkPipelineStageFlags localDstStage = 0;
                 getTexturePipelineStageAndAccessMask(src.oldState, localSrcStage, barrier.srcAccessMask);
                 getTexturePipelineStageAndAccessMask(src.newState, localDstStage, barrier.dstAccessMask);
+                replaceEmptyComputeBarrierSource(src.oldState, localDstStage, localSrcStage);
                 srcStage |= localSrcStage;
                 dstStage |= localDstStage;
 

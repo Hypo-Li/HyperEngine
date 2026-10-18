@@ -1,25 +1,40 @@
+#ifdef __linux__
+// 见 Context.cpp 顶部同款注释。
+#define VK_USE_PLATFORM_XLIB_KHR
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#ifdef HYP_HAS_XCB
+#define VK_USE_PLATFORM_XCB_KHR
+#endif
+#endif
+
 #include "Swapchain.h"
 #include "Device.h"
-#ifdef WIN32
-#define NOMINMAX
-#include <Windows.h>
-#endif
 
 namespace hyp::vk
 {
     static VkSurfaceKHR createSurface(VkInstance instance, const rhi::NativeWindowInfo& nativeWindow)
     {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-#ifdef WIN32
+#ifdef _WIN32
         VkWin32SurfaceCreateInfoKHR surfaceInfo = {};
         surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
         surfaceInfo.hinstance = (HINSTANCE)nativeWindow.win32.hinstance;
         surfaceInfo.hwnd = (HWND)nativeWindow.win32.hwnd;
         vkCreateWin32SurfaceKHR(instance, &surfaceInfo, nullptr, &surface);
 #else
-        // Linux 下 Xlib/Wayland 的宏(VK_USE_PLATFORM_XLIB_KHR/VK_USE_PLATFORM_WAYLAND_KHR)是同时定义的
+        // Linux 下可用的 Xlib/XCB/Wayland 平台宏在编译期定义, 实际 surface 类型在运行时确定
         // (见 ThirdParty/volk/CMakeLists.txt),实际用哪个是运行时才知道的,所以这里按 nativeWindow.type 分支
-        if (nativeWindow.type == rhi::NativeWindowType::Xlib)
+        if (nativeWindow.type == rhi::NativeWindowType::Xcb)
+        {
+#ifdef VK_USE_PLATFORM_XCB_KHR
+            VkXcbSurfaceCreateInfoKHR surfaceInfo = {};
+            surfaceInfo.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+            surfaceInfo.connection = (xcb_connection_t*)nativeWindow.xcb.connection;
+            surfaceInfo.window = (xcb_window_t)nativeWindow.xcb.window;
+            vkCreateXcbSurfaceKHR(instance, &surfaceInfo, nullptr, &surface);
+#endif
+        }
+        else if (nativeWindow.type == rhi::NativeWindowType::Xlib)
         {
 #ifdef VK_USE_PLATFORM_XLIB_KHR
             VkXlibSurfaceCreateInfoKHR surfaceInfo = {};
@@ -79,7 +94,8 @@ namespace hyp::vk
         std::vector<VkFormat> preferredImageFormats = {
             VK_FORMAT_B8G8R8A8_UNORM,
             VK_FORMAT_R8G8B8A8_UNORM,
-            VK_FORMAT_A8B8G8R8_UNORM_PACK32
+            VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+            VK_FORMAT_A2B10G10R10_UNORM_PACK32,
         };
         for (auto& availableFormat : availableFormats) {
             if (std::find(
@@ -118,15 +134,17 @@ namespace hyp::vk
         return bestMode;
     }
 
-    static VkExtent2D chooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities)
+    static VkExtent2D chooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities, uint32_t requestedWidth, uint32_t requestedHeight)
     {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
         }
         else
         {
-            static constexpr uint32_t kWidth = 1024, kHeight = 768;
-            VkExtent2D actualExtent = { kWidth, kHeight };
+            // Wayland 下 currentExtent 恒为 {UINT32_MAX, UINT32_MAX}(surface 本身没有内在尺寸概念),
+            // 必须用调用方传入的窗口实际尺寸兜底, 不能用固定常量, 否则交换链尺寸和 xdg_surface 协商出的
+            // 尺寸对不上, compositor(尤其是 WSLg 的 RDP shell)可能拒绝正确合成该 surface。
+            VkExtent2D actualExtent = { requestedWidth, requestedHeight };
             actualExtent.width = std::max(capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width));
             actualExtent.height = std::max(capabilities.minImageExtent.height, std::min(capabilities.maxImageExtent.height, actualExtent.height));
 
@@ -175,7 +193,7 @@ namespace hyp::vk
         auto supportDetails = querySwapchainSupport(physicalDevice, mSurface);
         mSurfaceFormat = chooseSwapchainSurfaceFormat(supportDetails.formats);
         mPresentMode = chooseSwapchainPresentMode(supportDetails.presentModes, desc.vsync);
-        mExtent = chooseSwapchainExtent(supportDetails.capabilities);
+        mExtent = chooseSwapchainExtent(supportDetails.capabilities, desc.width, desc.height);
         mImageCount = supportDetails.capabilities.minImageCount + 1;
         if (supportDetails.capabilities.maxImageCount > 0 &&
             mImageCount > supportDetails.capabilities.maxImageCount)
@@ -236,7 +254,7 @@ namespace hyp::vk
         return mSwapchainTextureViews[mCurrentImageIndex];
     }
 
-    rhi::TextureFormat Swapchain::getSwapchainTextureFormat() const
+    rhi::TextureFormat Swapchain::getSurfaceTextureFormat() const
     {
         return convertFromVkSurfaceFormat(mSurfaceFormat);
     }

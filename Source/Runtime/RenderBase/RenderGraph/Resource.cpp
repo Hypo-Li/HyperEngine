@@ -8,8 +8,9 @@ namespace hyp::rg
     {
     }
 
-    BufferResource::BufferResource(HString name, const Description& desc, Arena& arena) noexcept
+    BufferResource::BufferResource(HString name, const Description& desc, Arena& arena, uint32_t maxUnusedFrames) noexcept
         : VirtualResource(name, ResourceType::Buffer, false),
+        mMaxUnusedFrames(maxUnusedFrames),
         mAccessRecords(StlAllocator<BufferAccessRecord>(arena))
     {
         mKey.desc = desc;
@@ -19,6 +20,7 @@ namespace hyp::rg
 
     BufferResource::BufferResource(HString name, PhysicalResource* physicalResource, Arena& arena) noexcept
         : VirtualResource(name, ResourceType::Buffer, true),
+        mMaxUnusedFrames(TransientResources::kDefaultMaxUnusedFrames),
         mPhysicalResource(physicalResource),
         mAccessRecords(StlAllocator<BufferAccessRecord>(arena))
     {
@@ -32,7 +34,7 @@ namespace hyp::rg
         assert(!isImported());
 
         aggregateUsage();
-        mPhysicalResource = transientResources.acquireBuffer(mKey);
+        mPhysicalResource = transientResources.acquireBuffer(mKey, mMaxUnusedFrames);
     }
 
     void BufferResource::aggregateUsage() noexcept
@@ -43,8 +45,9 @@ namespace hyp::rg
         }
     }
 
-    TextureResource::TextureResource(HString name, const Description& desc, Arena& arena) noexcept
+    TextureResource::TextureResource(HString name, const Description& desc, Arena& arena, uint32_t maxUnusedFrames) noexcept
         : VirtualResource(name, ResourceType::Texture, false),
+        mMaxUnusedFrames(maxUnusedFrames),
         mAccessRecords(StlAllocator<TextureAccessRecord>(arena))
     {
         mKey.desc = desc;
@@ -59,6 +62,7 @@ namespace hyp::rg
         Arena& arena
     ) noexcept :
         VirtualResource(name, ResourceType::Texture, true),
+        mMaxUnusedFrames(TransientResources::kDefaultMaxUnusedFrames),
         mPhysicalResource(physicalResource),
         mDefaultState(defaultState),
         mAccessRecords(StlAllocator<TextureAccessRecord>(arena))
@@ -73,7 +77,7 @@ namespace hyp::rg
         assert(!isImported());
 
         aggregateUsage();
-        mPhysicalResource = transientResources.acquireTexture(mKey);
+        mPhysicalResource = transientResources.acquireTexture(mKey, mMaxUnusedFrames);
     }
 
     void TextureResource::aggregateUsage() noexcept

@@ -5,6 +5,7 @@ find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 
 target_link_libraries(Vulkan PUBLIC
     RHI
+    Platform
     volk::volk
     GPUOpen::VulkanMemoryAllocator
 )

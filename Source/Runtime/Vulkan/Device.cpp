@@ -15,6 +15,9 @@
 #include <Core/Common/LogSystem.h>
 #include <Core/Common/Hash.h>
 
+#include <algorithm>
+#include <cassert>
+
 namespace hyp::vk
 {
     static std::vector<VkDeviceQueueCreateInfo> getQueues(
@@ -96,22 +99,113 @@ namespace hyp::vk
         return commandPool;
     }
 
+    static DeviceDispatch createDeviceDispatch(uint32_t apiVersion, FeatureSupport& features)
+    {
+        DeviceDispatch dispatch;
+
+        if (features.dynamicRendering)
+        {
+            if (apiVersion >= VK_API_VERSION_1_3)
+            {
+                dispatch.cmdBeginRendering =
+                    reinterpret_cast<PFN_vkCmdBeginRenderingKHR>(vkCmdBeginRendering);
+                dispatch.cmdEndRendering =
+                    reinterpret_cast<PFN_vkCmdEndRenderingKHR>(vkCmdEndRendering);
+            }
+            else
+            {
+                dispatch.cmdBeginRendering = vkCmdBeginRenderingKHR;
+                dispatch.cmdEndRendering = vkCmdEndRenderingKHR;
+            }
+
+            if (!dispatch.cmdBeginRendering || !dispatch.cmdEndRendering)
+            {
+                LOG_ERROR("Dynamic rendering was enabled, but its Vulkan entry points are unavailable; disabling it");
+                features.dynamicRendering = false;
+                dispatch.cmdBeginRendering = nullptr;
+                dispatch.cmdEndRendering = nullptr;
+            }
+        }
+
+        if (features.synchronization2)
+        {
+            dispatch.cmdPipelineBarrier2 =
+                apiVersion >= VK_API_VERSION_1_3
+                    ? reinterpret_cast<PFN_vkCmdPipelineBarrier2KHR>(vkCmdPipelineBarrier2)
+                    : vkCmdPipelineBarrier2KHR;
+
+            if (!dispatch.cmdPipelineBarrier2)
+            {
+                LOG_ERROR("Synchronization2 was enabled, but vkCmdPipelineBarrier2 is unavailable; disabling it");
+                features.synchronization2 = false;
+            }
+        }
+
+        if (features.timelineSemaphore)
+        {
+            if (apiVersion >= VK_API_VERSION_1_2)
+            {
+                dispatch.getSemaphoreCounterValue =
+                    reinterpret_cast<PFN_vkGetSemaphoreCounterValueKHR>(vkGetSemaphoreCounterValue);
+                dispatch.waitSemaphores =
+                    reinterpret_cast<PFN_vkWaitSemaphoresKHR>(vkWaitSemaphores);
+                dispatch.signalSemaphore =
+                    reinterpret_cast<PFN_vkSignalSemaphoreKHR>(vkSignalSemaphore);
+            }
+            else
+            {
+                dispatch.getSemaphoreCounterValue = vkGetSemaphoreCounterValueKHR;
+                dispatch.waitSemaphores = vkWaitSemaphoresKHR;
+                dispatch.signalSemaphore = vkSignalSemaphoreKHR;
+            }
+
+            const bool hasTimelineSemaphoreEntryPoints =
+                dispatch.getSemaphoreCounterValue &&
+                dispatch.waitSemaphores &&
+                dispatch.signalSemaphore;
+            if (!hasTimelineSemaphoreEntryPoints)
+            {
+                LOG_ERROR("Timeline semaphore is required, but its Vulkan entry points are unavailable");
+                assert(false && "Required timeline semaphore entry points are unavailable");
+            }
+        }
+
+        return dispatch;
+    }
+
     Device::Device(
         const rhi::ContextDesc& desc,
         VkInstance instance,
-        VkPhysicalDevice physicalDevice
+        VkPhysicalDevice physicalDevice,
+        uint32_t instanceApiVersion,
+        bool physicalDeviceProperties2
     ) : mInstance(instance),
         mPhysicalDevice(physicalDevice)
     {
         // Get device api version and build optional feature chain for vkCreateDevice.
         VkPhysicalDeviceProperties properties;
         vkGetPhysicalDeviceProperties(mPhysicalDevice, &properties);
-        const uint32_t apiVersion = properties.apiVersion;
+        mApiVersion = std::min(instanceApiVersion, properties.apiVersion);
+        if (mApiVersion >= VK_API_VERSION_1_3)
+            mShaderCompileTarget = { rhi::ShaderCodeFormat::Spirv, 1, 6 };
+        else if (mApiVersion >= VK_API_VERSION_1_2)
+            mShaderCompileTarget = { rhi::ShaderCodeFormat::Spirv, 1, 5 };
+        else if (mApiVersion >= VK_API_VERSION_1_1)
+            mShaderCompileTarget = { rhi::ShaderCodeFormat::Spirv, 1, 3 };
+        else
+            mShaderCompileTarget = { rhi::ShaderCodeFormat::Spirv, 1, 0 };
 
         // Query supported features.
         rhi::FeatureSupport supportedFeatures;
         FeatureSupport supportedVkFeatures;
-        getSupportedFeatures(apiVersion, mPhysicalDevice, supportedFeatures, supportedVkFeatures);
+        getSupportedFeatures(
+            mApiVersion,
+            instanceApiVersion,
+            physicalDeviceProperties2,
+            mPhysicalDevice,
+            supportedFeatures,
+            supportedVkFeatures
+        );
 
         // Resolve application required/optional features.
         mFeatures = rhi::resolveFeatures(supportedFeatures, desc.featureRequirements);
@@ -121,11 +215,22 @@ namespace hyp::vk
         vkRequirements.shaderDrawParameters = rhi::FeaturePolicy::Required;
         vkRequirements.timelineSemaphore = rhi::FeaturePolicy::Required;
         vkRequirements.separateDepthStencilLayouts = rhi::FeaturePolicy::Required;
+        vkRequirements.maintenance1 = rhi::FeaturePolicy::Required;
+        vkRequirements.storageBufferStorageClass = rhi::FeaturePolicy::Required;
+#if 1
         vkRequirements.synchronization2 = rhi::FeaturePolicy::Optional;
         vkRequirements.dynamicRendering = rhi::FeaturePolicy::Optional;
+#else
+        // for test
+        vkRequirements.synchronization2 = rhi::FeaturePolicy::Ignored;
+        vkRequirements.dynamicRendering = rhi::FeaturePolicy::Ignored;
+#endif
+        vkRequirements.lineRasterization = rhi::FeaturePolicy::Optional;        // MASKED 材质分支的 discard 会被 Slang 编译成 SPIR-V 的 OpDemoteToHelperInvocation,
+        // 没有不用这个指令的退路(见 Features.h 里这个字段的注释), 必须是 Required
+        vkRequirements.shaderDemoteToHelperInvocation = rhi::FeaturePolicy::Required;
         mVkFeatures = resolveVkFeatures(supportedVkFeatures, vkRequirements);
 
-        StructureChain featureChain = buildDeviceFeatureChain(apiVersion, mFeatures, mVkFeatures);
+        StructureChain featureChain = buildDeviceFeatureChain(mApiVersion, mFeatures, mVkFeatures);
 
         // Get Queues
         std::vector<VkDeviceQueueCreateInfo> queueInfos = getQueues(
@@ -147,7 +252,7 @@ namespace hyp::vk
         deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
         deviceInfo.pQueueCreateInfos = queueInfos.data();
         bool headless = desc.swapchainDesc.nativeWindow.type == rhi::NativeWindowType::Headless;
-        auto extensions = getVkDeviceExtensions(apiVersion, headless, mFeatures, mVkFeatures);
+        auto extensions = getVkDeviceExtensions(mApiVersion, headless, mFeatures, mVkFeatures);
         deviceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         deviceInfo.ppEnabledExtensionNames = extensions.data();
         deviceInfo.pEnabledFeatures = nullptr;
@@ -156,6 +261,7 @@ namespace hyp::vk
             LOG_ERROR("Failed to create vulkan device");
         }
         volkLoadDevice(mDevice);
+        mDispatch = createDeviceDispatch(mApiVersion, mVkFeatures);
 
         // Create Command Pools
         vkGetDeviceQueue(mDevice, mGraphicsQueueInfo.familyIndex, 0, &mGraphicsQueueInfo.queue);
@@ -224,17 +330,17 @@ namespace hyp::vk
         vkDeviceWaitIdle(mDevice);
     }
 
-    TRef<rhi::Buffer> Device::createBuffer(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const
+    TRef<rhi::Buffer> Device::createBufferImpl(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const
     {
         return new Buffer(*this, desc, memoryType);
     }
 
-    TRef<rhi::Texture> Device::createTexture(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const
+    TRef<rhi::Texture> Device::createTextureImpl(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const
     {
         return new Texture(*this, desc, memoryType);
     }
 
-    TRef<rhi::Sampler> Device::createSampler(const rhi::SamplerDesc& desc) const
+    TRef<rhi::Sampler> Device::createSamplerImpl(const rhi::SamplerDesc& desc) const
     {
         return new Sampler(*this, desc);
     }

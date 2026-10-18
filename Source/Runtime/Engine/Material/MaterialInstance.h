@@ -30,6 +30,14 @@ namespace hyp
 
         void setParameterOverrideEnabled(HString name, bool enabled);
 
+        // Raw override state (enabled flag + stored value) for a single parameter, or nullptr if
+        // this parameter has never been touched on this instance (equivalent to enabled=false,
+        // inheriting the template's default). Unlike getParameterEffectiveValue(), this doesn't
+        // resolve the fallback — callers that need to render/toggle the override UI itself
+        // (checkbox state, reset-button comparison against the template default) need the raw
+        // state, not the resolved value.
+        const ParameterOverride* getParameterOverride(HString name) const;
+
         std::optional<MaterialParameterValue> getParameterEffectiveValue(uint32_t index) const;
 
         std::optional<MaterialParameterValue> getParameterEffectiveValue(HString name) const;
@@ -63,6 +71,8 @@ namespace hyp
 
         void onTemplateUpdated(MaterialTemplate::DirtyFlags dirtyFlags);
 
+        void onParameterResourceChanged() override;
+
     private:
         std::vector<MaterialParameter> makeEffectiveParameters();
 
@@ -78,6 +88,8 @@ namespace hyp
 
         void reconcileParameterOverrides();
 
+        void syncResourceObserver();
+
     private:
         TRef<MaterialTemplate> mTemplate;
         std::unordered_map<HString, ParameterOverride> mParameterOverrides;
@@ -87,6 +99,8 @@ namespace hyp
         std::optional<bool> mDoubleSidedOverride;
 
         MaterialShaderHandle mShaderHandle;
+
+        MaterialResourceObserver mResourceObserver;
     };
 
     template <> Type* Reflection::createType<MaterialInstance::ParameterOverride>();

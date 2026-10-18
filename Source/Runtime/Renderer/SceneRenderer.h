@@ -1,11 +1,6 @@
 #pragma once
-#include <execution>
-#include <ranges>
-
 #include "RendererContext.h"
 #include "SceneProxy.h"
-#include "MeshRenderProxy.h"
-#include "RenderPipeline.h"
 
 namespace hyp
 {
@@ -44,6 +39,8 @@ namespace hyp
             float distance,
             float maxDistance
         );
+
+        static void buildDrawBatches(const DrawItemList& drawItems, const DrawItemBucket& bucket, DrawBatchList& outBatchList);
 
         void cull(const SceneProxy& scene, const SceneView& sceneView, RenderData& renderData);
 

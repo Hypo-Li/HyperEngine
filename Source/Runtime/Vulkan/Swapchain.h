@@ -16,7 +16,7 @@ namespace hyp::vk
 
         rhi::TextureView* getCurrentTextureView() const override;
 
-        rhi::TextureFormat getSwapchainTextureFormat() const override;
+        rhi::TextureFormat getSurfaceTextureFormat() const override;
 
         uint2 getExtent() const override;
 

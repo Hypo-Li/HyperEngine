@@ -1,7 +1,7 @@
 #include "Texture3D.h"
 
 #include "../Context.h"
-#include <RenderBase/RenderSystem.h>
+#include <RenderBase/RenderFrontend.h>
 #include <RenderBase/TextureProxy.h>
 
 namespace hyp
@@ -21,20 +21,15 @@ namespace hyp
         uint32_t height,
         uint32_t depth,
         PixelFormat format,
-        bool isSRGB,
-        CompressionPreset compressionPreset,
-        bool generateMips
+        uint32_t mipLevels
     )
     {
         Description description;
         description.format = format;
-        description.isSRGB = isSRGB;
-        description.compressionPreset = compressionPreset;
-        description.generateMips = generateMips;
         description.width = width;
         description.height = height;
         description.depth = depth;
-        description.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(std::max(width, height), depth)))) + 1;
+        description.mipLevels = computeMipLevels(std::max(std::max(width, height), depth), mipLevels);
         description.arrayLayers = 1;
         setDescription(description);
     }
@@ -44,11 +39,12 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [handle,
-            desc = getDescription()](FrameContext& context)
+            desc = getDescription(),
+            rhiFormat = getRHITextureFormat()](FrameContext& context)
             {
                 rhi::TextureDesc textureDesc;
                 textureDesc.type = rhi::TextureType::Texture_3D;
-                textureDesc.format = convertToRHITextureFormat(desc.format, desc.compressionPreset, desc.compressionFormatFamily, desc.isSRGB);
+                textureDesc.format = rhiFormat;
                 textureDesc.extent = { desc.width, desc.height, desc.depth };
                 textureDesc.mipCount = desc.mipLevels;
                 textureDesc.layerCount = 1;
@@ -62,6 +58,7 @@ namespace hyp
     template <> Type* Reflection::createType<Texture3D>()
     {
         auto c = new TClass<Texture3D, Texture>("Texture3D");
+        c->setDisplayName("Texture 3D");
         return c;
     }
 

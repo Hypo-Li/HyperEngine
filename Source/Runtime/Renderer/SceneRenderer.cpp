@@ -1,4 +1,10 @@
 #include "SceneRenderer.h"
+#include "MeshRenderProxy.h"
+#include "RenderPipeline.h"
+
+#include <cassert>
+#include <execution>
+#include <ranges>
 
 namespace hyp
 {
@@ -10,8 +16,9 @@ namespace hyp
     struct UploadData
     {
         SceneProxy* scene;
-        std::vector<MaterialProxy*> materials;
-        std::vector<GeometryProxy*> geometries;
+        // RenderTargets 需要初始化为 Sampled 布局
+        std::vector<TextureProxy*> renderTargets;
+        std::vector<const CameraProxy*> cameras;
         ViewDataManager* viewDataManager;
         std::vector<uint32_t> viewIds;
         std::vector<ViewData> viewDatas;
@@ -34,9 +41,11 @@ namespace hyp
             }
         }
 
+#define USE_PARALLEL_CULL 1
+#if USE_PARALLEL_CULL
         if (sceneViewCount > 4)
         {
-            auto range = std::views::iota(0ull, sceneViewCount);
+            auto range = std::views::iota(size_t(0), sceneViewCount);
             // NOTE: GCC need link Intel TBB
             std::for_each(std::execution::par, range.begin(), range.end(),
                 [&](size_t i)
@@ -46,6 +55,7 @@ namespace hyp
             );
         }
         else
+#endif
         {
             for (size_t i = 0; i < sceneViewPtrs.size(); i++)
             {
@@ -53,9 +63,6 @@ namespace hyp
             }
         }
 
-        // 全程只有 SceneProxy::updateSceneData / MaterialProxy::prepare / GeometryProxy::prepare /
-        // ViewDataManager::updateViewData —— 逐一确认过, 这条调用链底下全部是 copyBuffer/
-        // insertBarriers, 没有任何 dispatch/draw/setBindGroup, 是 rg::TransferPass 的典型用例。
         renderGraph.addTransferPass<UploadData>(
             "Upload"_hs,
             [&](rg::RenderGraph::Builder& builder, UploadData& data)
@@ -63,38 +70,22 @@ namespace hyp
                 builder.markSideEffect();
 
                 data.scene = &scene;
-                for (auto& rd : renderData)
+                scene.update();
+
+                // collect renderTargetProxies and cameraProxies
+                data.renderTargets.reserve(sceneViewGroups.size());
+                data.cameras.reserve(sceneViewGroups.size());
+                for (auto& sceneViewGroup : sceneViewGroups)
                 {
-                    MaterialProxy* prevMaterial = nullptr;
-                    GeometryProxy* prevGeometry = nullptr;
-                    for (auto& sortedDrawItem : *rd.opaqueBucket)
-                    {
-                        auto& drawItem = sortedDrawItem.drawItem;
-                        if (prevMaterial != drawItem.material)
-                        {
-                            data.materials.push_back(drawItem.material);
-                            prevMaterial = drawItem.material;
-                        }
-                        if (prevGeometry != drawItem.geometry)
-                        {
-                            data.geometries.push_back(drawItem.geometry);
-                            prevGeometry = drawItem.geometry;
-                        }
-                    }
-
-                    for (auto& sortedDrawItem : *rd.translucentBucket)
-                    {
-                        auto& drawItem = sortedDrawItem.drawItem;
-                        // Translucent Bucket 不是严格按材质排序的,
-                        // 因此无法利用 prevMaterial 减少 prepare 调用;
-                        // 但是透明材质较少, 这些开销是可以接受的
-                        data.materials.push_back(drawItem.material);
-                        data.geometries.push_back(drawItem.geometry);
-                    }
+                    if (sceneViewGroup.getType() != SceneViewGroup::Type::Camera)
+                        continue;
+                    const CameraProxy* cameraProxy = sceneViewGroup.getViewSource<CameraViewSource>();
+                    if (!cameraProxy)
+                        continue;
+                    if (cameraProxy->getRenderTarget())
+                        data.renderTargets.push_back(cameraProxy->getRenderTarget());
+                    data.cameras.push_back(cameraProxy);
                 }
-
-                std::sort(data.materials.begin(), data.materials.end());
-                std::sort(data.geometries.begin(), data.geometries.end());
 
                 data.viewDataManager = &mRendererContext.getViewDataManager();
                 data.viewIds.reserve(sceneViewCount);
@@ -107,30 +98,32 @@ namespace hyp
             },
             [](rg::ExecuteContext& context, UploadData& data)
             {
-                auto& cmd = context.getCommandList();
-                data.scene->updateSceneData(cmd);
+                auto& cmdList = context.getCommandList();
+                data.scene->prepare(cmdList);
 
-                MaterialProxy* prevMaterial = nullptr;
-                for (MaterialProxy* material : data.materials)
+                for (TextureProxy* renderTarget : data.renderTargets)
                 {
-                    if (prevMaterial != material)
-                    {
-                        material->prepare(cmd);
-                        prevMaterial = material;
-                    }
+                    renderTarget->prepare(cmdList);
                 }
 
-                GeometryProxy* prevGeometry = nullptr;
-                for (GeometryProxy* geometry : data.geometries)
+                for (const CameraProxy* cameraProxy : data.cameras)
                 {
-                    if (prevGeometry != geometry)
-                    {
-                        geometry->prepare(cmd);
-                        prevGeometry = geometry;
-                    }
+                    PostProcessState& postProcess = cameraProxy->getPostProcessState();
+                    postProcess.prepareColorGradingLut(cmdList);
+                    postProcess.prepareAutoExposureData(cmdList);
+                    postProcess.prepareTAAHistory(cmdList);
+                    postProcess.prepareAOHistory(cmdList);
+                    postProcess.prepareSceneDepthHistory(cmdList);
+                    postProcess.prepareDiffuseIndirectHistory(cmdList);
+                    postProcess.prepareShortRangeAOHistory(cmdList);
+                    postProcess.prepareRoughSpecularIndirectHistory(cmdList);
+                    postProcess.prepareScreenProbeLightingHistory(cmdList);
+                    postProcess.prepareReflectionHistory(cmdList);
                 }
 
-                data.viewDataManager->updateViewData(cmd, data.viewIds, data.viewDatas);
+                context.getRenderBackend().getPrepareQueue().flush(cmdList);
+
+                data.viewDataManager->updateViewData(cmdList, data.viewIds, data.viewDatas);
             }
         );
 
@@ -141,12 +134,14 @@ namespace hyp
             {
             case SceneViewGroup::Type::Camera:
             {
+                auto viewSource = sceneViewGroup.getViewSource<CameraViewSource>();
                 DeferredPipeline::addToRenderGraph(
                     renderGraph,
                     mRendererContext,
                     scene,
                     sceneViewGroup.getSceneViews()[0],
-                    renderData[renderDataIndex]
+                    renderData[renderDataIndex],
+                    *viewSource
                 );
                 ++renderDataIndex;
                 break;
@@ -154,14 +149,15 @@ namespace hyp
             case SceneViewGroup::Type::Cascade_Shadow:
             {
                 auto sceneViews = sceneViewGroup.getSceneViews();
-                auto directionalLight = sceneViewGroup.getSource<DirectionalLightProxy>();
+                auto viewSource = sceneViewGroup.getViewSource<CascadeShadowViewSource>();
                 CascadeShadowPipeline::addToRenderGraph(
                     renderGraph,
                     mRendererContext,
                     scene,
                     sceneViews,
                     { &renderData[renderDataIndex], sceneViews.size() },
-                    *directionalLight
+                    *viewSource.directionalLight,
+                    *viewSource.camera
                 );
                 renderDataIndex += sceneViews.size();
                 break;
@@ -238,66 +234,90 @@ namespace hyp
         auto& renderTagRegistry = mRendererContext.getRenderBackend().getRenderTagRegistry();
         uint32_t viewMask = sceneView.getRenderMask();
         const Frustumd& frustum = sceneView.getFrustum();
-        for (MeshRenderProxy* meshRenderProxy : scene.getMeshRenderProxies())
+        auto cullDrawable = [&](const DrawableProxy* drawableProxy)
         {
-            uint32_t instanceIndex = meshRenderProxy->getInstanceIndex();
-            uint32_t layerMask = meshRenderProxy->getLayerMask();
-            if (!meshRenderProxy->isVisible() || !(sceneView.getCullingMask() & layerMask))
-                continue;
+            uint32_t layerMask = drawableProxy->getLayerMask();
+            if (!drawableProxy->isVisible() || !(sceneView.getCullingMask() & layerMask))
+                return;
 
-            if (!frustum.contains(meshRenderProxy->getBoundingSphere()))
-                continue;
+            if (!frustum.contains(drawableProxy->getBoundingSphere()))
+                return;
 
-            if (!frustum.contains(meshRenderProxy->getBoundingBox()))
-                continue;
+            if (!frustum.contains(drawableProxy->getBoundingBox()))
+                return;
 
-            uint32_t meshMask = meshRenderProxy->getRenderMask();
-            int8_t sortOrder = meshRenderProxy->getSortOrder();
+            uint32_t drawableMask = drawableProxy->getRenderMask();
+            int8_t sortOrder = drawableProxy->getSortOrder();
 
-            double3 meshWorldPos = meshRenderProxy->getBoundingSphere().getCenter();
+            double3 meshWorldPos = drawableProxy->getBoundingSphere().getCenter();
             double3 cameraWorldPos = sceneView.getCameraOrigin();
             double3 distanceVec = meshWorldPos - cameraWorldPos;
             float distanceSqr = static_cast<float>(glm::dot(distanceVec, distanceVec));
             // Drawable 内部根据 View 在内部查询合适的 LOD, 并返回对应的 DrawItem
-            for (const auto& drawItem : meshRenderProxy->getDrawItems(sceneView))
+            for (const auto& drawItem : drawableProxy->getDrawItems(sceneView))
             {
                 uint32_t materialMask = drawItem.material->getRenderMask();
-                uint32_t combinedMask = (materialMask & meshMask) & viewMask;
-                if (!combinedMask)
+                uint32_t combinedMask = (materialMask & drawableMask) & viewMask;
+                const bool inPreDepth = combinedMask & renderTagRegistry.getBuiltinDepthOnlyMask();
+                const bool inOpaque = combinedMask & renderTagRegistry.getBuiltinOpaqueMask();
+                const bool inTranslucent = !inOpaque && (combinedMask & renderTagRegistry.getBuiltinTranslucentMask());
+                const bool inShadowDepth = combinedMask & renderTagRegistry.getBuiltinShadowDepthMask();
+                if (!inPreDepth && !inOpaque && !inTranslucent && !inShadowDepth)
                     continue;
+
+                const uint32_t itemIndex = static_cast<uint32_t>(renderData.drawItems->size());
+                renderData.drawItems->push_back(drawItem);
 
                 BlendMode blendMode = drawItem.material->getAttributes().blendMode;
                 bool hasVertexPositionOffset = drawItem.material->getAttributes().hasVertexPositionOffset;
                 uint32_t materialId = drawItem.material->getId();
-                uint32_t vertexLayoutId = drawItem.geometry->getVertexLayout().getId();
-                VertexLayoutType vertexLayoutType = drawItem.geometry->getVertexLayout().getType();
-                uint32_t geometryId = drawItem.geometry->getId();
+                uint32_t vertexLayoutId = drawItem.getVertexLayout().getId();
+                VertexLayoutType vertexLayoutType = drawItem.getVertexLayout().getType();
+                uint32_t geometryId = drawItem.getGeometryId();
                 uint32_t sectionIndex = drawItem.sectionIndex;
 
                 static constexpr float kMaxDistanceSqr = 1000.0f * 1000.0f;
 
-                if (combinedMask & renderTagRegistry.getBuiltinDepthOnlyMask())
+                if (inPreDepth)
                 {
                     uint64_t preDepthSortKey = makeDepthOnlySortKey(blendMode, hasVertexPositionOffset, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
-                    renderData.preDepthBucket->emplace_back(preDepthSortKey, drawItem);
+                    renderData.preDepthBucket->push_back({ preDepthSortKey, itemIndex });
                 }
 
-                if (combinedMask & renderTagRegistry.getBuiltinOpaqueMask())
+                if (inOpaque)
                 {
                     uint64_t opaqueSortKey = makeOpaqueSortKey(materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
-                    renderData.opaqueBucket->emplace_back(opaqueSortKey, drawItem);
+                    renderData.opaqueBucket->push_back({ opaqueSortKey, itemIndex });
                 }
-                else if (combinedMask & renderTagRegistry.getBuiltinTranslucentMask())
+                else if (inTranslucent)
                 {
                     uint64_t translucentSortKey = makeTranslucentSortKey(sortOrder, distanceSqr, materialId, geometryId);
-                    renderData.translucentBucket->emplace_back(translucentSortKey, drawItem);
+                    renderData.translucentBucket->push_back({ translucentSortKey, itemIndex });
                 }
 
-                if (combinedMask & renderTagRegistry.getBuiltinShadowDepthMask())
+                if (inShadowDepth)
                 {
                     uint64_t shadowDepthSortKey = makeDepthOnlySortKey(blendMode, hasVertexPositionOffset, vertexLayoutType, materialId, vertexLayoutId, geometryId, sectionIndex, distanceSqr, kMaxDistanceSqr);
-                    renderData.shadowDepthBucket->emplace_back(shadowDepthSortKey, drawItem);
+                    renderData.shadowDepthBucket->push_back({ shadowDepthSortKey, itemIndex });
                 }
+            }
+        };
+
+        for (MeshRenderProxy* meshRenderProxy : scene.getMeshRenderProxies())
+            cullDrawable(meshRenderProxy);
+
+        for (QuadRenderProxy* quadRenderProxy : scene.getQuadRenderProxies())
+            cullDrawable(quadRenderProxy);
+
+        for (LocalLightProxy* localLightProxy : scene.getLocalLightProxies())
+        {
+            if (!localLightProxy->isVisible())
+                continue;
+
+            Sphered boundingSphere(localLightProxy->getPosition(), static_cast<double>(localLightProxy->getAttenuationRadius()));
+            if (frustum.contains(boundingSphere))
+            {
+                renderData.localLights->push_back(localLightProxy);
             }
         }
 
@@ -312,6 +332,34 @@ namespace hyp
 
         if (!renderData.shadowDepthBucket->empty())
             std::sort(renderData.shadowDepthBucket->begin(), renderData.shadowDepthBucket->end());
+
+        buildDrawBatches(*renderData.drawItems, *renderData.opaqueBucket, *renderData.opaqueBatches);
+        buildDrawBatches(*renderData.drawItems, *renderData.shadowDepthBucket, *renderData.shadowDepthBatches);
+    }
+
+    void SceneRenderer::buildDrawBatches(const DrawItemList& drawItems, const DrawItemBucket& bucket, DrawBatchList& outBatchList)
+    {
+        outBatchList.batches.reserve(bucket.size());
+        outBatchList.instanceIndices.reserve(bucket.size());
+
+        const DrawItem* prevDrawItem = nullptr;
+        for (const DrawItemEntry& entry : bucket)
+        {
+            const DrawItem& drawItem = drawItems[entry.itemIndex];
+
+            bool canInstance = prevDrawItem &&
+                (drawItem.material == prevDrawItem->material) &&
+                drawItem.hasSameGeometry(*prevDrawItem) &&
+                (drawItem.sectionIndex == prevDrawItem->sectionIndex);
+            if (!canInstance)
+            {
+                outBatchList.batches.push_back(DrawBatch{ entry.itemIndex, 0, static_cast<uint32_t>(outBatchList.instanceIndices.size()) });
+                prevDrawItem = &drawItem;
+            }
+
+            outBatchList.batches.back().instanceCount++;
+            outBatchList.instanceIndices.push_back(drawItem.instanceIndex);
+        }
     }
 
 }

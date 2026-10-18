@@ -3,6 +3,7 @@
 #include "../Serialization/Serializer.h"
 #include "../Serialization/BinarySaver.h"
 #include "../Serialization/BinaryLoader.h"
+#include <Core/Common/LogSystem.h>
 #include <cassert>
 #include <cstring>
 #include <unordered_map>
@@ -234,6 +235,18 @@ namespace hyp
             mState.store(AssetState::Loaded, std::memory_order_release);
         }
         mPhysicalPath = assetManager.convertAssetPathToPhysicalPath(mPath);
+        refreshNameFromPath();
+    }
+
+    void Asset::refreshNameFromPath()
+    {
+        // mPath 到 mName 中间会经过 std::string -> std::string_view -> HString 两次隐式
+        // 用户自定义转换, 编译器不允许链式做两次——显式包一层 string_view 断开链路。
+        size_t slash = mPath.find_last_of('/');
+        std::string_view nameView = slash == std::string::npos
+            ? std::string_view(mPath)
+            : std::string_view(mPath).substr(slash + 1);
+        mName = HString(nameView);
     }
 
     void Asset::initializeFromHeader(const AssetHeader& header)
@@ -284,10 +297,24 @@ namespace hyp
         bulkDataSource.physicalPath = mPhysicalPath;
         bulkDataSource.bulkSectionOffset = static_cast<uint64_t>(headerByteLength) + bodyByteLength;
 
-        SerializeContext context(mAssetManager, true, mRootGuid);
+        SerializeContext context(true, mRootGuid);
         context.setImportEntries(mImportEntries);
         context.setExportEntries(mExportEntries);
         context.setBulkDataSource(std::move(bulkDataSource));
+
+        // SerializeContext 不认识 AssetManager, import 表里每一个 guid 该解析成哪个活对象
+        // 都得由我们自己喂进去——这里全是真正的外部 Asset 引用(root 是这个资产自己, import
+        // 表里出现的天然就是别的资产), 直接用 AssetManager 按 guid 找到对应 Asset 再触发
+        // (按需)加载它的根对象即可。引用的资产文件如果已经不在了(被删/被移出这两个目录),
+        // 查不到就注册一个 nullptr, 让这个引用退化成空引用, 不能假设它一定还在、断言崩掉。
+        for (const AssetImportEntry& importEntry : mImportEntries)
+        {
+            Asset* asset = mAssetManager.getAsset(importEntry.guid);
+            if (!asset)
+                LOG_WARN("Asset {}: referenced asset {} no longer exists, reference will be empty", mPath, importEntry.guid.toString());
+            context.registerKnownObject(importEntry.guid, asset ? asset->getOrLoadRootObject().get() : nullptr);
+        }
+
         BinaryLoader loader;
         loader.unpack(bodyData);
         Serializer serializer(loader, context);
@@ -297,9 +324,38 @@ namespace hyp
         mState.store(AssetState::Loaded, std::memory_order_release);
     }
 
+    void Asset::setRootObject(Object* rootObject)
+    {
+        assert(mState.load(std::memory_order_acquire) == AssetState::Unloaded);
+        assert(rootObject->getGuid() == mRootGuid && rootObject->getClass() == mRootClass);
+        mRootObject = rootObject;
+        mState.store(AssetState::Loaded, std::memory_order_release);
+    }
+
+    void Asset::forceUnload()
+    {
+        assert(mState.load(std::memory_order_acquire) == AssetState::Loaded);
+        mRootObject = nullptr;
+        mState.store(AssetState::Unloaded, std::memory_order_release);
+    }
+
     bool Asset::tryUnload()
     {
-        return false;
+        AssetState state = mState.load(std::memory_order_acquire);
+        if (state == AssetState::Unloaded)
+            return true;
+        if (state != AssetState::Loaded)
+            return false; // Loading 中途不能卸
+
+        // 只有 Asset 自己还攥着 mRootObject 时才安全卸载——refcount > 1 说明还有别的地方
+        // (未保存的引用字段、打开的编辑器窗口等)握着这个指针，此时卸载会导致下次 load()
+        // 重新造出同一个 guid 的第二份活对象，破坏对象身份唯一性
+        if (mRootObject->getRefCount() > 1)
+            return false;
+
+        mRootObject = nullptr; // TRef::reset() 触发 decRef()==0 -> destroyObject()
+        mState.store(AssetState::Unloaded, std::memory_order_release);
+        return true;
     }
 
     bool Asset::save()
@@ -309,10 +365,9 @@ namespace hyp
 
         // rootGuid/rootClass 是这个资产的固定身份,save 不应该改写它们,
         // 这里只做一致性检查——断言失败说明别的地方出了 bug
-        assert(mRootObject->getGuid() == mRootGuid);
-        assert(mRootObject->getClass() == mRootClass);
+        assert(mRootObject->getGuid() == mRootGuid && mRootObject->getClass() == mRootClass);
 
-        SerializeContext context(mAssetManager, false, mRootGuid);
+        SerializeContext context(false, mRootGuid);
         BinarySaver saver;
         Serializer serializer(saver, context);
         Object* rootObject = mRootObject;
@@ -320,7 +375,16 @@ namespace hyp
 
         std::vector<uint8_t> bodyData = saver.pack();
         const std::vector<uint8_t>& bulkSection = context.getBulkSection();
+
+        // context 只知道 import 引用的 guid, 不知道、也不该知道它们各自对应哪个 Asset 文件——
+        // 这里才是真正握着 AssetManager 的地方, 按 guid 查出真实路径填进最终写盘的 import 表。
         std::vector<AssetImportEntry> importEntries = context.getImportEntries();
+        for (AssetImportEntry& importEntry : importEntries)
+        {
+            Asset* asset = mAssetManager.getAsset(importEntry.guid);
+            assert(asset);
+            importEntry.assetPath = asset->getPath();
+        }
         std::vector<AssetExportEntry> exportEntries = context.getExportEntries();
 
         AssetHeader header;
@@ -370,6 +434,7 @@ namespace hyp
         mImportEntries = std::move(importEntries);
         mExportEntries = std::move(exportEntries);
 
+        mDirty = false;
         return true;
     }
 }

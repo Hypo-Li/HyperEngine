@@ -35,8 +35,10 @@ namespace hyp
         mRenderBackend.getDeferredTaskQueue().tick();
     }
 
-    void FrameContext::render(double time, float deltaTime)
+    void FrameContext::render(float deltaTime)
     {
+        mTime += deltaTime;
+
         mRenderGraph->compile();
 
         auto& cmdList = *mCommandLists[mFlightIndex];
@@ -78,11 +80,15 @@ namespace hyp
 
         auto& globalBindings = mRenderBackend.getGlobalBindings();
         FrameData frameData;
-        frameData.wrappedTime = static_cast<float>(std::fmod(time, 3600.0));
-        frameData.timeWrapCount = static_cast<uint32_t>(time / 3600.0);
+        frameData.wrappedTime = static_cast<float>(std::fmod(mTime, 3600.0));
+        frameData.timeWrapCount = static_cast<uint32_t>(mTime / 3600.0);
         frameData.deltaTime = deltaTime;
         frameData.frameIndex = mFrameIndex;
+        frameData.prevWrappedTime = mPrevWrappedTime;
+        frameData.prevTimeWrapCount = mPrevTimeWrapCount;
         globalBindings.updateFrameData(cmdList, frameData);
+        mPrevWrappedTime = frameData.wrappedTime;
+        mPrevTimeWrapCount = frameData.timeWrapCount;
 
         rhi::PipelineBindPoint bindPoints[] = {
             rhi::PipelineBindPoint::Graphics,
@@ -153,6 +159,11 @@ namespace hyp
     MaterialShaderManager& FrameContext::getMaterialShaderManager() noexcept
     {
         return mRenderBackend.getMaterialShaderManager();
+    }
+
+    DeferredTaskQueue& FrameContext::getDeferredTaskQueue() noexcept
+    {
+        return mRenderBackend.getDeferredTaskQueue();
     }
 
     bool FrameContext::tryResizeSwapchain(uint2 extent)

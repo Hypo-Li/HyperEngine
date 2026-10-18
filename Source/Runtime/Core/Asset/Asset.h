@@ -129,7 +129,12 @@ namespace hyp
         template <ObjectType T = Object>
         TRef<T> getRootObject() const noexcept
         {
-            return TRef<T>(dynamic_cast<T*>(mRootObject.get()));
+            if (!mRootObject)
+            {
+                return nullptr;
+            }
+            assert(mRootObject->getClass()->isDerivedFrom(T::staticClass()));
+            return TRef<T>(static_cast<T*>(mRootObject.get()));
         }
 
         template <ObjectType T = Object>
@@ -148,10 +153,33 @@ namespace hyp
 
         bool save();
 
+        // 只能在 Unloaded 状态下调用, 且 rootObject 的 guid/class 必须已经和这个 Asset 的一致。
+        void setRootObject(Object* rootObject);
+
+        // 无条件放弃 mRootObject 并转回 Unloaded, 不像 tryUnload() 那样检查 refcount——调用方
+        // 必须保证外部持有的那份引用之后不会再触发这个 Asset 的 load()/getOrLoadRootObject(),
+        // 否则会用同一个 guid 造出第二个活对象。
+        void forceUnload();
+
+        // 内存状态是否已经和磁盘不一致, 由调用方显式 setDirty(true), save() 成功时自动清掉
+        bool isDirty() const noexcept
+        {
+            return mDirty;
+        }
+
+        void setDirty(bool dirty) noexcept
+        {
+            mDirty = dirty;
+        }
+
     private:
         Asset(AssetManager& assetManager, const std::string& path, Object* rootObject);
 
         void initializeFromHeader(const AssetHeader& header);
+
+        // mPath 的最后一段(去掉目录前缀)——AssetManager 每次改写 mPath(移动/重命名)之后
+        // 都要重新调用这个保持同步, 不能只在构造时算一次。
+        void refreshNameFromPath();
 
     private:
         AssetManager& mAssetManager;
@@ -165,5 +193,6 @@ namespace hyp
         TRef<Object> mRootObject;
 
         std::atomic<AssetState> mState = AssetState::Unloaded;
+        bool mDirty = false;
     };
 }

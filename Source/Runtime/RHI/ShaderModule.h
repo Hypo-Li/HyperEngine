@@ -3,6 +3,7 @@
 #include <Core/Common/HString.h>
 #include <Core/Common/Refable.h>
 
+#include <cstdint>
 #include <vector>
 #include <span>
 
@@ -26,6 +27,15 @@ namespace hyp::rhi
         Spirv,
         Dxil,
         Wgsl,
+    };
+
+    struct ShaderCompileTarget
+    {
+        ShaderCodeFormat codeFormat = ShaderCodeFormat::Spirv;
+        uint32_t majorVersion = 1;
+        uint32_t minorVersion = 0;
+
+        bool operator==(const ShaderCompileTarget&) const noexcept = default;
     };
 
     class Device;

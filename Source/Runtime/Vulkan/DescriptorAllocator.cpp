@@ -38,6 +38,7 @@ namespace hyp::vk
         {
             VkDescriptorSet set = poolGroup.freeSets.back();
             poolGroup.freeSets.pop_back();
+            mAllocatedSets.push_back(set);
             return set;
         }
 

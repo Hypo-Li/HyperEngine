@@ -4,6 +4,7 @@
 #include "../Common/Guid.h"
 #include "../Common/LogSystem.h"
 #include "ObjectDefines.h"
+#include "../Reflection/Reflection.h"
 
 #define REFLECT_CLASS(ClassName) \
     friend class Reflection; \
@@ -21,6 +22,12 @@ namespace hyp
 {
     class Object;
 
+    // Guid 自己的反射注册声明放在这里, 不放 Guid.h(会导致 Guid.h 反过来 include Reflection.h,
+    // 形成循环), 也不放 Reflection.h(反射系统自己的通用文件不该认识 Guid 这种具体类型)。
+    // Object.h 本来就有 Guid 类型的成员、也同时 include 了 Guid.h 和 Reflection.h, 是两者
+    // 真正打交道的地方。
+    template <> Type* Reflection::createType<Guid>();
+
     template <ObjectType T>
     TRef<T> createObject(Object* owner, ObjectFlags flags);
 
@@ -34,6 +41,11 @@ namespace hyp
 
     void destroyObject(Object* object) noexcept;
 
+    // Destructs and reconstructs an existing Object at the same address, preserving its
+    // guid/owner/handle and reference count. Only for Prefab instance sync where external
+    // raw pointers to this exact object must keep working. Not for general use.
+    void rebuildObject(Object* object) noexcept;
+
     class Object : public Refable
     {
         template <ObjectType T>
@@ -44,6 +56,8 @@ namespace hyp
         friend TRef<Object> restoreObject(Class* clazz, Object* owner, Guid guid, ObjectFlags flags);
 
         friend void destroyObject(Object* object) noexcept;
+
+        friend void rebuildObject(Object* object) noexcept;
 
         REFLECT_CLASS(Object)
     public:
@@ -108,7 +122,7 @@ namespace hyp
     };
 
     template <ObjectType T>
-    TRef<T> createObject(Object* owner, ObjectFlags flags = ObjectFlags::None)
+    TRef<T> createObject(Object* owner, ObjectFlags flags)
     {
         if constexpr (std::is_abstract_v<T>)
         {
@@ -133,6 +147,8 @@ namespace hyp
             Object::sContextStack.emplace_back(context);
             std::construct_at(object);
             Object::sContextStack.pop_back();
+            if (!enumHasAllFlags(flags, ObjectFlags::Default_Object))
+                T::staticClass()->registerGuid(context.guid, object);
             return object;
         }
     }

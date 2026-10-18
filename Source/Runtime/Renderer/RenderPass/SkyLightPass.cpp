@@ -1,5 +1,6 @@
 #include "SkyLightPass.h"
 #include "RenderPassUtils.h"
+#include "SkyBackgroundPass.h"
 
 #include <SkyCubemap.generated.h>
 #include <CubemapMip.generated.h>
@@ -14,7 +15,7 @@ namespace hyp
 {
     // 球谐投影最多使用 32x32；更小的 Cubemap 直接使用它最精细的 mip。
     static constexpr uint32_t kSkyLightSHFaceSize = 32;
-    static constexpr uint32_t kMaxSkyLightResolution = 4096;
+    static constexpr uint32_t kMaxSkyLightResolution = 512;
 
     struct SkyLightReadbackMipLayout
     {
@@ -65,24 +66,39 @@ namespace hyp
         RendererContext& rendererContext,
         const SceneProxy& scene,
         SkyLightProxy& skyLight,
-        const AtmosphereProxy* atmosphere
+        const AtmosphereProxy* atmosphere,
+        const SkyBackgroundProxy* skyBackground
     )
     {
-        if (!skyLight.hasCaptureRequest())
+        bool isOneShot = skyLight.hasCaptureRequest();
+        bool isRealtime = !isOneShot && skyLight.isCaptureSky() && skyLight.isRealTimeCapture();
+        if (!isOneShot && !isRealtime)
             return;
 
-        rhi::TextureView* environmentMapView = nullptr;
-        if (skyLight.isCaptureScene())
+        if (isRealtime)
         {
-            if (!atmosphere)
+            // 一次性请求靠 hasCaptureRequest()/consumeCaptureRequest() 天然只被第一个 view 消费一次;
+            // 实时模式没有这种"消费"语义, 而这个函数本身按 view 循环调用(RenderPipeline.cpp),
+            // sky capture 不分 view, 一帧只需要跑一次——参照 AtmosphereLutPass::addTransmittanceLutPass
+            // 的做法, 查 blackboard 这一帧是否已经有别的 view 跑过, 跑过了直接跳过
+            auto& blackboard = renderGraph.getBlackboard();
+            if (blackboard.get<rg::TextureHandle>("SkyCubemap"_hs(scene.getSceneId())).isValid())
                 return;
         }
-        else
-        {
-            if (!skyLight.getEnvironmentMap())
-                return;
 
-            environmentMapView = &skyLight.getEnvironmentMap()->getTextureView();
+        // isCaptureSky() 为真但场景既没有大气也没有天空背景(比如大气刚被删掉)不能直接 return——
+        // 那样已经算出来的 SH/prefilter 会永远停在上一次有真实大气时的旧值上, 表现就是"删了大气,
+        // 天光看起来还是有大气时的样子"。这种情况和"isCaptureSky() 为假且没设环境贴图"一样, 退化成
+        // 黑色 cube 走环境贴图这条既有路径, 让 SH gather/prefilter 正常跑一遍算出全零/全黑的结果,
+        // 而不是什么都不算
+        bool captureFromScene = skyLight.isCaptureSky() && (atmosphere != nullptr || skyBackground != nullptr);
+        rhi::TextureView* environmentMapView = nullptr;
+        if (!captureFromScene)
+        {
+            TextureProxy* explicitEnvironmentMap = skyLight.isCaptureSky() ? nullptr : skyLight.getEnvironmentMap();
+            environmentMapView = explicitEnvironmentMap
+                ? &explicitEnvironmentMap->getTextureView()
+                : &rendererContext.getRenderBackend().getDefaultResources().getBlackTextureCubeView();
             const rhi::TextureDesc& environmentMapDesc = environmentMapView->getTexture().getDesc();
             const uint32_t environmentMapResolution = environmentMapDesc.extent.x;
             const uint32_t environmentMapMipCount = environmentMapDesc.mipCount;
@@ -98,12 +114,26 @@ namespace hyp
                 return;
         }
 
-        auto captureRequest = skyLight.consumeCaptureRequest();
-        assert(captureRequest.has_value() && captureRequest->specularPrefilter);
-        if (!captureRequest || !captureRequest->specularPrefilter)
-            return;
+        // 一次性请求的目标纹理可能是一份刚建好、待 swap 上位的新纹理(见 SkyLight::requestCapture());
+        // 实时模式没有这种 swap 语义, 每帧直接原地覆盖当前这份常驻纹理
+        std::optional<SkyLightProxy::CaptureRequest> captureRequest;
+        TextureProxy* specularPrefilterTarget = nullptr;
+        if (isOneShot)
+        {
+            captureRequest = skyLight.consumeCaptureRequest();
+            assert(captureRequest.has_value() && captureRequest->specularPrefilter);
+            if (!captureRequest || !captureRequest->specularPrefilter)
+                return;
+            specularPrefilterTarget = captureRequest->specularPrefilter;
+        }
+        else
+        {
+            specularPrefilterTarget = skyLight.getSpecularPrefilter();
+            if (!specularPrefilterTarget)
+                return;
+        }
 
-        const rhi::TextureDesc& prefilterDesc = captureRequest->specularPrefilter->getTexture().getDesc();
+        const rhi::TextureDesc& prefilterDesc = specularPrefilterTarget->getTexture().getDesc();
         const uint32_t prefilterResolution = prefilterDesc.extent.x;
         const uint32_t prefilterMipCount = prefilterDesc.mipCount;
         const bool validPrefilter = prefilterDesc.type == rhi::TextureType::Texture_Cube
@@ -121,14 +151,15 @@ namespace hyp
         uint32_t sourceMipCount = prefilterMipCount;
         rhi::TextureFormat sourceFormat = rhi::TextureFormat::RGBA16_SFLOAT;
 
-        if (skyLight.isCaptureScene())
+        if (captureFromScene)
         {
             addCaptureSkyPass(
                 renderGraph,
                 rendererContext,
                 scene,
                 skyLight,
-                *atmosphere,
+                atmosphere,
+                skyBackground,
                 sourceResolution,
                 sourceMipCount
             );
@@ -155,12 +186,12 @@ namespace hyp
             renderGraph.getBlackboard().put("SkyCubemap"_hs(scene.getSceneId()), skyCubemap);
         }
 
-        // PackedSHBuffer 常驻在 SkyLightProxy 上(不是 render graph 自己创建的瞬时资源), import
+        // DataBuffer 常驻在 SkyLightProxy 上(不是 render graph 自己创建的瞬时资源), import
         // 进来当 Reduce pass 的写入目标——这样非 capture 的普通帧, SkyLighting pass 才能直接从
         // proxy 读到上一次 capture 算出来的结果, 不需要 blackboard 里那些只在 capture 帧才存在的条目
         auto packedSHCoeff = renderGraph.importBuffer(
-            "SkyLightPackedSHCoeff"_hs(scene.getSceneId()),
-            &skyLight.getPackedSHBuffer()
+            "SkyLightData"_hs(scene.getSceneId()),
+            &skyLight.getDataBuffer()
         );
 
         addSkyLightSHCoeffPass(
@@ -180,22 +211,40 @@ namespace hyp
             prefilterResolution,
             prefilterMipCount
         );
-        addReadbackPass(
-            renderGraph,
-            rendererContext,
-            scene,
-            std::move(*captureRequest),
-            prefilterResolution,
-            prefilterMipCount,
-            packedSHCoeff
-        );
+
+        if (isOneShot)
+        {
+            addReadbackPass(
+                renderGraph,
+                rendererContext,
+                scene,
+                std::move(*captureRequest),
+                prefilterResolution,
+                prefilterMipCount,
+                packedSHCoeff
+            );
+        }
+        else
+        {
+            addResolvePrefilterPass(
+                renderGraph,
+                rendererContext,
+                scene,
+                specularPrefilterTarget,
+                prefilterResolution,
+                prefilterMipCount
+            );
+        }
     }
+
+    static_assert(sizeof(WorldCoord) == 32);
 
     struct CaptureSkyData
     {
         uint32_t sceneId;
         const AtmosphereProxy* atmosphere;
         WorldCoord captureOrigin;
+        uint32_t hasBackground;
         uint32_t dispatchGroupCount;
         rg::TextureHandle transmittanceLut;
         rg::TextureHandle multiScatteringLut;
@@ -215,10 +264,36 @@ namespace hyp
         RendererContext& rendererContext,
         const SceneProxy& scene,
         const SkyLightProxy& skyLight,
-        const AtmosphereProxy& atmosphere,
+        const AtmosphereProxy* atmosphere,
+        const SkyBackgroundProxy* skyBackground,
         uint32_t captureResolution,
         uint32_t captureMipCount)
     {
+        const bool hasBackground = skyBackground != nullptr;
+
+        rhi::TextureDesc skyCubemapDesc;
+        skyCubemapDesc.type = rhi::TextureType::Texture_Cube;
+        skyCubemapDesc.format = rhi::TextureFormat::RGBA16_SFLOAT;
+        skyCubemapDesc.extent = { captureResolution, captureResolution, 1 };
+        skyCubemapDesc.mipCount = captureMipCount;
+        skyCubemapDesc.layerCount = 6;
+        skyCubemapDesc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage | rhi::TextureUsage::Color_Attachment;
+
+        if (hasBackground)
+        {
+            SkyBackgroundPass::addCaptureToRenderGraph(
+                renderGraph,
+                rendererContext,
+                scene,
+                *skyBackground,
+                "SkyCubemap"_hs(scene.getSceneId()),
+                skyCubemapDesc
+            );
+        }
+
+        if (!atmosphere)
+            return;
+
         renderGraph.addComputePass<CaptureSkyData>(
             "CaptureSky"_hs,
             [&](rg::RenderGraph::Builder& builder, CaptureSkyData& data)
@@ -226,8 +301,9 @@ namespace hyp
                 builder.markSideEffect();
 
                 data.sceneId = scene.getSceneId();
-                data.atmosphere = &atmosphere;
+                data.atmosphere = atmosphere;
                 data.captureOrigin.fromDouble3(skyLight.getCapturePosition());
+                data.hasBackground = hasBackground ? 1u : 0u;
                 data.dispatchGroupCount = std::max((captureResolution + 7u) / 8u, 1u);
 
                 auto& blackboard = builder.getBlackboard();
@@ -237,14 +313,9 @@ namespace hyp
                 auto multiScatteringLut = blackboard.get<rg::TextureHandle>("MultiScatteringLut"_hs(data.sceneId));
                 data.multiScatteringLut = builder.sample(multiScatteringLut);
 
-                rhi::TextureDesc skyCubemapDesc;
-                skyCubemapDesc.type = rhi::TextureType::Texture_Cube;
-                skyCubemapDesc.format = rhi::TextureFormat::RGBA16_SFLOAT;
-                skyCubemapDesc.extent = { captureResolution, captureResolution, 1 };
-                skyCubemapDesc.mipCount = captureMipCount;
-                skyCubemapDesc.layerCount = 6;
-                skyCubemapDesc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::Storage;
-                auto skyCubemap = builder.createTexture("SkyCubemap"_hs(data.sceneId), skyCubemapDesc);
+                auto skyCubemap = hasBackground
+                    ? blackboard.get<rg::TextureHandle>("SkyCubemap"_hs(data.sceneId))
+                    : builder.createTexture("SkyCubemap"_hs(data.sceneId), skyCubemapDesc);
 
                 rhi::TextureViewDesc skyCubemapMip0Desc;
                 skyCubemapMip0Desc.type = rhi::TextureViewType::Texture_View_2D_Array;
@@ -259,7 +330,10 @@ namespace hyp
                     skyCubemap,
                     skyCubemapMip0Desc
                 );
-                data.skyCubemapMip0 = builder.storage(skyCubemapMip0, rg::AccessType::Write_Only);
+                data.skyCubemapMip0 = builder.storage(
+                    skyCubemapMip0,
+                    hasBackground ? rg::AccessType::Read_Write : rg::AccessType::Write_Only
+                );
 
                 skyCubemap = builder.syncTextures(data.skyCubemapMip0, skyCubemap);
                 blackboard.put("SkyCubemap"_hs(data.sceneId), skyCubemap);
@@ -323,16 +397,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.setImmediateData(
+                cmdList.setImmediateData(
                     &storage.pipeline->getLayout(),
                     0,
                     std::span<const uint8_t>(
@@ -340,7 +414,15 @@ namespace hyp
                         sizeof(data.captureOrigin)
                     )
                 );
-                cmd.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
+                cmdList.setImmediateData(
+                    &storage.pipeline->getLayout(),
+                    sizeof(data.captureOrigin),
+                    std::span<const uint8_t>(
+                        reinterpret_cast<const uint8_t*>(&data.hasBackground),
+                        sizeof(data.hasBackground)
+                    )
+                );
+                cmdList.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
             }
         );
     }
@@ -525,16 +607,16 @@ namespace hyp
                         );
                     }
 
-                    auto& cmd = context.getCommandList();
-                    cmd.bindPipeline(storage.pipeline.get());
-                    cmd.setBindGroup(
+                    auto& cmdList = context.getCommandList();
+                    cmdList.bindPipeline(storage.pipeline.get());
+                    cmdList.setBindGroup(
                         2,
                         rhi::PipelineBindPoint::Compute,
                         &storage.pipeline->getLayout(),
                         bindGroupCache.getBindGroup(),
                         {}
                     );
-                    cmd.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
+                    cmdList.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
                 }
             );
         }
@@ -687,9 +769,9 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
@@ -702,12 +784,12 @@ namespace hyp
                     uint32_t groupsPerRow;
                 };
                 GatherImmediateData immediateData{ data.faceSize, data.groupsPerRow };
-                cmd.setImmediateData(
+                cmdList.setImmediateData(
                     &storage.pipeline->getLayout(),
                     0,
                     std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&immediateData), sizeof(immediateData))
                 );
-                cmd.dispatch(data.groupsPerRow, data.groupsPerRow, 6);
+                cmdList.dispatch(data.groupsPerRow, data.groupsPerRow, 6);
             }
         );
 
@@ -780,16 +862,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.setImmediateData(
+                cmdList.setImmediateData(
                     &storage.pipeline->getLayout(),
                     0,
                     std::span<const uint8_t>(
@@ -797,7 +879,7 @@ namespace hyp
                         sizeof(data.groupCount)
                     )
                 );
-                cmd.dispatch(1, 1, 1);
+                cmdList.dispatch(1, 1, 1);
             }
         );
     }
@@ -982,9 +1064,9 @@ namespace hyp
                         );
                     }
 
-                    auto& cmd = context.getCommandList();
-                    cmd.bindPipeline(storage.pipeline.get());
-                    cmd.setBindGroup(
+                    auto& cmdList = context.getCommandList();
+                    cmdList.bindPipeline(storage.pipeline.get());
+                    cmdList.setBindGroup(
                         2,
                         rhi::PipelineBindPoint::Compute,
                         &storage.pipeline->getLayout(),
@@ -992,7 +1074,7 @@ namespace hyp
                         {}
                     );
 
-                    cmd.setImmediateData(
+                    cmdList.setImmediateData(
                         &storage.pipeline->getLayout(),
                         0,
                         std::span<const uint8_t>(
@@ -1001,7 +1083,7 @@ namespace hyp
                         )
                     );
 
-                    cmd.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
+                    cmdList.dispatch(data.dispatchGroupCount, data.dispatchGroupCount, 6);
                 }
             );
         }
@@ -1091,7 +1173,7 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, SkyLightReadbackData& data)
             {
-                rhi::CommandList& cmd = context.getCommandList();
+                rhi::CommandList& cmdList = context.getCommandList();
                 rhi::Buffer* readback = context.getBuffer(data.readback);
                 const SkyLightReadbackLayout& readbackLayout = data.readbackLayout;
                 const uint32_t prefilterMipCount = static_cast<uint32_t>(readbackLayout.mips.size());
@@ -1100,7 +1182,7 @@ namespace hyp
                 shCopy.srcOffset = 0;
                 shCopy.dstOffset = 0;
                 shCopy.size = 7 * sizeof(float4);
-                cmd.copyBuffer(context.getBuffer(data.packedSHCoeff), readback, { &shCopy, 1 });
+                cmdList.copyBuffer(context.getBuffer(data.packedSHCoeff), readback, { &shCopy, 1 });
 
                 std::vector<rhi::TextureCopyRegion> resolveRegions(prefilterMipCount);
                 std::vector<rhi::BufferTextureCopyRegion> readbackRegions(prefilterMipCount);
@@ -1125,12 +1207,12 @@ namespace hyp
 
                 rhi::TextureView* prefilterView = context.getTexture(data.specularPrefilter);
                 rhi::TextureView* resolvedPrefilterView = context.getTexture(data.resolvedSpecularPrefilter);
-                cmd.copyTexture(
+                cmdList.copyTexture(
                     &prefilterView->getTexture(),
                     &resolvedPrefilterView->getTexture(),
                     resolveRegions
                 );
-                cmd.copyTextureToBuffer(&prefilterView->getTexture(), readback, readbackRegions);
+                cmdList.copyTextureToBuffer(&prefilterView->getTexture(), readback, readbackRegions);
 
                 auto promise = std::move(data.captureRequest.promise);
 
@@ -1169,6 +1251,71 @@ namespace hyp
                     },
                     kMaxFramesInFlight
                 );
+            }
+        );
+    }
+
+    struct SkyLightResolvePrefilterData
+    {
+        uint32_t sceneId;
+        uint32_t prefilterResolution;
+        uint32_t prefilterMipCount;
+        rg::TextureHandle specularPrefilter;
+        rg::TextureHandle resolvedSpecularPrefilter;
+    };
+
+    void SkyLightPass::addResolvePrefilterPass(
+        rg::RenderGraph& renderGraph,
+        RendererContext& rendererContext,
+        const SceneProxy& scene,
+        TextureProxy* specularPrefilterTarget,
+        uint32_t prefilterResolution,
+        uint32_t prefilterMipCount)
+    {
+        renderGraph.addTransferPass<SkyLightResolvePrefilterData>(
+            "SkyLightResolvePrefilter"_hs,
+            [&scene, specularPrefilterTarget, prefilterResolution, prefilterMipCount](
+                rg::RenderGraph::Builder& builder,
+                SkyLightResolvePrefilterData& data)
+            {
+                builder.markSideEffect();
+                data.sceneId = scene.getSceneId();
+                data.prefilterResolution = prefilterResolution;
+                data.prefilterMipCount = prefilterMipCount;
+
+                auto& blackboard = builder.getBlackboard();
+                auto specularPrefilter = blackboard.get<rg::TextureHandle>("SkyLightPrefilter"_hs(data.sceneId));
+                data.specularPrefilter = builder.transfer(specularPrefilter, rg::AccessType::Read_Only);
+
+                auto resolvedSpecularPrefilter = builder.importTexture(
+                    "ResolvedSkyLightPrefilter"_hs(data.sceneId),
+                    &specularPrefilterTarget->getTextureView(),
+                    rhi::ResourceState::Shader_Sampled
+                );
+                data.resolvedSpecularPrefilter = builder.transfer(
+                    resolvedSpecularPrefilter,
+                    rg::AccessType::Write_Only
+                );
+            },
+            [](rg::ExecuteContext& context, SkyLightResolvePrefilterData& data)
+            {
+                rhi::CommandList& cmdList = context.getCommandList();
+
+                std::vector<rhi::TextureCopyRegion> resolveRegions(data.prefilterMipCount);
+                for (uint32_t mip = 0; mip < data.prefilterMipCount; ++mip)
+                {
+                    uint32_t mipSize = std::max(data.prefilterResolution >> mip, 1u);
+                    auto& resolveRegion = resolveRegions[mip];
+                    resolveRegion.srcSlice = { rhi::TextureAspect::Color, mip, 0, 6 };
+                    resolveRegion.srcOffset = { 0, 0, 0 };
+                    resolveRegion.dstSlice = { rhi::TextureAspect::Color, mip, 0, 6 };
+                    resolveRegion.dstOffset = { 0, 0, 0 };
+                    resolveRegion.extent = { mipSize, mipSize, 1 };
+                }
+
+                rhi::TextureView* prefilterView = context.getTexture(data.specularPrefilter);
+                rhi::TextureView* resolvedPrefilterView = context.getTexture(data.resolvedSpecularPrefilter);
+                cmdList.copyTexture(&prefilterView->getTexture(), &resolvedPrefilterView->getTexture(), resolveRegions);
             }
         );
     }

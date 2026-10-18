@@ -1,13 +1,9 @@
 #pragma once
-#include <memory>
-#ifndef HYP_SINGLE_THREADED_RENDERING
-#include <semaphore>
-#endif
-
 #include "RenderCommandQueue.h"
 #include "GlobalBindings.h"
 #include "BindlessRegistry.h"
 #include "DeferredTaskQueue.h"
+#include "PrepareQueue.h"
 #include "StagingAllocator.h"
 #include "RenderTagRegistry.h"
 #include "Shader.h"
@@ -15,22 +11,36 @@
 #include "BindGroupLayoutCache.h"
 #include "SamplerCache.h"
 #include "DefaultResources.h"
+#include "DistanceFieldBrickAtlas.h"
+#include "RangeTable.h"
+#include "TextureClearer.h"
 
 #include <Platform/Window.h>
 #include <RHI/Context.h>
 
+#include <filesystem>
+#include <memory>
+#ifndef HYP_SINGLE_THREADED_RENDERING
+#include <semaphore>
+#include <thread>
+#endif
+
 namespace hyp
 {
+    using MeshShapeDataTable = TRangeTable<uint32_t>;
+
     class RenderBackend
     {
     public:
-        RenderBackend(const Window& window);
+        RenderBackend(const Window& window, rhi::Backend rhiBackend, const std::filesystem::path& shaderDir, const std::filesystem::path& resourceDir);
 
         ~RenderBackend();
 
         void wakeUpRenderThread() noexcept;
 
-        void finishRenderThread();
+        void shutdown();
+
+        void drainPendingWork();
 
         rhi::Backend getRHIBackend() const noexcept
         {
@@ -82,6 +92,11 @@ namespace hyp
             return mDeferredTaskQueue;
         }
 
+        PrepareQueue& getPrepareQueue() noexcept
+        {
+            return mPrepareQueue;
+        }
+
         BindlessRegistry& getBindlessRegistry() noexcept
         {
             return mBindlessRegistry;
@@ -95,6 +110,27 @@ namespace hyp
         StagingAllocator& getStagingAllocator() noexcept
         {
             return mStagingAllocator;
+        }
+
+        TextureClearer& getTextureClearer() noexcept
+        {
+            return mTextureClearer;
+        }
+
+        // 稀疏体素数据(目前只有 Mesh 的距离场 brick)跨网格共享的物理存储池——见
+        // DistanceFieldBrickAtlas 自己的注释。挂在 RenderBackend 而不是 Renderer 那层的
+        // RendererContext 上, 是因为 MeshShapeProxy 这个消费方本身就在 RenderBase 里,
+        // RenderBase 不能反过来依赖构建在它之上的 Renderer 模块
+        DistanceFieldBrickAtlas& getMeshDistanceFieldBrickAtlas() noexcept
+        {
+            return mMeshDistanceFieldBrickAtlas;
+        }
+
+        // 跨网格共享的 Mesh 资产级别数据表(SDF metadata + 间接索引表 + Card 数据)——见
+        // 每个网格在里面占一段连续区间, 字段布局见 MeshShapeProxy.h。归属层级跟 mMeshDistanceFieldBrickAtlas 同一个理由
+        MeshShapeDataTable& getMeshShapeDataTable() noexcept
+        {
+            return mMeshShapeDataTable;
         }
 
         RenderTagRegistry& getRenderTagRegistry() noexcept
@@ -133,14 +169,19 @@ namespace hyp
         SamplerCache mSamplerCache;
         DefaultResources mDefaultResources;
         PipelineCache mPipelineCache;
-        ProxyManager mProxyManager;
+        PrepareQueue mPrepareQueue;
         DeferredTaskQueue mDeferredTaskQueue;
+        ProxyManager mProxyManager;
         BindlessRegistry mBindlessRegistry;
         GlobalBindings mGlobalBindings;
+        TextureClearer mTextureClearer;
         StagingAllocator mStagingAllocator;
+        DistanceFieldBrickAtlas mMeshDistanceFieldBrickAtlas;
+        MeshShapeDataTable mMeshShapeDataTable;
         RenderTagRegistry mRenderTagRegistry;
         MaterialShaderManager mMaterialShaderManager;
 
         FrameContext mFrameContext;
+        bool mShutdown = false;
     };
 }

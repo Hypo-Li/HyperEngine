@@ -24,11 +24,7 @@ namespace hyp
 
         TRef<rhi::Sampler> getLinearClampMip();
 
-        TRef<rhi::Sampler> getPointClampMip();
-
         TRef<rhi::Sampler> getLinearRepeatMip();
-
-        TRef<rhi::Sampler> getPointRepeatMip();
 
     private:
         struct Key
@@ -51,8 +47,6 @@ namespace hyp
         TRef<rhi::Sampler> mLinearRepeatNoMip;
         TRef<rhi::Sampler> mPointRepeatNoMip;
         TRef<rhi::Sampler> mLinearClampMip;
-        TRef<rhi::Sampler> mPointClampMip;
         TRef<rhi::Sampler> mLinearRepeatMip;
-        TRef<rhi::Sampler> mPointRepeatMip;
     };
 }

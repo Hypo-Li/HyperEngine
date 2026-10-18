@@ -1,5 +1,7 @@
 #include <cassert>
 #include <charconv>
+#include <cstring>
+#include <mutex>
 
 #include "HString.h"
 #include "Hash.h"
@@ -248,7 +250,12 @@ namespace hyp
             uint32_t val = 0;
             auto [ptr, ec] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), val);
 
-            if (ec == std::errc())
+            // 要求后缀整段都是数字，避免把 "_3DTile" / "_3D" / "_4K" 误判为编号后缀；
+            // 同时拒绝前导零(如 "_01" 与 "_1")，避免不同名字归一化后互相碰撞。
+            const bool fullyNumeric = ec == std::errc() && ptr == suffix.data() + suffix.size();
+            const bool noLeadingZero = suffix.size() == 1 || suffix[0] != '0';
+
+            if (fullyNumeric && noLeadingZero)
             {
                 // 成功解析数字：BaseName 是下划线前的部分
                 mId = getPool().findStringId(string.substr(0, lastUnderscore));

@@ -1,14 +1,16 @@
 #include "MaterialInstance.h"
 
+#include "../Config.h"
 #include "../Context.h"
-#include <RenderBase/RenderSystem.h>
+#include <RenderBase/RenderFrontend.h>
 #include <RenderBase/MaterialProxy.h>
 
 namespace hyp
 {
     REGISTER_CLASS(MaterialInstance)
 
-    MaterialInstance::MaterialInstance()
+    MaterialInstance::MaterialInstance() :
+        mResourceObserver(*this)
     {
     }
 
@@ -25,6 +27,7 @@ namespace hyp
     {
         if (mTemplate)
             mTemplate->registerInstance(this);
+        syncResourceObserver();
     }
 
     void MaterialInstance::setTemplate(MaterialTemplate* newTemplate)
@@ -43,6 +46,7 @@ namespace hyp
             mTemplate->registerInstance(this);
             reconcileParameterOverrides();
         }
+        syncResourceObserver();
     }
 
     bool MaterialInstance::setParameterOverriddenValue(HString name, const MaterialParameterValue& value)
@@ -66,6 +70,7 @@ namespace hyp
             parameterOverride.enabled = true;
             parameterOverride.value = value;
         }
+        syncResourceObserver();
 
         if (getMaterialProxyHandle().isValid())
         {
@@ -90,7 +95,17 @@ namespace hyp
         {
             it->second.enabled = enabled;
         }
-        updateParameter(name);
+
+        if (getMaterialProxyHandle().isValid())
+        {
+            updateParameter(name);
+        }
+    }
+
+    const MaterialInstance::ParameterOverride* MaterialInstance::getParameterOverride(HString name) const
+    {
+        auto it = mParameterOverrides.find(name);
+        return it != mParameterOverrides.end() ? &it->second : nullptr;
     }
 
     std::optional<MaterialParameterValue> MaterialInstance::getParameterEffectiveValue(uint32_t index) const
@@ -169,6 +184,7 @@ namespace hyp
         if (enumHasAnyFlags(dirtyFlags, MaterialTemplate::DirtyFlags::Pipeline))
         {
             reconcileParameterOverrides();
+            syncResourceObserver();
             unrefMaterialShader();
             updateMaterialProxy();
         }
@@ -176,6 +192,11 @@ namespace hyp
         {
             updateAllParameters();
         }
+    }
+
+    void MaterialInstance::onParameterResourceChanged()
+    {
+        updateAllParameters();
     }
 
     std::vector<MaterialParameter> MaterialInstance::makeEffectiveParameters()
@@ -190,6 +211,11 @@ namespace hyp
                 materialInstanceParams[index].value = override.value;
             }
         }
+
+        // 私有纹理没有 override 概念, 原样从模板带过来——顺序必须跟
+        // MaterialTemplate::makeParameterMetadata() 一致, shader 里的绑定槽位下标才对得上。
+        auto privateTextures = mTemplate->getPrivateTextures();
+        materialInstanceParams.insert(materialInstanceParams.end(), privateTextures.begin(), privateTextures.end());
         return materialInstanceParams;
     }
 
@@ -204,8 +230,10 @@ namespace hyp
         attributes.doubleSided = getEffectiveDoubleSided();
         attributes.tangentSpaceNormal = mTemplate->isTangentSpaceNormal();
         attributes.hasVertexPositionOffset = mTemplate->hasVertexPositionOffset();
+        attributes.isTimeDependent = mTemplate->isTimeDependent();
 
         mShaderHandle = mTemplate->getOrCreateMaterialShader();
+        syncResourceObserver();
 
         auto effectiveParameters = makeEffectiveParameters();
         std::vector<MaterialProxy::Parameter> proxyParams;
@@ -259,43 +287,28 @@ namespace hyp
 
     void MaterialInstance::updateParameter(HString parameterName)
     {
+        if (!getMaterialProxyHandle().isValid())
+            return;
+
         auto effectiveValueOpt = getParameterEffectiveValue(parameterName);
         assert(effectiveValueOpt.has_value());
-        auto& effectiveValue = *effectiveValueOpt;
-        MaterialProxy::Parameter proxyParam;
-        std::pair<TextureProxyHandle, SamplerProxyHandle> textureBinding;
-        proxyParam.type = effectiveValue.getType();
-        proxyParam.name = parameterName;
+        std::vector<MaterialParameter> parameters(1);
+        parameters[0].name = parameterName;
+        parameters[0].value = *effectiveValueOpt;
 
-        auto& sampleStateManager = Context::get().getSampleStateManager();
-        effectiveValue.visit(
-            [&proxyParam, &textureBinding, &sampleStateManager](auto&& value)
-            {
-                using ValueType = std::decay_t<decltype(value)>;
-                if constexpr (is_sampled_texture_v<ValueType>)
-                {
-                    textureBinding.first = value.texture->getOrCreateTextureProxy();
-                    SampleState sampleState = value.sampleStateOverride ?
-                        *value.sampleStateOverride : value.texture->getSampleState();
-                    textureBinding.second = sampleStateManager.getOrCreateSamplerProxy(sampleState);
-                }
-                else
-                {
-                    proxyParam.value = value;
-                }
-            }
-        );
+        std::vector<MaterialProxy::Parameter> proxyParams;
+        std::vector<std::pair<TextureProxyHandle, SamplerProxyHandle>> textureBindings;
+        makeMaterialProxyParameters(parameters, proxyParams, textureBindings);
 
-        auto& renderFrontend = Context::get().getRenderFrontend();
-        renderFrontend.enqueueLambda(
+        Context::get().getRenderFrontend().enqueueLambda(
             [proxyHandle = getMaterialProxyHandle(),
-            proxyParam,
-            textureBinding](FrameContext& context) mutable
+            proxyParams = std::move(proxyParams),
+            textureBindings = std::move(textureBindings)](FrameContext& context) mutable
             {
                 auto& proxyManager = context.getProxyManager();
-                resolveTextureBindings({ &proxyParam, 1 }, { &textureBinding, 1 }, proxyManager);
+                resolveTextureBindings(proxyParams, textureBindings, proxyManager);
                 MaterialProxy* proxy = proxyManager.getProxy(proxyHandle);
-                proxy->updateParameters({ &proxyParam, 1 });
+                proxy->updateParameters(proxyParams);
             }
         );
     }
@@ -340,6 +353,7 @@ namespace hyp
         attributes.doubleSided = getEffectiveDoubleSided();
         attributes.tangentSpaceNormal = mTemplate->isTangentSpaceNormal();
         attributes.hasVertexPositionOffset = mTemplate->hasVertexPositionOffset();
+        attributes.isTimeDependent = mTemplate->isTimeDependent();
 
         mShaderHandle = mTemplate->getOrCreateMaterialShader();
 
@@ -372,6 +386,15 @@ namespace hyp
                 );
             }
         );
+    }
+
+    void MaterialInstance::syncResourceObserver()
+    {
+        std::vector<MaterialParameterValue> values;
+        values.reserve(mParameterOverrides.size());
+        for (const auto& [name, parameterOverride] : mParameterOverrides)
+            values.push_back(parameterOverride.value);
+        mResourceObserver.sync(values);
     }
 
     void MaterialInstance::reconcileParameterOverrides()
@@ -418,6 +441,7 @@ namespace hyp
     template <> Type* Reflection::createType<MaterialInstance>()
     {
         auto c = new TClass<MaterialInstance, Material>("MaterialInstance");
+        c->setDisplayName("Material Instance");
         c->addProperty("Template", &MaterialInstance::mTemplate);
         c->addProperty("Parameter Overrides", &MaterialInstance::mParameterOverrides);
         c->addProperty("Blend Mode Override", &MaterialInstance::mBlendModeOverride);

@@ -39,18 +39,25 @@ namespace hyp
         mIndexType(indexType),
         mSections(std::move(sections))
     {
+        assert(!indexData.empty());
         mIndexOffset = (vertexData.size() + 15) & ~15; // 对齐到16字节，满足vertex buffer和index buffer的对齐要求
 
+        // 再按 4 字节对齐一次——Visualization 的 wireframeGeometry 把这块 buffer 整个当 uint 数组
+        // 读(见 VisualizationRenderData::draw()), Uint16 索引数量为奇数时最后一个索引所在的那个
+        // uint word 只有低 16 位是真实数据, 不补齐到 4 字节边界会读出这块 buffer 分配范围之外
+        indexData.resize((indexData.size() + 3) & ~size_t(3));
         uint64_t totalSize = mIndexOffset + indexData.size();
         rhi::BufferDesc bufferDesc;
         bufferDesc.size = totalSize;
-        bufferDesc.usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::Index | rhi::BufferUsage::Transfer_Dst;
+        bufferDesc.usage = rhi::BufferUsage::Vertex | rhi::BufferUsage::Index | rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
         mBuffer = getRenderBackend().getDevice().createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
 
         mCachedBuffers.resize(mVertexBindingOffsets.size(), mBuffer.get());
 
-        mPendingUploads.emplace_back(std::move(vertexData), 0);
+        if (!vertexData.empty())
+            mPendingUploads.emplace_back(std::move(vertexData), 0);
         mPendingUploads.emplace_back(std::move(indexData), mIndexOffset);
+        markNeedsPrepare();
     }
 
     GeometryProxy::~GeometryProxy() noexcept
@@ -65,17 +72,19 @@ namespace hyp
         releaseGeometryId(mId);
     }
 
-    void GeometryProxy::prepare(rhi::CommandList& cmdList)
+    bool GeometryProxy::prepare(rhi::CommandList& cmdList)
     {
         if (!mPendingUploads.empty())
         {
             flushUploads(cmdList);
         }
+        return mPendingUploads.empty();
     }
 
     void GeometryProxy::bind(rhi::CommandList& cmdList) const noexcept
     {
-        cmdList.bindVertexBuffers(0, mCachedBuffers, mVertexBindingOffsets);
+        if (!mCachedBuffers.empty())
+            cmdList.bindVertexBuffers(0, mCachedBuffers, mVertexBindingOffsets);
         cmdList.bindIndexBuffer(mBuffer, mIndexOffset, mIndexType);
     }
 
@@ -114,7 +123,7 @@ namespace hyp
         preBarrier.buffer = mBuffer;
         preBarrier.offset = 0;
         preBarrier.size = rhi::kWholeBuffer;
-        preBarrier.oldState = rhi::ResourceState::Vertex_Attachment | rhi::ResourceState::Index_Attachment;
+        preBarrier.oldState = rhi::ResourceState::Vertex_Attachment | rhi::ResourceState::Index_Attachment | rhi::ResourceState::Graphics_Shader_Storage_Read;
         preBarrier.newState = rhi::ResourceState::Transfer_Dst;
         cmdList.insertBarriers({ &preBarrier, 1 });
 
@@ -139,7 +148,7 @@ namespace hyp
         postBarrier.offset = 0;
         postBarrier.size = rhi::kWholeBuffer;
         postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
-        postBarrier.newState = rhi::ResourceState::Vertex_Attachment | rhi::ResourceState::Index_Attachment;
+        postBarrier.newState = rhi::ResourceState::Vertex_Attachment | rhi::ResourceState::Index_Attachment | rhi::ResourceState::Graphics_Shader_Storage_Read;
         cmdList.insertBarriers({ &postBarrier, 1 });
     }
 

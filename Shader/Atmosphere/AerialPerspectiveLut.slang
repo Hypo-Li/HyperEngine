@@ -23,12 +23,11 @@ WTexture3D<float4> AerialPerspectiveLutImage;
 [numthreads(4, 4, 4)]
 void ComputeMain(uint3 globalID : SV_DispatchThreadID)
 {
-    ViewData viewData = sViewData[0];
     float2 uv = (globalID.xy + 0.5) / float2(32, 32);
     float4 clipSpace = float4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, 0.5, 1.0);
-    float4 hViewPos = mul(clipSpace, viewData.clipToView);
-    float3 worldDir = normalize(mul(viewData.worldToViewRot, hViewPos.xyz / hViewPos.w));
-    float3 worldPos = getWorldPos(Atmosphere, viewData.cameraOrigin);
+    float4 hViewPos = mul(clipSpace, uViewData.clipToView);
+    float3 worldDir = normalize(mul(uViewData.worldToViewRot, hViewPos.xyz / hViewPos.w));
+    float3 worldPos = getWorldPos(Atmosphere, uViewData.cameraOrigin);
 
     float slice = (globalID.z + 0.5) / SLICE_COUNT;
     slice *= slice * SLICE_COUNT;

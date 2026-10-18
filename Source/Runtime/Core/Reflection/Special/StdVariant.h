@@ -31,7 +31,7 @@ namespace hyp
         {
             if (I == typeIndex)
             {
-                variant->emplace<I>(*(std::variant_alternative_t<I, T>*)(value));
+                variant->template emplace<I>(*(std::variant_alternative_t<I, T>*)(value));
                 return;
             }
 

@@ -3,25 +3,52 @@
     "version": "0.1.0",
     "builtin-baseline": "522253caf47268c1724f486a035e927a42a90092",
     "dependencies": [
-        "glfw3",
+        {
+            "name": "glfw3",
+            "features": [{ "name": "wayland", "platform": "linux" }]
+        },
         "spdlog",
         "vulkan-memory-allocator",
         "shader-slang",
         "glm",
         "nlohmann-json",
         "stb",
+        "tinyexr",
         "tinygltf",
-        "basisu",
-        "python3",
-        "pybind11",
-        "joltphysics",
+        {
+            "name": "joltphysics",
+            "features": ["double-precision"]
+        },
         "tinyply",
+        "meshoptimizer",
         "xxhash",
+        "zstd",
+        {
+            "name": "libuuid",
+            "platform": "linux"
+        },
+        "libwebp",
+        "miniz",
+        "freetype",
+        "harfbuzz",
+        {
+            "name": "msdfgen",
+            "default-features": false,
+            "features": ["extensions"]
+        },
         {
             "name": "dawn",
-            "features": ["vulkan", "d3d12"]
-        }
+            "features": ["vulkan", { "name": "d3d12", "platform": "windows" }]
+        },
+        "tree-sitter",
+        "embree"
     ],
+    "features": {
+        "python-bindings": {
+            "description": "PyHyperEngine 的 Python 绑定, 需要编译 python3, 比较慢",
+            "dependencies": [ "python3", "pybind11" ]
+        }
+    },
     "overrides": [
         { "name": "python3", "version": "3.12.13#1" }
     ]

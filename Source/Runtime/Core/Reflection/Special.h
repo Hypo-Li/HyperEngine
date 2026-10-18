@@ -75,6 +75,7 @@ namespace hyp
 
             HypHString,
             BulkData,
+            HypSoftRef,
         };
 
         Case getCase() const

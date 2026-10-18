@@ -37,10 +37,10 @@ namespace hyp
     struct BindlessConfig
     {
         uint32_t maxTexture2DCount = 16384;
-        uint32_t maxTexture2DArrayCount = 8;
-        uint32_t maxTexture3DCount = 8;
-        uint32_t maxTextureCubeCount = 8;
-        uint32_t maxSamplerCount = 16384;
+        uint32_t maxTexture2DArrayCount = 64;
+        uint32_t maxTexture3DCount = 64;
+        uint32_t maxTextureCubeCount = 64;
+        uint32_t maxSamplerCount = 64;
     };
 
     class GlobalBindings;

@@ -15,8 +15,16 @@ namespace hyp
     static constexpr uint32_t kLightVolumeDimY = 16;
     static constexpr uint32_t kLightVolumeDimZ = 24;
 
+    // TAA 用: 半透明物体既不写深度也不写 Velocity(见 GbufferPass.cpp), depth/motion 两条路径都
+    // 找不到它们, resolve pass 没法靠常规的重投影+disocclusion 检测识别这些像素——所以改成在
+    // stencil 里直接标记, TAAPass 读到这一位就知道要对这个像素做特殊处理(丢弃/大幅降低历史权重,
+    // 具体见 TAA.slang, 思路上对应 UE TAACommon.ush 里 STENCIL_TEMPORAL_RESPONSIVE_AA_MASK 那一类
+    // "这个像素没有可靠运动矢量"的处理)。这个值必须和 TAA.slang 里读 stencil 时用的掩码保持一致。
+    static constexpr uint32_t kTAAStencilBit = 0x01;
+
     struct TranslucentData
     {
+        std::shared_ptr<DrawItemList> drawItems;
         std::shared_ptr<DrawItemBucket> translucentBucket;
         const SceneProxy* scene;
         uint32_t sceneId;
@@ -30,6 +38,14 @@ namespace hyp
         rg::TextureHandle lightVolumeB;
         bool hasSpecularPrefilter;
         rg::TextureHandle specularPrefilter;
+        bool hasSkyLightData;
+        rg::BufferHandle skyLightData;
+        bool hasAtmosphere;
+        rg::TextureHandle transmittanceLut;
+        // 逐 instance 的点光源下标表(header+payload 拼在一个 buffer 里, CSR 布局), builder
+        // 阶段整个算完存这里、execute 阶段原样上传——见 addToRenderGraph 顶部的详细注释
+        rg::BufferHandle instanceLightIndices;
+        std::vector<uint32_t> instanceLightIndicesContent;
     };
 
     struct ForwardLightingConstants
@@ -39,25 +55,40 @@ namespace hyp
         uint32_t lightCount;
     };
 
-    // TranslucentPass 专属的 scene-and-view bind group: 跟 RendererContext::
-    // getSceneAndViewBindGroupLayout() 那份公共的完全独立, 前 4 个 entry 内容照抄(复用同一批
-    // buffer, 见 SceneProxy::getInstanceDataBuffer 等), 多出的几个 entry 是光照体积纹理(漫反射
+    // TranslucentPass 专属的 set1 bind group: 跟 ViewDataManager::getBindGroupLayout()
+    // 那份公共的完全独立, ViewData 那个 entry 内容照抄(复用同一块 buffer, 见
+    // ViewDataManager::getViewDataBuffer), 多出的几个 entry 是光源数据、光照体积纹理(漫反射
     // 间接光)+ 天光镜面反射预滤波 cubemap/DfgLut(镜面反射间接光, 复用 SkyLightProxy 已经算好的
     // 结果, 跟 SkyLighting.slang 给不透明物体用的是同一份数据, 只是走了一条独立的 bind group)。
     // 没有走公共 set1 的原因: 这些纹理按 view 变化, 公共 bind group 靠 ViewData 的 dynamic offset
     // 避免逐 view 重建, 塞进去会连累所有其它 pass 一起逐 view 重建; 而且写光照体积纹理的注入 pass
     // 也需要绑定普通的 scene/view 数据(不含这张纹理, 它是写入目标, 不是采样对象), 两者混在同一个
-    // 公共 bind group 里会出现"同一个 set 里又读又写同一张纹理"的冲突。详见跟用户讨论确认的方案。
+    // 公共 bind group 里会出现"同一个 set 里又读又写同一张纹理"的冲突。
     struct TranslucentPassStorage
     {
-        TRef<rhi::BindGroupLayout> sceneAndViewLayout;
-        std::vector<BindGroupCache<11>> perViewCaches;
+        TRef<rhi::BindGroupLayout> viewLayout;
+        std::vector<BindGroupCache<13>> perViewCaches;
     };
+
+    namespace
+    {
+        // 按 2 的幂取整——InstanceLightIndices buffer 每帧内容大小都会变(哪盏光照到哪个 instance
+        // 会变), 如果每次都精确按用量建 buffer, TransientResources 的 BufferKey(含 desc.size)
+        // 逐帧对不上, 池化形同虚设(建了就废、下一帧又建一个新的)。取整到同一个阶梯内 size 不变,
+        // 才能真正复用。
+        uint32_t roundUpToPowerOfTwo(uint32_t value)
+        {
+            uint32_t result = 1;
+            while (result < value)
+                result <<= 1;
+            return result;
+        }
+    }
 
     struct LightVolumeInjectData
     {
         uint32_t sceneId;
-        rg::BufferHandle packedSHCoeff;
+        rg::BufferHandle skyLightData;
         rg::TextureHandle volumeR;
         rg::TextureHandle volumeG;
         rg::TextureHandle volumeB;
@@ -73,41 +104,31 @@ namespace hyp
 
     namespace
     {
-        TRef<rhi::BindGroupLayout> createTranslucentSceneAndViewLayout(BindGroupLayoutCache& cache)
+        TRef<rhi::BindGroupLayout> createTranslucentViewLayout(BindGroupLayoutCache& cache)
         {
-            std::vector<rhi::BindGroupLayoutEntry> entries(11);
+            std::vector<rhi::BindGroupLayoutEntry> entries(13);
 
+            // binding 0 必须是 uViewData——Binding.slang 里 [[vk::binding(0, 1)]] 是硬编码的
+            // 全局约定(任何 include 了它的 shader 都这么认), 不能被这个 pass 自己的资源占掉
             entries[0].binding = 0;
-            entries[0].type = rhi::BindingType::Storage_Buffer;
+            entries[0].type = rhi::BindingType::Dynamic_Uniform_Buffer;
             entries[0].access = rhi::BindingAccess::Read_Only;
             entries[0].count = 1;
             entries[0].stageFlags = rhi::ShaderStage::All;
 
-            entries[1].binding = 1;
+            entries[1].binding = 2;
             entries[1].type = rhi::BindingType::Storage_Buffer;
             entries[1].access = rhi::BindingAccess::Read_Only;
             entries[1].count = 1;
             entries[1].stageFlags = rhi::ShaderStage::All;
 
-            entries[2].binding = 2;
-            entries[2].type = rhi::BindingType::Storage_Buffer;
-            entries[2].access = rhi::BindingAccess::Read_Only;
-            entries[2].count = 1;
-            entries[2].stageFlags = rhi::ShaderStage::All;
-
-            entries[3].binding = 3;
-            entries[3].type = rhi::BindingType::Dynamic_Storage_Buffer;
-            entries[3].access = rhi::BindingAccess::Read_Only;
-            entries[3].count = 1;
-            entries[3].stageFlags = rhi::ShaderStage::All;
-
-            // 4/5/6 = 光照体积纹理的 R/G/B 三个通道(各一个 1 阶 SH 系数 float4), 7 是它们共用的
+            // 3/4/5 = 光照体积纹理的 R/G/B 三个通道(各一个 1 阶 SH 系数 float4), 6 是它们共用的
             // 采样器——1 阶 SH 每个通道一个 float4(xyz=线性系数, w=常数项), 3 个通道装不进一张
             // float4 纹理, 只能拆成 3 张各自独立三线性过滤的 Texture3D, 见 LightVolumeInject.slang
             for (uint32_t i = 0; i < 3; ++i)
             {
-                rhi::BindGroupLayoutEntry& entry = entries[4 + i];
-                entry.binding = 4 + i;
+                rhi::BindGroupLayoutEntry& entry = entries[2 + i];
+                entry.binding = 3 + i;
                 entry.type = rhi::BindingType::Sampled_Texture;
                 entry.access = rhi::BindingAccess::Read_Only;
                 entry.count = 1;
@@ -116,50 +137,83 @@ namespace hyp
                 entry.stageFlags = rhi::ShaderStage::Fragment;
             }
 
-            entries[7].binding = 7;
-            entries[7].type = rhi::BindingType::Sampler;
+            entries[5].binding = 6;
+            entries[5].type = rhi::BindingType::Sampler;
+            entries[5].access = rhi::BindingAccess::Read_Only;
+            entries[5].count = 1;
+            entries[5].stageFlags = rhi::ShaderStage::Fragment;
+
+            entries[6].binding = 7;
+            entries[6].type = rhi::BindingType::Sampled_Texture;
+            entries[6].access = rhi::BindingAccess::Read_Only;
+            entries[6].count = 1;
+            entries[6].textureViewType = rhi::TextureViewType::Texture_View_Cube;
+            entries[6].textureSampleType = rhi::TextureSampleType::Float;
+            entries[6].stageFlags = rhi::ShaderStage::Fragment;
+
+            entries[7].binding = 8;
+            entries[7].type = rhi::BindingType::Sampled_Texture;
             entries[7].access = rhi::BindingAccess::Read_Only;
             entries[7].count = 1;
+            entries[7].textureViewType = rhi::TextureViewType::Texture_View_2D;
+            entries[7].textureSampleType = rhi::TextureSampleType::Float;
             entries[7].stageFlags = rhi::ShaderStage::Fragment;
 
-            entries[8].binding = 8;
-            entries[8].type = rhi::BindingType::Sampled_Texture;
+            entries[8].binding = 9;
+            entries[8].type = rhi::BindingType::Sampler;
             entries[8].access = rhi::BindingAccess::Read_Only;
             entries[8].count = 1;
-            entries[8].textureViewType = rhi::TextureViewType::Texture_View_Cube;
-            entries[8].textureSampleType = rhi::TextureSampleType::Float;
             entries[8].stageFlags = rhi::ShaderStage::Fragment;
 
-            entries[9].binding = 9;
-            entries[9].type = rhi::BindingType::Sampled_Texture;
+            // 逐 instance 的点光源下标表(InstanceLightIndices, header+payload CSR 布局),
+            // 只有 Translucent.slang 的片元阶段读, 见 addToRenderGraph 顶部注释
+            entries[9].binding = 10;
+            entries[9].type = rhi::BindingType::Storage_Buffer;
             entries[9].access = rhi::BindingAccess::Read_Only;
             entries[9].count = 1;
-            entries[9].textureViewType = rhi::TextureViewType::Texture_View_2D;
-            entries[9].textureSampleType = rhi::TextureSampleType::Float;
             entries[9].stageFlags = rhi::ShaderStage::Fragment;
 
-            entries[10].binding = 10;
-            entries[10].type = rhi::BindingType::Sampler;
+            // 方向光穿过大气到达着色点的透过率, 跟 DirectLightingPass 给不透明物体用的是同一套
+            // AtmosphereParameters/TransmittanceLut——采样器复用 6 号 NoMipSampler(本来就是
+            // getLinearClampNoMip(), 跟 DirectLighting.slang 的 LutSampler 是同一个采样器),
+            // 不用再开一个 sampler binding
+            entries[10].binding = 11;
+            entries[10].type = rhi::BindingType::Uniform_Buffer;
             entries[10].access = rhi::BindingAccess::Read_Only;
             entries[10].count = 1;
             entries[10].stageFlags = rhi::ShaderStage::Fragment;
+
+            entries[11].binding = 12;
+            entries[11].type = rhi::BindingType::Sampled_Texture;
+            entries[11].access = rhi::BindingAccess::Read_Only;
+            entries[11].count = 1;
+            entries[11].textureViewType = rhi::TextureViewType::Texture_View_2D;
+            entries[11].textureSampleType = rhi::TextureSampleType::Float;
+            entries[11].stageFlags = rhi::ShaderStage::Fragment;
+
+            entries[12].binding = 13;
+            entries[12].type = rhi::BindingType::Storage_Buffer;
+            entries[12].access = rhi::BindingAccess::Read_Only;
+            entries[12].count = 1;
+            entries[12].stageFlags = rhi::ShaderStage::Fragment;
 
             return cache.getOrCreate(entries);
         }
 
         rhi::PipelineLayout* createTranslucentPipelineLayout(
             RendererContext& rendererContext,
-            const rhi::BindGroupLayout& sceneAndViewLayout,
-            const rhi::BindGroupLayout* materialLayout
+            const rhi::BindGroupLayout& viewLayout,
+            const rhi::BindGroupLayout* materialLayout,
+            const rhi::BindGroupLayout* instanceLayout
         )
         {
             auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
             PipelineCache::PipelineLayoutKey key;
             key.bindGroupLayouts[0] = &rendererContext.getGlobalDataBindGroupLayout();
-            key.bindGroupLayouts[1] = &sceneAndViewLayout;
+            key.bindGroupLayouts[1] = &viewLayout;
             key.bindGroupLayouts[2] = materialLayout;
-            key.bindGroupLayouts[3] = nullptr;
-            return pipelineCache.getOrCreate(key);
+            key.bindGroupLayouts[3] = instanceLayout;
+            return pipelineCache.getOrCreateLayout(key);
         }
 
         // 只在场景有 active SkyLight 时才加进 render graph——没有天光时 TranslucentPass 直接绑
@@ -171,9 +225,9 @@ namespace hyp
             SkyLightProxy& skyLight
         )
         {
-            auto packedSHCoeff = renderGraph.importBuffer(
+            auto skyLightData = renderGraph.importBuffer(
                 "TranslucentLightVolumeSrcSH"_hs(scene.getSceneId()),
-                &skyLight.getPackedSHBuffer()
+                &skyLight.getDataBuffer()
             );
 
             renderGraph.addComputePass<LightVolumeInjectData>(
@@ -183,7 +237,7 @@ namespace hyp
                     builder.markSideEffect();
 
                     data.sceneId = scene.getSceneId();
-                    data.packedSHCoeff = builder.accessBuffer(packedSHCoeff, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                    data.skyLightData = builder.accessBuffer(skyLightData, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
 
                     rhi::TextureDesc volumeDesc;
                     volumeDesc.type = rhi::TextureType::Texture_3D;
@@ -234,12 +288,12 @@ namespace hyp
                     }
                     auto& bindGroupCache = storage.perSceneCaches[data.sceneId];
 
-                    rhi::Buffer* packedSHCoeff = context.getBuffer(data.packedSHCoeff);
+                    rhi::Buffer* skyLightData = context.getBuffer(data.skyLightData);
                     rhi::TextureView* volumeR = context.getTexture(data.volumeR);
                     rhi::TextureView* volumeG = context.getTexture(data.volumeG);
                     rhi::TextureView* volumeB = context.getTexture(data.volumeB);
 
-                    if (bindGroupCache.needUpdate(packedSHCoeff, volumeR, volumeG, volumeB))
+                    if (bindGroupCache.needUpdate(skyLightData, volumeR, volumeG, volumeB))
                     {
                         bindGroupCache.update(
                             renderBackend,
@@ -247,7 +301,7 @@ namespace hyp
                             [&](rhi::BindGroup& bindGroup)
                             {
                                 PassBindGroupWriter writer(generated::kLightVolumeInject_Bindings);
-                                writer.setBuffer("SkyLightPackedSHCoeff", packedSHCoeff);
+                                writer.setBuffer("SkyLightData", skyLightData);
                                 writer.setTexture("LightVolumeR", volumeR);
                                 writer.setTexture("LightVolumeG", volumeG);
                                 writer.setTexture("LightVolumeB", volumeB);
@@ -265,9 +319,9 @@ namespace hyp
                         );
                     }
 
-                    auto& cmd = context.getCommandList();
-                    cmd.bindPipeline(storage.pipeline.get());
-                    cmd.setBindGroup(
+                    auto& cmdList = context.getCommandList();
+                    cmdList.bindPipeline(storage.pipeline.get());
+                    cmdList.setBindGroup(
                         2,
                         rhi::PipelineBindPoint::Compute,
                         &storage.pipeline->getLayout(),
@@ -276,12 +330,12 @@ namespace hyp
                     );
 
                     struct { uint32_t dimensions[3]; } immediateData = { { kLightVolumeDimX, kLightVolumeDimY, kLightVolumeDimZ } };
-                    cmd.setImmediateData(
+                    cmdList.setImmediateData(
                         &storage.pipeline->getLayout(),
                         0,
                         std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&immediateData), sizeof(immediateData))
                     );
-                    cmd.dispatch(kLightVolumeDimX / 4, kLightVolumeDimY / 4, kLightVolumeDimZ / 4);
+                    cmdList.dispatch(kLightVolumeDimX / 4, kLightVolumeDimY / 4, kLightVolumeDimZ / 4);
                 }
             );
         }
@@ -293,7 +347,8 @@ namespace hyp
         const SceneProxy& scene,
         const SceneView& view,
         const RenderData& renderData,
-        SkyLightProxy* activeSkyLight
+        SkyLightProxy* activeSkyLight,
+        const AtmosphereProxy* atmosphere
     )
     {
         if (activeSkyLight)
@@ -315,10 +370,20 @@ namespace hyp
             );
         }
 
+        rg::BufferHandle skyLightDataHandle;
+        if (activeSkyLight)
+        {
+            skyLightDataHandle = renderGraph.importBuffer(
+                "TranslucentSkyLightData"_hs(scene.getSceneId()),
+                &activeSkyLight->getDataBuffer()
+            );
+        }
+
         renderGraph.addGraphicsPass<TranslucentData>(
             "Translucent"_hs,
             [&](rg::RenderGraph::Builder& builder, TranslucentData& data)
             {
+                data.drawItems = renderData.drawItems;
                 data.translucentBucket = renderData.translucentBucket;
                 data.scene = &scene;
                 data.sceneId = scene.getSceneId();
@@ -333,9 +398,10 @@ namespace hyp
 
                 // 只做深度测试(跟不透明物体正确遮挡), 不写深度——半透明物体已经按距离从远到近
                 // 排过序(makeTranslucentSortKey), 互相之间的前后关系靠绘制顺序 + blend 保证,
-                // 不需要也不应该写深度
+                // 不需要也不应该写深度。stencil 打开写(kTAAStencilBit), 给 TAAPass 标记"这个像素
+                // 没有可靠 Velocity"
                 rg::TextureHandle sceneDepth = blackboard.get<rg::TextureHandle>("SceneDepth"_hs(viewId));
-                data.sceneDepth = builder.addDepthStencilAttachment(sceneDepth, rhi::AttachmentLoadOp::Load, false, rhi::AttachmentLoadOp::Load, false);
+                data.sceneDepth = builder.addDepthStencilAttachment(sceneDepth, rhi::AttachmentLoadOp::Load, false, rhi::AttachmentLoadOp::Load, true);
 
                 data.hasLightVolume = activeSkyLight != nullptr;
                 if (data.hasLightVolume)
@@ -353,8 +419,75 @@ namespace hyp
                 {
                     data.specularPrefilter = builder.sample(specularPrefilterHandle);
                 }
+
+                data.hasSkyLightData = activeSkyLight != nullptr;
+                if (data.hasSkyLightData)
+                {
+                    data.skyLightData = builder.accessBuffer(skyLightDataHandle, rhi::BufferUsage::Storage, rg::AccessType::Read_Only);
+                }
+
+                data.hasAtmosphere = atmosphere != nullptr;
+                if (data.hasAtmosphere)
+                {
+                    auto transmittanceLut = blackboard.get<rg::TextureHandle>("TransmittanceLut"_hs(data.sceneId));
+                    data.transmittanceLut = builder.sample(transmittanceLut);
+                }
+
+                // InstanceLightIndices: 逐 instance 的点光源下标表, header+payload 拼进同一个
+                // buffer(CSR 布局, header[instanceIndex*2] = payload 里的起始下标(绝对下标,
+                // 直接能索引同一个 buffer), header[instanceIndex*2+1] = count, payload 紧跟在
+                // header 后面, 是 count 个 lightIndex)。完全在这个 pass 自己的 setup 阶段算完、
+                // 建 buffer, 不碰 SceneProxy/update()——只有这个 pass 自己用得到。
+                // 每帧全量重算(哪盏光照到哪个 instance 会变, 不适合套 InstanceData/LightData
+                // 那种"只在真正变化时才标脏"的增量模型), 但 buffer 大小取整到 2 的幂
+                // (roundUpToPowerOfTwo), 避免 TransientResources 的 BufferKey 逐帧对不上导致
+                // 池化失效
+                if (!renderData.translucentBucket->empty())
+                {
+                    uint32_t instanceCount = scene.getInstanceCount();
+                    std::vector<uint32_t>& content = data.instanceLightIndicesContent;
+                    content.assign(static_cast<size_t>(instanceCount) * 2, 0);
+
+                    std::vector<uint32_t> overlappingLights;
+                    for (MeshRenderProxy* meshProxy : scene.getMeshRenderProxies())
+                    {
+                        uint32_t instanceIndex = meshProxy->getInstanceIndex();
+                        const Boxd& box = meshProxy->getBoundingBox();
+
+                        overlappingLights.clear();
+                        // renderData.localLights 是 SceneRenderer::cull() 按这个 view 视锥体
+                        // 剔过一遍的结果, 不是场景全量——包围球不在视锥体内的灯不可能照亮任何可见
+                        // 像素, 不需要再逐 mesh 做 box-sphere 测试
+                        for (LocalLightProxy* localLightProxy : *renderData.localLights)
+                        {
+                            double3 lightPos = localLightProxy->getPosition();
+                            double radius = static_cast<double>(localLightProxy->getAttenuationRadius());
+                            double3 closest = glm::clamp(lightPos, box.getMin(), box.getMax());
+                            double3 diff = closest - lightPos;
+                            if (glm::dot(diff, diff) <= radius * radius)
+                            {
+                                overlappingLights.push_back(localLightProxy->getLightIndex());
+                            }
+                        }
+
+                        if (!overlappingLights.empty())
+                        {
+                            uint32_t offset = static_cast<uint32_t>(content.size());
+                            content[instanceIndex * 2 + 0] = offset;
+                            content[instanceIndex * 2 + 1] = static_cast<uint32_t>(overlappingLights.size());
+                            content.insert(content.end(), overlappingLights.begin(), overlappingLights.end());
+                        }
+                    }
+
+                    uint32_t bufferElementCount = roundUpToPowerOfTwo(std::max<uint32_t>(static_cast<uint32_t>(content.size()), 64));
+                    auto instanceLightIndices = builder.createBuffer(
+                        "TranslucentInstanceLightIndices"_hs(viewId),
+                        rhi::BufferDesc{ uint64_t(bufferElementCount) * sizeof(uint32_t), rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst }
+                    );
+                    data.instanceLightIndices = builder.accessBuffer(instanceLightIndices, rhi::BufferUsage::Storage, rg::AccessType::Write_Only);
+                }
             },
-            [&rendererContext](rg::ExecuteContext& context, TranslucentData& data)
+            [&rendererContext, atmosphere](rg::ExecuteContext& context, TranslucentData& data)
             {
                 if (data.translucentBucket->empty())
                 {
@@ -365,16 +498,46 @@ namespace hyp
                 auto& storage = rendererContext.getPassStorage().getOrCreate<TranslucentPass, TranslucentPassStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
-                if (!storage.sceneAndViewLayout)
+                if (!storage.viewLayout)
                 {
-                    storage.sceneAndViewLayout = createTranslucentSceneAndViewLayout(renderBackend.getBindGroupLayoutCache());
+                    storage.viewLayout = createTranslucentViewLayout(renderBackend.getBindGroupLayoutCache());
                 }
 
                 if (storage.perViewCaches.size() <= data.viewId)
                 {
                     storage.perViewCaches.resize(data.viewId + 1);
                 }
-                auto& sceneAndViewCache = storage.perViewCaches[data.viewId];
+                auto& viewCache = storage.perViewCaches[data.viewId];
+
+                rhi::Buffer* instanceLightIndicesBuffer = context.getBuffer(data.instanceLightIndices);
+                {
+                    auto& uploadCmdList = context.getCommandList();
+                    size_t uploadSize = data.instanceLightIndicesContent.size() * sizeof(uint32_t);
+                    auto allocation = renderBackend.getStagingAllocator().forceAllocate(uploadSize);
+                    std::memcpy(allocation.mappedData, data.instanceLightIndicesContent.data(), uploadSize);
+
+                    rhi::BufferBarrier preBarrier;
+                    preBarrier.buffer = instanceLightIndicesBuffer;
+                    preBarrier.offset = 0;
+                    preBarrier.size = rhi::kWholeBuffer;
+                    preBarrier.oldState = rhi::ResourceState::None;
+                    preBarrier.newState = rhi::ResourceState::Transfer_Dst;
+                    uploadCmdList.insertBarriers({ &preBarrier, 1 });
+
+                    rhi::BufferCopyRegion copyRegion;
+                    copyRegion.srcOffset = allocation.offset;
+                    copyRegion.dstOffset = 0;
+                    copyRegion.size = uploadSize;
+                    uploadCmdList.copyBuffer(allocation.buffer, instanceLightIndicesBuffer, { &copyRegion, 1 });
+
+                    rhi::BufferBarrier postBarrier;
+                    postBarrier.buffer = instanceLightIndicesBuffer;
+                    postBarrier.offset = 0;
+                    postBarrier.size = rhi::kWholeBuffer;
+                    postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
+                    postBarrier.newState = rhi::ResourceState::Shader_Storage_Read;
+                    uploadCmdList.insertBarriers({ &postBarrier, 1 });
+                }
 
                 auto& defaultResources = renderBackend.getDefaultResources();
                 // 没有 light volume 时, R/G/B 三个 slot 都指向同一份黑色占位纹理——反正是只读采样,
@@ -391,13 +554,24 @@ namespace hyp
                 const rhi::TextureView* specularPrefilter = data.hasSpecularPrefilter
                     ? context.getTexture(data.specularPrefilter)
                     : &defaultResources.getBlackTextureCubeView();
+                rhi::Buffer* skyLightData = data.hasSkyLightData
+                    ? context.getBuffer(data.skyLightData)
+                    : &defaultResources.getDummyStorageBuffer();
                 const rhi::TextureView* dfgLut = &defaultResources.getDfgLutView();
                 const rhi::Sampler* linearClampNoMipSampler = renderBackend.getSamplerCache().getLinearClampNoMip();
                 const rhi::Sampler* linearClampMipSampler = renderBackend.getSamplerCache().getLinearClampMip();
 
-                if (sceneAndViewCache.needUpdate(
-                        &data.scene->getIndicesBuffer(),
-                        &data.scene->getInstanceDataBuffer(),
+                // 没有大气时绑 DefaultResources 的通用占位资源, 靠半径退化(topRadiusKm<=
+                // bottomRadiusKm)让 evaluateDirectLight() 自然跳过透过率计算——跟 DirectLightingPass
+                // 给不透明物体用的是同一套占位约定, 见那边的注释
+                rhi::Buffer* atmosphereParameters = data.hasAtmosphere
+                    ? &atmosphere->getParametersBuffer()
+                    : &defaultResources.getDummyUniformBuffer();
+                const rhi::TextureView* transmittanceLut = data.hasAtmosphere
+                    ? context.getTexture(data.transmittanceLut)
+                    : &defaultResources.getWhiteTextureView();
+
+                if (viewCache.needUpdate(
                         &data.scene->getLightDataBuffer(),
                         &rendererContext.getViewDataManager().getViewDataBuffer(),
                         lightVolumeR,
@@ -406,118 +580,114 @@ namespace hyp
                         linearClampNoMipSampler,
                         specularPrefilter,
                         dfgLut,
-                        linearClampMipSampler
+                        linearClampMipSampler,
+                        instanceLightIndicesBuffer,
+                        atmosphereParameters,
+                        transmittanceLut,
+                        skyLightData
                     ))
                 {
-                    sceneAndViewCache.update(
+                    viewCache.update(
                         renderBackend,
-                        *storage.sceneAndViewLayout,
+                        *storage.viewLayout,
                         [&](rhi::BindGroup& bindGroup)
                         {
-                            rhi::BufferBindingInfo indicesBinding{ &data.scene->getIndicesBuffer(), 0, rhi::kWholeBuffer };
-                            rhi::BufferBindingInfo instanceDataBinding{ &data.scene->getInstanceDataBuffer(), 0, rhi::kWholeBuffer };
                             rhi::BufferBindingInfo lightDataBinding{ &data.scene->getLightDataBuffer(), 0, rhi::kWholeBuffer };
                             rhi::BufferBindingInfo viewDataBinding{ &rendererContext.getViewDataManager().getViewDataBuffer(), 0, sizeof(ViewData) };
+                            rhi::BufferBindingInfo instanceLightIndicesBinding{ instanceLightIndicesBuffer, 0, rhi::kWholeBuffer };
+                            rhi::BufferBindingInfo atmosphereBinding{ atmosphereParameters, 0, sizeof(AtmosphereShaderParameters) };
+                            rhi::BufferBindingInfo skyLightDataBinding{ skyLightData, 0, rhi::kWholeBuffer };
 
-                            rhi::BindGroupEntry entries[11] = {};
-                            entries[0] = { 0, rhi::BindingType::Storage_Buffer, 0, { &indicesBinding, 1 }, {}, {} };
-                            entries[1] = { 1, rhi::BindingType::Storage_Buffer, 0, { &instanceDataBinding, 1 }, {}, {} };
-                            entries[2] = { 2, rhi::BindingType::Storage_Buffer, 0, { &lightDataBinding, 1 }, {}, {} };
-                            entries[3] = { 3, rhi::BindingType::Dynamic_Storage_Buffer, 0, { &viewDataBinding, 1 }, {}, {} };
-                            entries[4] = { 4, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeR, 1 }, {} };
-                            entries[5] = { 5, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeG, 1 }, {} };
-                            entries[6] = { 6, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeB, 1 }, {} };
-                            entries[7] = { 7, rhi::BindingType::Sampler, 0, {}, {}, { &linearClampNoMipSampler, 1 } };
-                            entries[8] = { 8, rhi::BindingType::Sampled_Texture, 0, {}, { &specularPrefilter, 1 }, {} };
-                            entries[9] = { 9, rhi::BindingType::Sampled_Texture, 0, {}, { &dfgLut, 1 }, {} };
-                            entries[10] = { 10, rhi::BindingType::Sampler, 0, {}, {}, { &linearClampMipSampler, 1 } };
-                            bindGroup.update({ entries, 11 });
+                            rhi::BindGroupEntry entries[13] = {};
+                            entries[0] = { 0, rhi::BindingType::Dynamic_Uniform_Buffer, 0, { &viewDataBinding, 1 }, {}, {} };
+                            entries[1] = { 2, rhi::BindingType::Storage_Buffer, 0, { &lightDataBinding, 1 }, {}, {} };
+                            entries[2] = { 3, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeR, 1 }, {} };
+                            entries[3] = { 4, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeG, 1 }, {} };
+                            entries[4] = { 5, rhi::BindingType::Sampled_Texture, 0, {}, { &lightVolumeB, 1 }, {} };
+                            entries[5] = { 6, rhi::BindingType::Sampler, 0, {}, {}, { &linearClampNoMipSampler, 1 } };
+                            entries[6] = { 7, rhi::BindingType::Sampled_Texture, 0, {}, { &specularPrefilter, 1 }, {} };
+                            entries[7] = { 8, rhi::BindingType::Sampled_Texture, 0, {}, { &dfgLut, 1 }, {} };
+                            entries[8] = { 9, rhi::BindingType::Sampler, 0, {}, {}, { &linearClampMipSampler, 1 } };
+                            entries[9] = { 10, rhi::BindingType::Storage_Buffer, 0, { &instanceLightIndicesBinding, 1 }, {}, {} };
+                            entries[10] = { 11, rhi::BindingType::Uniform_Buffer, 0, { &atmosphereBinding, 1 }, {}, {} };
+                            entries[11] = { 12, rhi::BindingType::Sampled_Texture, 0, {}, { &transmittanceLut, 1 }, {} };
+                            entries[12] = { 13, rhi::BindingType::Storage_Buffer, 0, { &skyLightDataBinding, 1 }, {}, {} };
+                            bindGroup.update({ entries, 13 });
                         }
                     );
                 }
 
                 HString renderTag = BuiltinRenderTags::Translucent;
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
                 // Translucent Bucket 按距离排序, 相邻 item 大概率材质不同, 没有 GBufferPass 那种
                 // "相邻且材质/geometry/section 都相同就合并成一次 instanced draw" 的空间, 每个
                 // item 单独一次 draw, 但仍然复用同一套 indices buffer 上传机制
                 std::vector<uint32_t> instanceIndices;
                 instanceIndices.reserve(data.translucentBucket->size());
-                for (const auto& sortedDrawItem : *data.translucentBucket)
+                for (const auto& entry : *data.translucentBucket)
                 {
-                    instanceIndices.push_back(sortedDrawItem.drawItem.instanceIndex);
+                    instanceIndices.push_back((*data.drawItems)[entry.itemIndex].instanceIndex);
                 }
 
-                auto& indicesBuffer = data.scene->getIndicesBuffer();
-                size_t indicesBufferSize = instanceIndices.size() * sizeof(uint32_t);
-                auto allocation = rendererContext.getRenderBackend().getStagingAllocator().forceAllocate(indicesBufferSize);
-                std::memcpy(allocation.mappedData, instanceIndices.data(), indicesBufferSize);
-
-                rhi::BufferBarrier preBarrier;
-                preBarrier.buffer = &indicesBuffer;
-                preBarrier.offset = 0;
-                preBarrier.size = indicesBufferSize;
-                preBarrier.oldState = rhi::ResourceState::Shader_Storage_Read;
-                preBarrier.newState = rhi::ResourceState::Transfer_Dst;
-                cmd.insertBarriers({ &preBarrier, 1 });
-
-                rhi::BufferCopyRegion copyRegion;
-                copyRegion.srcOffset = allocation.offset;
-                copyRegion.dstOffset = 0;
-                copyRegion.size = indicesBufferSize;
-                cmd.copyBuffer(allocation.buffer, &indicesBuffer, { &copyRegion, 1 });
-
-                rhi::BufferBarrier postBarrier;
-                postBarrier.buffer = &indicesBuffer;
-                postBarrier.offset = 0;
-                postBarrier.size = indicesBufferSize;
-                postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
-                postBarrier.newState = rhi::ResourceState::Shader_Storage_Read;
-                cmd.insertBarriers({ &postBarrier, 1 });
+                if (!rendererContext.getIndicesBuffer().upload(cmdList, instanceIndices))
+                {
+                    context.beginPass();
+                    return;
+                }
 
                 uint32_t viewDataDynamicOffset = rendererContext.getViewDataManager().getViewDataDynamicOffset(data.viewId);
 
                 context.beginPass();
 
-                setViewportAndScissor(cmd, data.viewport);
+                setViewportAndScissor(cmdList, data.viewport);
+                // 整个 pass 的所有半透明 draw 都标同一个 bit, 不需要按 draw item 切换, 设一次就够
+                cmdList.setStencilReference(kTAAStencilBit);
 
                 // 第一版只做太阳(方向光)直接光照, 最多取 2 盏——跟 AtmosphereParameters 的
                 // sun0/sun1 约定一致, 见 Translucent.slang 顶部注释
                 ForwardLightingConstants forwardLighting{};
-                auto directionalLights = data.scene->getDirectionalLightProxies();
-                forwardLighting.lightCount = std::min<uint32_t>(static_cast<uint32_t>(directionalLights.size()), 2);
-                if (forwardLighting.lightCount > 0)
-                    forwardLighting.lightIndex0 = directionalLights[0]->getLightIndex();
-                if (forwardLighting.lightCount > 1)
-                    forwardLighting.lightIndex1 = directionalLights[1]->getLightIndex();
+                for (DirectionalLightProxy* directionalLight : data.scene->getDirectionalLightProxies())
+                {
+                    if (!directionalLight->isVisible())
+                        continue;
+
+                    if (forwardLighting.lightCount == 0)
+                        forwardLighting.lightIndex0 = directionalLight->getLightIndex();
+                    else
+                        forwardLighting.lightIndex1 = directionalLight->getLightIndex();
+
+                    if (++forwardLighting.lightCount == 2)
+                        break;
+                }
 
                 rhi::Pipeline* currentPipeline = nullptr;
+                const rhi::PipelineLayout* instanceBindLayout = nullptr;
                 MaterialProxy* prevMaterial = nullptr;
                 GeometryProxy* prevGeometry = nullptr;
                 for (uint32_t i = 0; i < data.translucentBucket->size(); ++i)
                 {
-                    const auto& drawItem = (*data.translucentBucket)[i].drawItem;
+                    const DrawItem& drawItem = (*data.drawItems)[(*data.translucentBucket)[i].itemIndex];
 
-                    VertexLayout vertexLayout = drawItem.geometry->getVertexLayout();
+                    VertexLayout vertexLayout = drawItem.getVertexLayout();
                     rhi::Pipeline* pipeline = drawItem.material->getCachedPipeline(renderTag, vertexLayout);
                     if (!pipeline)
                     {
-                        pipeline = createPipeline(rendererContext, *drawItem.material, renderTag, vertexLayout, *storage.sceneAndViewLayout);
+                        pipeline = createPipeline(rendererContext, *drawItem.material, renderTag, vertexLayout, *storage.viewLayout);
                         drawItem.material->cachePipeline(renderTag, vertexLayout, pipeline);
                     }
                     if (pipeline != currentPipeline)
                     {
-                        cmd.bindPipeline(pipeline);
+                        cmdList.bindPipeline(pipeline);
                         currentPipeline = pipeline;
-                        cmd.setBindGroup(
+                        cmdList.setBindGroup(
                             1,
                             rhi::PipelineBindPoint::Graphics,
                             &currentPipeline->getLayout(),
-                            sceneAndViewCache.getBindGroup(),
+                            viewCache.getBindGroup(),
                             { &viewDataDynamicOffset, 1 }
                         );
-                        cmd.setImmediateData(&currentPipeline->getLayout(), 0, std::span((const uint8_t*)&forwardLighting, sizeof(forwardLighting)));
+                        cmdList.setImmediateData(&currentPipeline->getLayout(), 0, std::span((const uint8_t*)&forwardLighting, sizeof(forwardLighting)));
                         prevMaterial = nullptr;
                     }
 
@@ -526,7 +696,7 @@ namespace hyp
                         const rhi::BindGroup* parametersBindGroup = drawItem.material->getParametersBindGroup();
                         if (parametersBindGroup)
                         {
-                            cmd.setBindGroup(
+                            cmdList.setBindGroup(
                                 2,
                                 rhi::PipelineBindPoint::Graphics,
                                 &currentPipeline->getLayout(),
@@ -537,20 +707,28 @@ namespace hyp
                         prevMaterial = drawItem.material;
                     }
 
+                    // set3 必须排在 set1/set2 之后绑, 否则它们换了布局会让它失效
+                    if (&currentPipeline->getLayout() != instanceBindLayout)
+                    {
+                        const rhi::BindGroup& instanceBindGroup = data.scene->getDrawBindGroup(vertexLayout.getType());
+                        cmdList.setBindGroup(3, rhi::PipelineBindPoint::Graphics, &currentPipeline->getLayout(), &instanceBindGroup, {});
+                        instanceBindLayout = &currentPipeline->getLayout();
+                    }
+
                     if (drawItem.geometry != prevGeometry)
                     {
-                        drawItem.geometry->bind(cmd);
+                        drawItem.bind(cmdList);
                         prevGeometry = drawItem.geometry;
                     }
 
-                    drawItem.geometry->draw(cmd, drawItem.sectionIndex, 1, i);
+                    drawItem.draw(cmdList, 1, i);
                 }
 
-                cmd.setBindGroup(
+                cmdList.setBindGroup(
                     1,
                     rhi::PipelineBindPoint::Graphics,
                     &rendererContext.getGlobalPipelineLayout(),
-                    &data.scene->getSceneAndViewBindGroup(),
+                    &rendererContext.getViewDataManager().getBindGroup(),
                     { &viewDataDynamicOffset, 1 }
                 );
             },
@@ -563,33 +741,41 @@ namespace hyp
         MaterialProxy& material,
         HString renderTag,
         VertexLayout vertexLayout,
-        const rhi::BindGroupLayout& sceneAndViewLayout
+        const rhi::BindGroupLayout& viewLayout
     )
     {
         auto shaderVariant = material.getOrCreateShaderVariant(renderTag, vertexLayout);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
+        const rhi::BindGroupLayout* instanceLayout = &rendererContext.getDrawBindGroupLayout(vertexLayout.getType());
+
         const rhi::BindGroup* materialParameterBindGroup = material.getParametersBindGroup();
         auto* pipelineLayout = createTranslucentPipelineLayout(
             rendererContext,
-            sceneAndViewLayout,
-            materialParameterBindGroup ? &materialParameterBindGroup->getLayout() : nullptr
+            viewLayout,
+            materialParameterBindGroup ? &materialParameterBindGroup->getLayout() : nullptr,
+            instanceLayout
         );
 
         GraphicsPipelineState pipelineState;
         pipelineState.topology = static_cast<uint32_t>(rhi::PrimitiveTopology::Triangle_List);
-        pipelineState.polygonMode = static_cast<uint32_t>(rhi::PolygonMode::Fill);
         pipelineState.samples = 0;
         pipelineState.cullMode = static_cast<uint32_t>(material.getAttributes().doubleSided ? rhi::CullMode::None : rhi::CullMode::Back);
         pipelineState.frontFace = static_cast<uint32_t>(rhi::FrontFace::Counter_Clockwise);
         pipelineState.depthTestEnable = 1;
         pipelineState.depthWriteEnable = 0;
         pipelineState.depthCompareOp = static_cast<uint32_t>(rhi::CompareOp::Greater_Equal);
-        pipelineState.stencilTestEnable = 0;
-        pipelineState.stencilState = StencilState::get();
+        // compareOp Always + passOp Replace: 深度测试通过的像素(不管深度测试本身是不是靠 stencil
+        // 挡住东西, 这里纯粹借 stencil attachment 当一张"标记图"用)一律把 stencilReference
+        // (kTAAStencilBit)写进去, 不需要真正按 stencil 值做任何取舍
+        pipelineState.stencilTestEnable = 1;
+        pipelineState.stencilState = StencilState::get<
+            rhi::StencilOpState{ rhi::StencilOp::Keep, rhi::StencilOp::Replace, rhi::StencilOp::Keep, rhi::CompareOp::Always, 0xFF, 0xFF },
+            rhi::StencilOpState{ rhi::StencilOp::Keep, rhi::StencilOp::Replace, rhi::StencilOp::Keep, rhi::CompareOp::Always, 0xFF, 0xFF }
+        >();
         // 预乘 alpha 混合: (One, OneMinusSrcAlpha)——Translucent.slang 的 FragmentMain 已经把
         // 高光项以"满强度"(不乘 alpha)混进 Src 颜色, 这里的混合系数不需要、也不应该再对它做
-        // 任何按 alpha 的衰减, 具体推导见跟用户讨论确认的方案
+        // 任何按 alpha 的衰减
         pipelineState.colorBlendState = ColorBlendState::get<
             rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::One, rhi::BlendFactor::One_Minus_Src_Alpha, rhi::BlendOp::Add, rhi::BlendFactor::One, rhi::BlendFactor::One_Minus_Src_Alpha, rhi::BlendOp::Add, 0xF }
         >();

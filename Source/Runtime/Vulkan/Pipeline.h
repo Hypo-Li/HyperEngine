@@ -3,7 +3,7 @@
 
 #include <RHI/Pipeline.h>
 
-#include <volk.h>
+#include "VolkInclude.h"
 
 namespace hyp::vk
 {

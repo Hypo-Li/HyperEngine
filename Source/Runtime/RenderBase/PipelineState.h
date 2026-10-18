@@ -196,7 +196,7 @@ namespace hyp
         rhi::TextureFormat ColorFormat6,
         rhi::TextureFormat ColorFormat7
     >
-    static AttachmentFormats* AttachmentFormats::get() noexcept
+    AttachmentFormats* AttachmentFormats::get() noexcept
     {
         static TAttachmentFormats <
             DepthStencilFormat,
@@ -216,7 +216,6 @@ namespace hyp
     {
         ShaderVariant shader;
         VertexLayout vertexLayout;
-        uint32_t polygonMode : 2;
         uint32_t topology : 4;
         uint32_t samples : 2;
         uint32_t cullMode : 2;
@@ -225,6 +224,7 @@ namespace hyp
         uint32_t depthWriteEnable : 1;
         uint32_t depthCompareOp : 4;
         uint32_t stencilTestEnable : 1;
+        uint32_t depthClampEnable : 1;
         StencilState* stencilState;
         ColorBlendState* colorBlendState;
         AttachmentFormats* attachmentFormats;
@@ -241,7 +241,6 @@ namespace hyp
             return
                 shader == other.shader &&
                 vertexLayout == other.vertexLayout &&
-                polygonMode == other.polygonMode &&
                 topology == other.topology &&
                 samples == other.samples &&
                 cullMode == other.cullMode &&
@@ -250,6 +249,7 @@ namespace hyp
                 depthWriteEnable == other.depthWriteEnable &&
                 depthCompareOp == other.depthCompareOp &&
                 stencilTestEnable == other.stencilTestEnable &&
+                depthClampEnable == other.depthClampEnable &&
                 stencilState == other.stencilState &&
                 colorBlendState == other.colorBlendState &&
                 attachmentFormats == other.attachmentFormats;
@@ -267,7 +267,6 @@ namespace std
             size_t seed = 0;
             hyp::Hash::combine(seed, state.shader);
             hyp::Hash::combine(seed, state.vertexLayout);
-            hyp::Hash::combine(seed, state.polygonMode);
             hyp::Hash::combine(seed, state.topology);
             hyp::Hash::combine(seed, state.samples);
             hyp::Hash::combine(seed, state.cullMode);
@@ -276,6 +275,7 @@ namespace std
             hyp::Hash::combine(seed, state.depthWriteEnable);
             hyp::Hash::combine(seed, state.depthCompareOp);
             hyp::Hash::combine(seed, state.stencilTestEnable);
+            hyp::Hash::combine(seed, state.depthClampEnable);
             hyp::Hash::combine(seed, state.stencilState);
             hyp::Hash::combine(seed, state.colorBlendState);
             hyp::Hash::combine(seed, state.attachmentFormats);

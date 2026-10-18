@@ -5,6 +5,19 @@
 
 namespace hyp::vk
 {
+    static bool validateColorAttachmentCount(size_t colorAttachmentCount) noexcept
+    {
+        if (colorAttachmentCount <= RenderPassKey::kMaxColorAttachments)
+            return true;
+
+        LOG_ERROR(
+            "RenderPassCache supports at most {} color attachments, got {}",
+            RenderPassKey::kMaxColorAttachments,
+            colorAttachmentCount
+        );
+        return false;
+    }
+
     static VkAttachmentLoadOp convertLoadOp(rhi::AttachmentLoadOp op) noexcept
     {
         switch (op)
@@ -22,6 +35,7 @@ namespace hyp::vk
         {
         case rhi::AttachmentStoreOp::Store:     return VK_ATTACHMENT_STORE_OP_STORE;
         case rhi::AttachmentStoreOp::Dont_Care: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        case rhi::AttachmentStoreOp::None:      return VK_ATTACHMENT_STORE_OP_NONE;
         default:                                return VK_ATTACHMENT_STORE_OP_DONT_CARE;
         }
     }
@@ -49,13 +63,15 @@ namespace hyp::vk
 
     VkRenderPass RenderPassCache::getOrCreateRenderPass(const RenderPassKey& key)
     {
+        if (!validateColorAttachmentCount(key.colorAttachmentCount))
+            return VK_NULL_HANDLE;
+
         auto it = mCache.find(key);
         if (it != mCache.end())
         {
             return it->second;
         }
 
-        const uint32_t maxColorAttachments = 8;
         const bool hasDepthStencil = key.depthStencilFormat != VK_FORMAT_UNDEFINED;
 
         uint32_t attachmentCount = key.colorAttachmentCount + (hasDepthStencil ? 1 : 0);
@@ -141,11 +157,12 @@ namespace hyp::vk
     VkRenderPass RenderPassCache::getOrCreateRenderPass(
         std::span<const VkFormat> colorFormats,
         VkFormat depthStencilFormat,
-        VkFormat depthFormat,
-        VkFormat stencilFormat,
         VkSampleCountFlagBits sampleCount
     )
     {
+        if (!validateColorAttachmentCount(colorFormats.size()))
+            return VK_NULL_HANDLE;
+
         RenderPassKey key;
         key.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
         for (uint32_t i = 0; i < key.colorAttachmentCount; ++i)
@@ -176,6 +193,9 @@ namespace hyp::vk
         VkSampleCountFlagBits sampleCount
     )
     {
+        if (!validateColorAttachmentCount(colorFormats.size()))
+            return VK_NULL_HANDLE;
+
         RenderPassKey key;
         key.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
         for (uint32_t i = 0; i < key.colorAttachmentCount; ++i)

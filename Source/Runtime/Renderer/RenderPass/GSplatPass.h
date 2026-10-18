@@ -23,6 +23,7 @@ namespace hyp
         static void addGSplatCullingPass(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
+            const SceneProxy& scene,
             const SceneView& view,
             const GSplatScene& gsplatScene
         );
@@ -30,7 +31,6 @@ namespace hyp
         static void addGSplatSortPass(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
-            const SceneProxy& scene,
             const SceneView& view,
             const GSplatScene& gsplatScene
         );
@@ -63,7 +63,6 @@ namespace hyp
         static void addRadixSortDownsweepPass(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
-            const SceneProxy& scene,
             uint32_t viewId,
             uint32_t splatCount,
             uint32_t partitionCount,
@@ -80,6 +79,7 @@ namespace hyp
         static void addGSplatRenderPass(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
+            const SceneProxy& scene,
             const SceneView& view,
             const GSplatScene& gsplatScene
         );
@@ -87,6 +87,7 @@ namespace hyp
         static void addGSplatDepthPass(
             rg::RenderGraph& renderGraph,
             RendererContext& rendererContext,
+            const SceneProxy& scene,
             const SceneView& view,
             const GSplatScene& gsplatScene
         );

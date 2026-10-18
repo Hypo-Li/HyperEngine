@@ -11,6 +11,7 @@ namespace hyp
         Volume,
         Post_Process,
         User_Interface,
+        Sky,
 
         Count,
     };
@@ -35,11 +36,19 @@ namespace hyp
         Unlit,
         Standard,
         Clear_Coat,
+        Cloth,
+        From_Material, // 每像素运行期决定, 代价是各 shading model 专属字段没法被编译器死代码消除
 
         Count,
     };
 
     template <> Type* Reflection::createType<ShadingModel>();
+
+    const char* getShaderMacroName(MaterialDomain domain) noexcept;
+
+    const char* getShaderMacroName(BlendMode blendMode) noexcept;
+
+    const char* getShaderMacroName(ShadingModel shadingModel) noexcept;
 
     enum class MaterialParameterType : uint8_t
     {
@@ -53,9 +62,12 @@ namespace hyp
         Texture_2D_Array,
         Texture_3D,
         Texture_Cube,
+        Font,
 
         Count,
     };
+
+    template <> Type* Reflection::createType<MaterialParameterType>();
 
     inline bool isTextureParameterType(MaterialParameterType type) noexcept
     {

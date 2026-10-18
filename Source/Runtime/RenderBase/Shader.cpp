@@ -1,7 +1,7 @@
 #include "Shader.h"
-#include "ShaderCompiler.h"
 
 #include <format>
+#include <string_view>
 
 #include <Core/Common/Hash.h>
 
@@ -21,7 +21,9 @@ namespace hyp
         {
             switch (type)
             {
-            case MaterialParameterType::Bool: return "bool";
+            // bool 不是 WGSL 的 host-shareable 类型, 不能出现在 uniform 地址空间的结构体里
+            // (Dawn 编译期直接拒绝)——统一用 uint 表示布尔材质参数(0/1), SPIR-V/HLSL 也兼容
+            case MaterialParameterType::Bool: return "uint";
             case MaterialParameterType::Int: return "int";
             case MaterialParameterType::Float: return "float";
             case MaterialParameterType::Float2: return "float2";
@@ -35,11 +37,11 @@ namespace hyp
         {
             switch (type)
             {
-            case MaterialParameterType::Texture_2D: return "Texture2D";
-            case MaterialParameterType::Texture_2D_Array: return "Texture2DArray";
-            case MaterialParameterType::Texture_3D: return "Texture3D";
-            case MaterialParameterType::Texture_Cube: return "TextureCube";
-            default: return "Texture2D";
+            case MaterialParameterType::Texture_2D: return "MatTexture2D";
+            case MaterialParameterType::Texture_2D_Array: return "MatTexture2DArray";
+            case MaterialParameterType::Texture_3D: return "MatTexture3D";
+            case MaterialParameterType::Texture_Cube: return "MatTextureCube";
+            default: return "MatTexture2D";
             }
         }
 
@@ -140,66 +142,54 @@ namespace hyp
         const rhi::Device& device,
         RenderTagRegistry& renderTagRegistry,
         ShaderCache& shaderCache,
+        const std::filesystem::path& shaderDir,
         HString name,
         std::string&& materialImplementation
     ) : mRHIBackend(rhiBackend),
         mDevice(device),
         mRenderTagRegistry(renderTagRegistry),
         mShaderCache(shaderCache),
+        mShaderDir(shaderDir),
         mName(name),
         mMaterialImplementation(std::move(materialImplementation))
     {
     }
 
-    // 网格实际有几个 texcoord 由 VertexLayout 决定,和材质属性(makeShaderMacros)无关——
-    // 这里按位置从低到高数出最高被置位的 TexCoordN, 取其 +1 作为 count, 假定顶点数据里
-    // TexCoord0..N 是连续存在的(引擎目前所有生成/导入路径都保证这一点)
-    static uint32_t computeTexCoordCount(VertexLayout vertexLayout) noexcept
-    {
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < 8; ++i)
-        {
-            if (enumHasAnyFlags(vertexLayout.getAttributeMask(), VertexAttributeMask(uint32_t(VertexAttributeMask::TexCoord0) << i)))
-                count = i + 1;
-        }
-        return count;
-    }
-
-    ShaderVariant MaterialShader::getOrCreateVariant(
+    std::optional<ShaderVariant> MaterialShader::getOrCreateVariant(
         HString renderTag,
         VertexLayout vertexLayout,
         std::span<const ShaderMacro> shaderMacros
     )
     {
-        std::vector<ShaderMacro> allMacros(shaderMacros.begin(), shaderMacros.end());
-        allMacros.emplace_back("TEXCOORD_COUNT"_hs, HString(std::to_string(computeTexCoordCount(vertexLayout))));
-        bool hasVertexColor = enumHasAnyFlags(vertexLayout.getAttributeMask(), VertexAttributeMask::Color);
-        allMacros.emplace_back("HAS_VERTEX_COLOR"_hs, HString(hasVertexColor ? "1" : "0"));
-
-        VariantKey key = { renderTag, vertexLayout, allMacros };
+        VariantKey key = { renderTag, vertexLayout, std::vector<ShaderMacro>(shaderMacros.begin(), shaderMacros.end()) };
         auto it = mVariants.find(key);
         if (it != mVariants.end())
         {
             return it->second;
         }
-        ShaderVariant variant = createVariant(renderTag, vertexLayout, allMacros);
-        return mVariants[std::move(key)] = variant;
+        if (mFailedVariants.contains(key))
+        {
+            return std::nullopt;
+        }
+
+        std::optional<ShaderVariant> variant = createVariant(renderTag, vertexLayout, shaderMacros);
+        if (!variant)
+        {
+            mFailedVariants.insert(std::move(key));
+            return std::nullopt;
+        }
+        return mVariants[std::move(key)] = *variant;
     }
 
-    ShaderVariant MaterialShader::createVariant(
+    std::optional<ShaderVariant> MaterialShader::createVariant(
         HString renderTag,
         VertexLayout vertexLayout,
         std::span<const ShaderMacro> shaderMacros
     )
     {
-        ShaderVariant result;
         auto& shaderFileName = mRenderTagRegistry.getShaderFileName(renderTag);
-        ShaderCompiler::ShaderStage stages[] = {
-            ShaderCompiler::ShaderStage::Vertex,
-            ShaderCompiler::ShaderStage::Fragment
-        };
-        rhi::ShaderCodeFormat codeFormat = mRHIBackend == rhi::Backend::WebGPU ?
-            rhi::ShaderCodeFormat::Wgsl : rhi::ShaderCodeFormat::Spirv;
+        const rhi::ShaderCompileTarget& shaderCompileTarget = mDevice.getShaderCompileTarget();
+        rhi::ShaderCodeFormat codeFormat = shaderCompileTarget.codeFormat;
 
         // Release 下 material shader 应该是优化且不带调试信息的;和 RenderBackend.cpp 里
         // enableValidation 用的是同一个 _DEBUG 判断
@@ -209,88 +199,43 @@ namespace hyp
         constexpr bool withDebugInfo = false;
 #endif
 
-        uint64_t cacheKey = mShaderCache.computeVariantKey(
+        uint128_t cacheKey = mShaderCache.computeVariantKey(
             renderTag,
             vertexLayout,
             mMaterialImplementation,
             shaderMacros,
-            codeFormat,
-            withDebugInfo,
-            [this, renderTag, vertexLayout]() { return makeShaderSource(renderTag, vertexLayout); }
+            withDebugInfo
         );
 
-        std::vector<std::vector<uint8_t>> shaderCode;
-        if (auto cached = mShaderCache.tryLoad(cacheKey))
+        std::optional<ShaderCache::CachedVariant> cached = mShaderCache.tryLoad(cacheKey);
+        if (!cached)
         {
-            shaderCode.push_back(std::move(cached->vertexCode));
-            shaderCode.push_back(std::move(cached->fragmentCode));
-        }
-        else
-        {
-            std::string shaderSource = makeShaderSource(renderTag, vertexLayout);
-
-            if (mRHIBackend == rhi::Backend::Vulkan)
-            {
-                shaderCode = ShaderCompiler::compileToSpirvs(
-                    mName.toCString(),
-                    shaderSource.c_str(),
-                    stages,
-                    shaderFileName.c_str(),
-                    shaderMacros,
-                    true,
-                    withDebugInfo
-                );
-            }
-            else if (mRHIBackend == rhi::Backend::WebGPU)
-            {
-                shaderCode = ShaderCompiler::compileToWgsls(
-                    mName.toCString(),
-                    shaderSource.c_str(),
-                    stages,
-                    shaderFileName.c_str(),
-                    shaderMacros,
-                    true,
-                    withDebugInfo
-                );
-            }
-
-            mShaderCache.save(cacheKey, shaderCode[0], shaderCode[1]);
+            std::string shaderSource = mRenderTagRegistry.makeShaderSource(renderTag, mMaterialImplementation, vertexLayout);
+            cached = mShaderCache.compileAndCache(
+                cacheKey,
+                mName.toCString(),
+                shaderSource,
+                shaderFileName.c_str(),
+                shaderMacros,
+                withDebugInfo
+            );
         }
 
-        result.vertexModule = mDevice.createShaderModule(rhi::ShaderStage::Vertex, std::move(shaderCode[0]), codeFormat);
+        if (!cached)
+        {
+            return std::nullopt;
+        }
+
+        ShaderVariant result;
+        result.vertexModule = mDevice.createShaderModule(rhi::ShaderStage::Vertex, std::move(cached->vertexCode), codeFormat);
         std::string vertexModuleName = std::string(mName.toStringView()) + "_" + std::string(renderTag.toStringView()) + "_Vertex";
         result.vertexModule->setDebugName(std::string_view(vertexModuleName));
 
-        result.fragmentModule = mDevice.createShaderModule(rhi::ShaderStage::Fragment, std::move(shaderCode[1]), codeFormat);
+        result.fragmentModule = mDevice.createShaderModule(rhi::ShaderStage::Fragment, std::move(cached->fragmentCode), codeFormat);
         std::string fragmentModuleName = std::string(mName.toStringView()) + "_" + std::string(renderTag.toStringView()) + "_Fragment";
         result.fragmentModule->setDebugName(std::string_view(fragmentModuleName));
 
         return result;
-    }
-
-    std::string MaterialShader::makeShaderSource(HString renderTag, VertexLayout vertexLayout)
-    {
-        std::string shaderSource = mRenderTagRegistry.getShaderTemplate(renderTag);
-
-        std::string_view materialImplementationTag = "[MATERIAL_IMPLEMENTATION]";
-        auto materialImplementationPos = shaderSource.find(materialImplementationTag);
-        if (materialImplementationPos != std::string::npos)
-        {
-            shaderSource.replace(materialImplementationPos, materialImplementationTag.length(), mMaterialImplementation);
-        }
-
-        std::string_view vertexAttributeGettersTag = "[VERTEX_ATTRIBUTE_GETTERS]";
-        auto vertexAttributeGettersPos = shaderSource.find(vertexAttributeGettersTag);
-        if (vertexAttributeGettersPos != std::string::npos)
-        {
-            shaderSource.replace(
-                vertexAttributeGettersPos,
-                vertexAttributeGettersTag.length(),
-                vertexLayout.getVertexAttributeGetters()
-            );
-        }
-
-        return shaderSource;
     }
 
     bool MaterialShader::VariantKey::operator==(const VariantKey& other) const noexcept
@@ -307,24 +252,27 @@ namespace hyp
         return seed;
     }
 
-    MaterialShaderManager::MaterialShaderManager(rhi::Backend rhiBackend, const rhi::Device& device, RenderTagRegistry& renderTagRegistry) :
+    MaterialShaderManager::MaterialShaderManager(rhi::Backend rhiBackend, const rhi::Device& device, RenderTagRegistry& renderTagRegistry, const std::filesystem::path& shaderDir) :
         mRHIBackend(rhiBackend),
         mDevice(device),
         mRenderTagRegistry(renderTagRegistry),
-        mShaderCache(renderTagRegistry),
+        mShaderCache(renderTagRegistry, shaderDir, device.getShaderCompileTarget()),
+        mShaderDir(shaderDir),
         mBindlessEnabled(device.getFeatures().bindless)
     {
     }
 
     MaterialShaderHandle MaterialShaderManager::allocateHandle()
     {
+        std::lock_guard<std::mutex> lock(mHandleMutex);
+
         uint32_t index;
         uint32_t version;
 
-        if (!mFreeIndices.empty())
+        if (!mReclaimedIndices.empty())
         {
-            index = mFreeIndices.back();
-            mFreeIndices.pop_back();
+            index = mReclaimedIndices.back();
+            mReclaimedIndices.pop_back();
             version = mVersions[index];
         }
         else
@@ -334,18 +282,6 @@ namespace hyp
             mVersions.push_back(version);
         }
         return MaterialShaderHandle(index, version);
-    }
-
-    void MaterialShaderManager::freeHandle(MaterialShaderHandle handle)
-    {
-        uint32_t index = handle.getIndex();
-        uint32_t version = handle.getVersion();
-
-        if (mVersions[index] == version)
-        {
-            mVersions[index]++;
-            mFreeIndices.push_back(index);
-        }
     }
 
     // 材质没有自己写顶点位置偏移(vertex position offset)函数时补一个永远返回 0 的默认实现——
@@ -360,9 +296,19 @@ namespace hyp
         return "float3 evaluateVertexPositionOffset(in VertexPositionOffsetInput vpoi) { return float3(0, 0, 0); }\n";
     }
 
+    // 兜底材质的 evaluateMaterial(): 只设品红自发光, 其余字段留给 MaterialOutput::__init() 的
+    // 中性默认值(白色 baseColor、roughness 0.5 等)——不追求正确光照/GBuffer 内容, 只要求这个
+    // 函数在任意 render tag 的模板里都能编译过
+    static constexpr const char* kErrorMaterialSource =
+        "void evaluateMaterial(in MaterialInput mi, inout MaterialOutput mo)\n"
+        "{\n"
+        "    mo.emissive = float3(4.0, 0.0, 4.0);\n"
+        "}\n";
+
     void MaterialShaderManager::createMaterialShader(
         MaterialShaderHandle handle,
         HString name,
+        const std::string& materialFunctionLibrarySource,
         const std::string& materialSource,
         const std::string& vertexPositionOffsetSource,
         std::span<const MaterialParameterMetadata> parameterMetadata
@@ -378,9 +324,11 @@ namespace hyp
         slot.version = handle.getVersion();
         slot.refCount = 1;
 
-        // 顶点位置偏移函数拼在参数定义后面、材质着色函数前面——它同样可能要读材质参数(比如
-        // 风力强度), 必须和参数结构体定义在同一个作用域, 三段最终一起 splice 进 [MATERIAL_IMPLEMENTATION]
+        // materialFunctionLibrarySource 不能拼进 vertexPositionOffsetSource 参数本身——
+        // resolveVertexPositionOffsetSource() 靠这个参数是否为空判断用户写没写自己的顶点
+        // 偏移函数, 拼进去会让这个判断永远落在"非空"分支
         std::string materialImplementation = makeParameterDefines(parameterMetadata, mBindlessEnabled)
+            + materialFunctionLibrarySource
             + resolveVertexPositionOffsetSource(vertexPositionOffsetSource)
             + materialSource;
         slot.shader = std::make_unique<MaterialShader>(
@@ -388,6 +336,7 @@ namespace hyp
             mDevice,
             mRenderTagRegistry,
             mShaderCache,
+            mShaderDir,
             name,
             std::move(materialImplementation)
         );
@@ -413,6 +362,17 @@ namespace hyp
         {
             slot.shader = nullptr;
             slot.version = 0;
+
+            // 只有这里(引用计数真正归零的这一刻)才允许这个 index 被下一次 allocateHandle()
+            // 复用——不能让逻辑线程凭 MaterialTemplate 自己那一份引用就以为"可以回收了",
+            // MaterialInstance::createMaterialProxy() 之类的地方会额外 refMaterialShader()
+            // 一次, 那种情况下 slot.shader 还活着, 提前把 index 交还出去会导致后续复用同一个
+            // index 建新 shader 时撞上 assert(slot.shader == nullptr)。bump mVersions[index]
+            // 顺便让所有还攥着旧 handle 的地方天然失效(理论上不该再有, 但versioning本来就是
+            // 干这个用的)。
+            std::lock_guard<std::mutex> lock(mHandleMutex);
+            mVersions[index]++;
+            mReclaimedIndices.push_back(index);
         }
     }
 
@@ -439,12 +399,33 @@ namespace hyp
             mDevice,
             mRenderTagRegistry,
             mShaderCache,
+            mShaderDir,
             HString("SharedGeometryShader_" + std::string(renderTag.toStringView())),
             std::move(materialImplementation)
         );
         MaterialShader* result = shader.get();
         mSharedGeometryShaders.emplace(renderTag, std::move(shader));
         return result;
+    }
+
+    ShaderVariant MaterialShaderManager::getErrorMaterialShader(HString renderTag, VertexLayout vertexLayout)
+    {
+        if (!mErrorMaterialShader)
+        {
+            mErrorMaterialShader = std::make_unique<MaterialShader>(
+                mRHIBackend,
+                mDevice,
+                mRenderTagRegistry,
+                mShaderCache,
+                mShaderDir,
+                "ErrorMaterialShader"_hs,
+                resolveVertexPositionOffsetSource("") + kErrorMaterialSource
+            );
+        }
+
+        auto variant = mErrorMaterialShader->getOrCreateVariant(renderTag, vertexLayout, {});
+        assert(variant && "cook 阶段必须保证兜底材质对所有 renderTag 都能编译成功, 见 getErrorMaterialShader() 声明处的注释");
+        return *variant;
     }
 
     PassShader::PassShader(

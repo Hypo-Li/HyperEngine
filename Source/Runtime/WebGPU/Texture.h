@@ -53,9 +53,10 @@ namespace hyp::wgpu
             return mTexture;
         }
 
-        TRef<rhi::TextureView> createView(const rhi::TextureViewDesc& desc) override;
-
         void setDebugName(HString name) override;
+
+    protected:
+        TRef<rhi::TextureView> createViewImpl(const rhi::TextureViewDesc& desc) override;
 
     private:
         WGPUTexture mTexture = nullptr;

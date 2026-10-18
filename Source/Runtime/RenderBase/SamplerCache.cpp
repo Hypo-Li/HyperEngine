@@ -118,22 +118,6 @@ namespace hyp
         return mLinearClampMip;
     }
 
-    TRef<rhi::Sampler> SamplerCache::getPointClampMip()
-    {
-        if (!mPointClampMip)
-        {
-            rhi::SamplerDesc samplerDesc;
-            samplerDesc.magFilter = rhi::Filter::Nearest;
-            samplerDesc.minFilter = rhi::Filter::Nearest;
-            samplerDesc.mipmapMode = rhi::MipmapMode::Linear;
-            samplerDesc.addressModeU = rhi::AddressMode::Clamp_To_Edge;
-            samplerDesc.addressModeV = rhi::AddressMode::Clamp_To_Edge;
-            samplerDesc.addressModeW = rhi::AddressMode::Clamp_To_Edge;
-            mPointClampMip = getOrCreate(samplerDesc);
-        }
-        return mPointClampMip;
-    }
-
     TRef<rhi::Sampler> SamplerCache::getLinearRepeatMip()
     {
         if (!mLinearRepeatMip)
@@ -148,22 +132,6 @@ namespace hyp
             mLinearRepeatMip = getOrCreate(samplerDesc);
         }
         return mLinearRepeatMip;
-    }
-
-    TRef<rhi::Sampler> SamplerCache::getPointRepeatMip()
-    {
-        if (!mPointRepeatMip)
-        {
-            rhi::SamplerDesc samplerDesc;
-            samplerDesc.magFilter = rhi::Filter::Nearest;
-            samplerDesc.minFilter = rhi::Filter::Nearest;
-            samplerDesc.mipmapMode = rhi::MipmapMode::Linear;
-            samplerDesc.addressModeU = rhi::AddressMode::Repeat;
-            samplerDesc.addressModeV = rhi::AddressMode::Repeat;
-            samplerDesc.addressModeW = rhi::AddressMode::Repeat;
-            mPointRepeatMip = getOrCreate(samplerDesc);
-        }
-        return mPointRepeatMip;
     }
 
     size_t SamplerCache::KeyHash::operator()(const Key& key) const noexcept

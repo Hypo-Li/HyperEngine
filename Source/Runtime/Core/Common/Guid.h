@@ -1,5 +1,6 @@
 #pragma once
-#include "../Reflection/Reflection.h"
+#include <cstdint>
+#include <string>
 
 namespace hyp
 {
@@ -29,8 +30,6 @@ namespace hyp
             return guid1.A != guid2.A || guid1.B != guid2.B || guid1.C != guid2.C || guid1.D != guid2.D;
         }
     };
-
-    template <> Type* Reflection::createType<Guid>();
 }
 
 namespace std

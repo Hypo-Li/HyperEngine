@@ -16,15 +16,18 @@ namespace hyp::vk
     PipelineLayout::PipelineLayout(const Device& device, const rhi::PipelineLayoutDesc& desc)
         : rhi::PipelineLayout(device)
     {
+        // desc.bindGroupLayouts 从下标 0 起连续非空, 中间不会有洞——hyp::PipelineCache::
+        // createPipelineLayout() 已经用共享的空 BindGroupLayout 把洞填过了(Vulkan 要求
+        // pSetLayouts[0, setLayoutCount) 每一项都是合法 handle, 不能跳着给), 这里不需要
+        // 再处理"中间为空"这种情况
         std::array<VkDescriptorSetLayout, 4> setLayouts = { VK_NULL_HANDLE };
         uint32_t bindGroupLayoutCount = 0;
         for (uint32_t i = 0; i < 4; ++i)
         {
-            if (desc.bindGroupLayouts[i])
-            {
-                setLayouts[i] = static_cast<const BindGroupLayout*>(desc.bindGroupLayouts[i])->getHandle();
-                bindGroupLayoutCount++;
-            }
+            if (!desc.bindGroupLayouts[i])
+                break;
+            setLayouts[i] = static_cast<const BindGroupLayout*>(desc.bindGroupLayouts[i])->getHandle();
+            bindGroupLayoutCount++;
         }
 
         VkPushConstantRange pushConstantRange = {};
@@ -103,16 +106,6 @@ namespace hyp::vk
         case rhi::PrimitiveTopology::Triangle_List:  return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         case rhi::PrimitiveTopology::Triangle_Strip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
         default:                                     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        }
-    }
-
-    static VkPolygonMode convertPolygonMode(rhi::PolygonMode mode) noexcept
-    {
-        switch (mode)
-        {
-        case rhi::PolygonMode::Line:  return VK_POLYGON_MODE_LINE;
-        case rhi::PolygonMode::Point: return VK_POLYGON_MODE_POINT;
-        default:                      return VK_POLYGON_MODE_FILL;
         }
     }
 
@@ -286,7 +279,7 @@ namespace hyp::vk
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rasterizer.depthClampEnable = desc.rasterizationState.depthClampEnable ? VK_TRUE : VK_FALSE;
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = convertPolygonMode(desc.rasterizationState.polygonMode);
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.cullMode = convertCullMode(desc.rasterizationState.cullMode);
         rasterizer.frontFace = convertFrontFace(desc.rasterizationState.frontFace);
         rasterizer.depthBiasEnable = desc.rasterizationState.depthBiasEnable ? VK_TRUE : VK_FALSE;
@@ -294,6 +287,17 @@ namespace hyp::vk
         rasterizer.depthBiasClamp = desc.rasterizationState.depthBiasClamp;
         rasterizer.depthBiasSlopeFactor = desc.rasterizationState.depthBiasSlopeFactor;
         rasterizer.lineWidth = 1.0f;
+
+        const bool isLineTopology =
+            desc.inputAssemblyState.topology == rhi::PrimitiveTopology::Line_List ||
+            desc.inputAssemblyState.topology == rhi::PrimitiveTopology::Line_Strip;
+        VkPipelineRasterizationLineStateCreateInfoKHR lineRasterizationState = {};
+        if (isLineTopology && device.getVkFeatures().lineRasterization)
+        {
+            lineRasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR;
+            lineRasterizationState.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_KHR;
+            rasterizer.pNext = &lineRasterizationState;
+        }
 
         VkPipelineMultisampleStateCreateInfo multisampling = {};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -406,8 +410,6 @@ namespace hyp::vk
             renderPass = device.getRenderPassCache().getOrCreateRenderPass(
                 colorFormats,
                 depthStencilFormat,
-                depthFormat,
-                stencilFormat,
                 static_cast<VkSampleCountFlagBits>(desc.multisampleState.sampleCount)
             );
         }

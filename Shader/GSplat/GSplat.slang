@@ -1,5 +1,8 @@
 #include "../Common/Binding.slang"
 
+[[vk::binding(0, 3)]]
+StructuredBuffer<InstanceData> sInstanceData;
+
 struct GPUSplatData
 {
     float3 position;
@@ -25,7 +28,7 @@ static constexpr float3 kQuadPositions[4] = {
 
 struct V2F
 {
-    float4 position : SV_Position;
+    float4 svPosition : SV_Position;
     float2 quadPosition : TEXCOORD0;
     float4 color : TEXCOORD1;
 };
@@ -42,26 +45,25 @@ V2F VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     v2f.color = unpackUnorm4x8ToFloat(splatData.color);
 
     const InstanceData instanceData = sInstanceData[splatData.instanceIndex];
-    const ViewData viewData = sViewData[0];
-    float4x4 localToView;
-    calculateLocalToView(
-        instanceData.localToWorld,
-        viewData.worldToViewRot,
-        viewData.cameraOrigin,
-        localToView
+    float4x4 objectToView;
+    calculateObjectToView(
+        instanceData.objectToWorld,
+        uViewData.worldToViewRot,
+        uViewData.cameraOrigin,
+        objectToView
     );
-    float4 viewSpace = mul(float4(splatData.position, 1), localToView);
-    float4 clipSpace = mul(viewSpace, viewData.viewToClip);
+    float4 viewSpace = mul(float4(splatData.position, 1), objectToView);
+    float4 clipSpace = mul(viewSpace, uViewData.viewToClipUnjittered);
     clipSpace *= 1.0 / clipSpace.w;
     if (any(abs(clipSpace.xyz) > float3(1.0)))
     {
-        v2f.position = float4(0, 0, 2.0, 1.0);
+        v2f.svPosition = float4(0, 0, 2.0, 1.0);
         return v2f;
     }
 
     float2 focal = float2(
-        0.5 * viewData.resolution.x * viewData.viewToClip[0][0],
-        0.5 * viewData.resolution.y * viewData.viewToClip[1][1]
+        0.5 * uViewData.resolution.x * uViewData.viewToClipUnjittered[0][0],
+        0.5 * uViewData.resolution.y * uViewData.viewToClipUnjittered[1][1]
     );
     float3x3 J = float3x3(
         focal.x / viewSpace.z, 0.0, -(focal.x * viewSpace.x) / (viewSpace.z * viewSpace.z),
@@ -69,7 +71,7 @@ V2F VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
         0.0, 0.0, 0.0
     );
 
-    float3x3 W = transpose(float3x3(localToView));
+    float3x3 W = transpose(float3x3(objectToView));
 
     float3x3 T = mul(J, W);
     float2 u1 = unpackHalf2x16ToFloat(splatData.sigma[0]);
@@ -90,7 +92,7 @@ V2F VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     float radius = length(float2((diagonal1 - diagonal2) * 0.5, offDiagonal));
     float lambda1 = mid + radius;
     float lambda2 = max(mid - radius, 0.1);
-    float vmin = min(1024.0, min(viewData.resolution.x, viewData.resolution.y));
+    float vmin = min(1024.0, min(uViewData.resolution.x, uViewData.resolution.y));
     float l1 = 2.0 * min(sqrt(2.0 * lambda1), vmin);
     float l2 = 2.0 * min(sqrt(2.0 * lambda2), vmin);
 
@@ -99,10 +101,10 @@ V2F VertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
     float2 minorAxis = l2 * float2(diagonalVector.y, -diagonalVector.x);
 
     float2 vCenter = clipSpace.xy;
-    v2f.position = float4(
+    v2f.svPosition = float4(
         vCenter
-        + kQuadPositions[vertexID].x * majorAxis * viewData.resolution.zw
-        + kQuadPositions[vertexID].y * minorAxis * viewData.resolution.zw,
+        + kQuadPositions[vertexID].x * majorAxis * uViewData.resolution.zw
+        + kQuadPositions[vertexID].y * minorAxis * uViewData.resolution.zw,
         clipSpace.z, 1.0
     );
     return v2f;

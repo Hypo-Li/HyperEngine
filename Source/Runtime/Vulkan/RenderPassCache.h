@@ -3,7 +3,7 @@
 
 #include <Core/Common/Hash.h>
 
-#include <volk.h>
+#include "VolkInclude.h"
 #include <array>
 #include <span>
 #include <unordered_map>
@@ -12,10 +12,12 @@ namespace hyp::vk
 {
     struct RenderPassKey
     {
+        static constexpr uint32_t kMaxColorAttachments = 8;
+
         uint32_t colorAttachmentCount = 0;
-        std::array<VkFormat, 8> colorFormats{};
-        std::array<VkAttachmentLoadOp, 8> colorLoadOps{};
-        std::array<VkAttachmentStoreOp, 8> colorStoreOps{};
+        std::array<VkFormat, kMaxColorAttachments> colorFormats{};
+        std::array<VkAttachmentLoadOp, kMaxColorAttachments> colorLoadOps{};
+        std::array<VkAttachmentStoreOp, kMaxColorAttachments> colorStoreOps{};
 
         VkFormat depthStencilFormat = VK_FORMAT_UNDEFINED;
         VkAttachmentLoadOp depthLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -76,8 +78,6 @@ namespace hyp::vk
         VkRenderPass getOrCreateRenderPass(
             std::span<const VkFormat> colorFormats,
             VkFormat depthStencilFormat,
-            VkFormat depthFormat,
-            VkFormat stencilFormat,
             VkSampleCountFlagBits sampleCount
         );
 

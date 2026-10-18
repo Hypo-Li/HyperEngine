@@ -14,9 +14,6 @@ namespace hyp
         void initialize(
             uint32_t width,
             PixelFormat format,
-            bool isSRGB,
-            CompressionPreset compressionPreset,
-            bool generateMips = true,
             uint32_t mipLevels = 0
         );
 

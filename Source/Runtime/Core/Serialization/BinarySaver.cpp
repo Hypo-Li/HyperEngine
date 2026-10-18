@@ -1,11 +1,12 @@
 #include "BinarySaver.h"
 #include <cassert>
+#include <cstring>
 
 namespace hyp
 {
-    bool BinarySaver::isLoading() const
+    BinarySaver::BinarySaver(bool isCooking) :
+        BinaryArchive(false, isCooking)
     {
-        return false;
     }
 
     void BinarySaver::serialize(bool* value, size_t count)
@@ -141,6 +142,11 @@ namespace hyp
         uint32_t newObjectBufferIdx = static_cast<uint32_t>(mObjectBuffers.size());
         mObjectBuffers.emplace_back();
         pushObjectBufferIdx(newObjectBufferIdx);
+        // cook 产物不需要自描述: className 只是 Serializer::loadClass 里的一致性 assert 用,
+        // version 用于编辑期 schema 迁移——cook 路径下两者都不落盘, propCount 同理
+        // (cook 路径按固定 schema 顺序 + presence bitmask 读写, 数量本身不需要写)
+        if (isCooking())
+            return;
         serialize(&typeName);
         serialize(&version);
         serialize(&propCount);

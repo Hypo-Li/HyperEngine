@@ -1,3 +1,7 @@
+if (NOT HYP_ENABLE_PYTHON_BINDINGS)
+    return()
+endif()
+
 file(GLOB_RECURSE HEADER_FILES "*.h")
 file(GLOB_RECURSE SOURCE_FILES "*.cpp")
 

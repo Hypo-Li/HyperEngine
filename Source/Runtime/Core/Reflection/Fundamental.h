@@ -32,7 +32,6 @@ namespace hyp
         }
 
     private:
-        template <typename T>
         static constexpr size_t sizeOf()
         {
             if constexpr (std::is_void_v<T>)
@@ -42,6 +41,6 @@ namespace hyp
         }
 
         TFundamental(HString name) :
-            Fundamental(name, sizeOf<T>()) {}
+            Fundamental(name, sizeOf()) {}
     };
 }

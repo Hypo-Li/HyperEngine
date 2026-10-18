@@ -28,6 +28,7 @@ namespace hyp::rhi
         result.independentBlend = resolve("independentBlend", supported.independentBlend, requirements.independentBlend);
         result.dualSourceBlend = resolve("dualSourceBlend", supported.dualSourceBlend, requirements.dualSourceBlend);
         result.multiViewport = resolve("multiViewport", supported.multiViewport, requirements.multiViewport);
+        result.depthClamp = resolve("depthClamp", supported.depthClamp, requirements.depthClamp);
 
         // Shader
         result.shaderInt16 = resolve("shaderInt16", supported.shaderInt16, requirements.shaderInt16);
@@ -37,6 +38,7 @@ namespace hyp::rhi
         result.shaderAtomics = resolve("shaderAtomics", supported.shaderAtomics, requirements.shaderAtomics);
         result.shaderFloatAtomics = resolve("shaderFloatAtomics", supported.shaderFloatAtomics, requirements.shaderFloatAtomics);
         result.subgroup = resolve("subgroup", supported.subgroup, requirements.subgroup);
+        result.computeShaderDerivatives = resolve("computeShaderDerivatives", supported.computeShaderDerivatives, requirements.computeShaderDerivatives);
 
         // Texture
         result.depth32FloatStencil8 = resolve("depth32FloatStencil8", supported.depth32FloatStencil8, requirements.depth32FloatStencil8);

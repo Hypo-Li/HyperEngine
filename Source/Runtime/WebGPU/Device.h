@@ -4,6 +4,8 @@
 #include <RHI/Device.h>
 #include <RHI/Context.h>
 
+#include "Features.h"
+
 namespace hyp::wgpu
 {
     class Device : public rhi::Device
@@ -14,12 +16,6 @@ namespace hyp::wgpu
         ~Device();
 
         void waitIdle() const override;
-
-        TRef<rhi::Buffer> createBuffer(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const override;
-
-        TRef<rhi::Texture> createTexture(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const override;
-
-        TRef<rhi::Sampler> createSampler(const rhi::SamplerDesc& desc) const override;
 
         TRef<rhi::BindGroupLayout> createBindGroupLayout(std::span<const rhi::BindGroupLayoutEntry> entries) const override;
 
@@ -66,10 +62,23 @@ namespace hyp::wgpu
             return mQueue;
         }
 
+        const FeatureSupport& getWgpuFeatures() const noexcept
+        {
+            return mWgpuFeatures;
+        }
+
+    protected:
+        TRef<rhi::Buffer> createBufferImpl(const rhi::BufferDesc& desc, rhi::MemoryType memoryType) const override;
+
+        TRef<rhi::Texture> createTextureImpl(const rhi::TextureDesc& desc, rhi::MemoryType memoryType) const override;
+
+        TRef<rhi::Sampler> createSamplerImpl(const rhi::SamplerDesc& desc) const override;
+
     private:
         WGPUInstance mInstance;
         WGPUAdapter mAdapter;
         WGPUDevice mDevice;
         WGPUQueue mQueue;
+        FeatureSupport mWgpuFeatures;
     };
 }

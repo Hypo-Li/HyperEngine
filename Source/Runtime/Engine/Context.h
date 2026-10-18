@@ -5,11 +5,12 @@ namespace hyp
 {
     class Engine;
     class InputSystem;
-    class SampleStateManager;
     class RenderFrontend;
     class RendererContext;
     class AssetManager;
     class RenderTagRegistry;
+    class Config;
+    class PhysicsSystem;
 
     class Context
     {
@@ -26,12 +27,6 @@ namespace hyp
         {
             assert(mInputSystem);
             return *mInputSystem;
-        }
-
-        SampleStateManager& getSampleStateManager() const noexcept
-        {
-            assert(mSampleStateManager);
-            return *mSampleStateManager;
         }
 
         RenderFrontend& getRenderFrontend() const noexcept
@@ -58,6 +53,18 @@ namespace hyp
             return *mRenderTagRegistry;
         }
 
+        Config& getConfig() const noexcept
+        {
+            assert(mConfig);
+            return *mConfig;
+        }
+
+        PhysicsSystem& getPhysicsSystem() const noexcept
+        {
+            assert(mPhysicsSystem);
+            return *mPhysicsSystem;
+        }
+
         enum class Environment
         {
             Editor,
@@ -77,14 +84,14 @@ namespace hyp
     private:
         Context();
 
+        void setEnvironment(Environment environment) noexcept
+        {
+            mEnvironment = environment;
+        }
+
         void setInputSystem(InputSystem* inputSystem)
         {
             mInputSystem = inputSystem;
-        }
-
-        void setSampleStateManager(SampleStateManager* sampleStateManager)
-        {
-            mSampleStateManager = sampleStateManager;
         }
 
         void setRenderFrontend(RenderFrontend* renderFrontend)
@@ -107,13 +114,24 @@ namespace hyp
             mRenderTagRegistry = renderTagRegistry;
         }
 
+        void setConfig(Config* config)
+        {
+            mConfig = config;
+        }
+
+        void setPhysicsSystem(PhysicsSystem* physicsSystem)
+        {
+            mPhysicsSystem = physicsSystem;
+        }
+
     private:
         InputSystem* mInputSystem = nullptr;
-        SampleStateManager* mSampleStateManager = nullptr;
         RenderFrontend* mRenderFrontend = nullptr;
         RendererContext* mRendererContext = nullptr;
         AssetManager* mAssetManager = nullptr;
         RenderTagRegistry* mRenderTagRegistry = nullptr;
+        Config* mConfig = nullptr;
+        PhysicsSystem* mPhysicsSystem = nullptr;
         Environment mEnvironment = Environment::Standalone;
     };
 }

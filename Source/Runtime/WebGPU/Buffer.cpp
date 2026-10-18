@@ -107,7 +107,22 @@ namespace hyp::wgpu
             return nullptr;
         }
 
-        mMappedData = wgpuBufferGetMappedRange(mBuffer, 0, getDesc().size);
+        // 读映射必须用 GetConstMappedRange: WebGPU C API 把可写/只读映射拆成了两个函数, 对
+        // MapMode::Read 映射的 buffer 调 wgpuBufferGetMappedRange() 会直接返回 nullptr——它不
+        // 走校验层报错, 是静默失败, 所以调用方只会看到"map 返回空"而没有任何 Dawn 错误信息。
+        mMappedData = (mode == WGPUMapMode_Read)
+            ? const_cast<void*>(wgpuBufferGetConstMappedRange(mBuffer, 0, getDesc().size))
+            : wgpuBufferGetMappedRange(mBuffer, 0, getDesc().size);
+
+        if (!mMappedData)
+        {
+            // MapAsync 已经成功了, 此时 buffer 在 Dawn 那边处于 mapped 状态。这里必须还原成
+            // unmapped 再返回, 否则它会一直停在 mapped: 后续任何用到它的提交都会被判成
+            // "used in submit while mapped", 下一次 MapAsync 也会被判成 "is already mapped",
+            // 而且由于调用方一般只在拿到非空指针时才配对调用 unmap(), 这个状态再也回不来。
+            LOG_ERROR("Failed to get mapped range of WebGPU buffer");
+            wgpuBufferUnmap(mBuffer);
+        }
         return mMappedData;
     }
 

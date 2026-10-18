@@ -111,13 +111,6 @@ namespace hyp::rhi
         PrimitiveTopology topology = PrimitiveTopology::Triangle_List;
     };
 
-    enum class PolygonMode : uint8_t
-    {
-        Fill,
-        Line,
-        Point,
-    };
-
     enum class CullMode : uint8_t
     {
         None,
@@ -135,7 +128,6 @@ namespace hyp::rhi
     struct RasterizationState
     {
         bool depthClampEnable = false;
-        PolygonMode polygonMode = PolygonMode::Fill;
         CullMode cullMode = CullMode::Back;
         FrontFace frontFace = FrontFace::Counter_Clockwise;
         bool depthBiasEnable = false;

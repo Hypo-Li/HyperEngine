@@ -2,21 +2,17 @@
 #include "MeshRenderProxy.h"
 #include "CameraProxy.h"
 #include "DirectionalLightProxy.h"
+#include "GlobalDistanceField.h"
+#include "RendererContext.h"
 #include "SkyLightProxy.h"
 
 namespace hyp
 {
-    SceneProxy::SceneProxy(const ViewDataManager& viewDataManager, uint32_t sceneId) :
-        mSceneId(sceneId)
+    SceneProxy::SceneProxy(uint32_t sceneId, const rhi::Buffer& indicesBuffer) :
+        mSceneId(sceneId),
+        mIndicesBuffer(&indicesBuffer)
     {
         auto& device = getRenderBackend().getDevice();
-
-        {
-            rhi::BufferDesc bufferDesc;
-            bufferDesc.size = kBaseIndexCount * sizeof(uint32_t);
-            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
-            mIndicesBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
-        }
 
         {
             rhi::BufferDesc bufferDesc;
@@ -32,162 +28,245 @@ namespace hyp
             mLightDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
         }
 
-        mSceneAndViewBindGroupLayout = createSceneAndViewBindGroupLayout(getRenderBackend().getBindGroupLayoutCache());
-        mSceneAndViewBindGroup = device.createBindGroup(*mSceneAndViewBindGroupLayout);
+        {
+            rhi::BufferDesc bufferDesc;
+            bufferDesc.size = kBaseMeshInstanceCount * sizeof(MeshInstanceData);
+            bufferDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Transfer_Dst;
+            mMeshInstanceDataBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
+        }
 
-        auto& viewDataBuffer = viewDataManager.getViewDataBuffer();
+        mSectionTable = std::make_unique<TRangeTable<MeshSectionEntry>>(getRenderBackend(), kBaseSectionTableCapacity, "SceneProxy.SectionTable");
 
-        rhi::BufferBindingInfo indicesBinding;
-        indicesBinding.buffer = mIndicesBuffer.get();
-        indicesBinding.offset = 0;
-        indicesBinding.range = kBaseInstanceCount * sizeof(uint32_t);
+        auto& bindGroupLayoutCache = getRenderBackend().getBindGroupLayoutCache();
 
         rhi::BufferBindingInfo instanceDataBinding;
         instanceDataBinding.buffer = mInstanceDataBuffer.get();
         instanceDataBinding.offset = 0;
         instanceDataBinding.range = kBaseInstanceCount * sizeof(InstanceData);
 
-        rhi::BufferBindingInfo lightDataBinding;
-        lightDataBinding.buffer = mLightDataBuffer.get();
-        lightDataBinding.offset = 0;
-        lightDataBinding.range = kBaseLightCount * sizeof(LightData);
+        mInstanceDataBindGroup = device.createBindGroup(*RendererContext::createInstanceDataBindGroupLayout(bindGroupLayoutCache));
+        rhi::BindGroupEntry instanceDataEntry = {};
+        instanceDataEntry.binding = 0;
+        instanceDataEntry.type = rhi::BindingType::Storage_Buffer;
+        instanceDataEntry.buffers = { &instanceDataBinding, 1 };
+        mInstanceDataBindGroup->update({ &instanceDataEntry, 1 });
 
-        rhi::BufferBindingInfo viewDataBinding;
-        viewDataBinding.buffer = &viewDataBuffer;
-        viewDataBinding.offset = 0;
-        viewDataBinding.range = sizeof(ViewData);
+        rhi::BufferBindingInfo indicesBinding;
+        indicesBinding.buffer = mIndicesBuffer;
+        indicesBinding.offset = 0;
+        indicesBinding.range = mIndicesBuffer->getDesc().size;
 
-        rhi::BindGroupEntry entries[4] = {};
-        entries[1].binding = 0;
-        entries[1].type = rhi::BindingType::Storage_Buffer;
-        entries[1].buffers = { &indicesBinding, 1 };
+        mDrawBindGroup = device.createBindGroup(*RendererContext::createDrawBindGroupLayout(bindGroupLayoutCache));
+        rhi::BufferBindingInfo meshInstanceDataBinding;
+        meshInstanceDataBinding.buffer = mMeshInstanceDataBuffer.get();
+        meshInstanceDataBinding.offset = 0;
+        meshInstanceDataBinding.range = kBaseMeshInstanceCount * sizeof(MeshInstanceData);
 
-        entries[0].binding = 1;
-        entries[0].type = rhi::BindingType::Storage_Buffer;
-        entries[0].buffers = { &instanceDataBinding, 1 };
-
-        entries[2].binding = 2;
-        entries[2].type = rhi::BindingType::Storage_Buffer;
-        entries[2].buffers = { &lightDataBinding, 1 };
-
-        entries[3].binding = 3;
-        entries[3].type = rhi::BindingType::Dynamic_Storage_Buffer;
-        entries[3].buffers = { &viewDataBinding, 1 };
-
-        mSceneAndViewBindGroup->update({ entries, 4 });
-
-        mInstanceData.reserve(kBaseInstanceCount);
-        mLightData.reserve(kBaseLightCount);
+        rhi::BindGroupEntry drawEntries[3] = {};
+        drawEntries[0] = instanceDataEntry;
+        drawEntries[1].binding = 1;
+        drawEntries[1].type = rhi::BindingType::Storage_Buffer;
+        drawEntries[1].buffers = { &indicesBinding, 1 };
+        drawEntries[2].binding = 2;
+        drawEntries[2].type = rhi::BindingType::Storage_Buffer;
+        drawEntries[2].buffers = { &meshInstanceDataBinding, 1 };
+        mDrawBindGroup->update({ drawEntries, 3 });
     }
 
     SceneProxy::~SceneProxy() noexcept
     {
+        assert(mMeshRenderProxies.empty() && mQuadRenderProxies.empty() && mGSplatRenderProxies.empty()
+            && mCameraProxies.empty() && mDirectionalLightProxies.empty() && mLocalLightProxies.empty()
+            && mAtmosphereProxies.empty() && mSkyLightProxies.empty() && mSkyBackgroundProxies.empty()
+            && "场景元素的 proxy 必须先于 SceneProxy 销毁");
+
         getRenderBackend().getDeferredTaskQueue().push(
-            [indicesBuffer = std::move(mIndicesBuffer),
-            instanceDataBuffer = std::move(mInstanceDataBuffer),
+            [instanceDataBuffer = std::move(mInstanceDataBuffer),
             lightDataBuffer = std::move(mLightDataBuffer),
-            sceneAndViewBindGroup = std::move(mSceneAndViewBindGroup),
-            sceneAndViewBindGroupLayout = std::move(mSceneAndViewBindGroupLayout)
+            meshInstanceDataBuffer = std::move(mMeshInstanceDataBuffer),
+            instanceDataBindGroup = std::move(mInstanceDataBindGroup),
+            drawBindGroup = std::move(mDrawBindGroup),
+            skeletalDrawBindGroup = std::move(mSkeletalDrawBindGroup),
+            quadDrawBindGroup = std::move(mQuadDrawBindGroup)
             ]() mutable
             {
-                sceneAndViewBindGroup = nullptr;
-                sceneAndViewBindGroupLayout = nullptr;
+                quadDrawBindGroup = nullptr;
+                skeletalDrawBindGroup = nullptr;
+                drawBindGroup = nullptr;
+                instanceDataBindGroup = nullptr;
                 lightDataBuffer = nullptr;
                 instanceDataBuffer = nullptr;
-                indicesBuffer = nullptr;
+                meshInstanceDataBuffer = nullptr;
             },
             kMaxFramesInFlight
         );
     }
 
-    void SceneProxy::notifyInstanceDataUpdated(uint32_t instanceIndex) noexcept
+    void SceneProxy::markInstanceDataUpdated(uint32_t instanceIndex) noexcept
     {
-        mUpdatedInstanceMinIndex = std::min(instanceIndex, mUpdatedInstanceMinIndex);
-        mUpdatedInstanceMaxIndex = std::max(instanceIndex, mUpdatedInstanceMaxIndex);
-        assert((instanceIndex / 64) < mInstanceData.size());
-        mInstanceDataUpdatedBitset[instanceIndex / 64] |= 1ull << (instanceIndex % 64);
+        mInstanceData.markUpdated(instanceIndex);
     }
 
-    void SceneProxy::notifyLightDataUpdated(uint32_t lightIndex) noexcept
+    bool SceneProxy::isInstanceTransformUpdated(uint32_t instanceIndex) const noexcept
     {
-        mUpdatedLightMinIndex = std::min(lightIndex, mUpdatedLightMinIndex);
-        mUpdatedLightMaxIndex = std::max(lightIndex, mUpdatedLightMaxIndex);
-        assert((lightIndex / 64) < mLightData.size());
-        mLightDataUpdatedBitset[lightIndex / 64] |= 1ull << (lightIndex % 64);
+        uint32_t wordIndex = instanceIndex / 64;
+        assert(wordIndex < mInstanceTransformUpdatedBitset.size());
+        return (mInstanceTransformUpdatedBitset[wordIndex] & (1ull << (instanceIndex % 64))) != 0;
     }
 
-    void SceneProxy::addMeshRenderProxy(MeshRenderProxy* meshRenderProxy)
+    void SceneProxy::markInstanceTransformUpdated(uint32_t instanceIndex) noexcept
     {
-        uint32_t instanceIndex = acquireInstanceIndex();
-        meshRenderProxy->setInstanceIndex(instanceIndex);
-        mMeshRenderProxies.push_back(meshRenderProxy);
+        markInstanceDataUpdated(instanceIndex);
+        uint32_t wordIndex = instanceIndex / 64;
+        assert(wordIndex < mInstanceTransformUpdatedBitset.size());
+        mInstanceTransformUpdatedBitset[wordIndex] |= 1ull << (instanceIndex % 64);
     }
 
-    void SceneProxy::removeMeshRenderProxy(MeshRenderProxy* meshRenderProxy)
+    void SceneProxy::markLightDataUpdated(uint32_t lightIndex) noexcept
     {
-        releaseInstanceIndex(meshRenderProxy->getInstanceIndex());
-        auto it = std::find(mMeshRenderProxies.begin(), mMeshRenderProxies.end(), meshRenderProxy);
-        assert(it != mMeshRenderProxies.end());
-        mMeshRenderProxies.erase(it);
+        mLightData.markUpdated(lightIndex);
     }
 
-    void SceneProxy::addCameraProxy(CameraProxy* cameraProxy)
+    void SceneProxy::markMeshInstanceDataUpdated(uint32_t meshInstanceIndex) noexcept
     {
-        mCameraProxies.push_back(cameraProxy);
+        mMeshInstanceData.markUpdated(meshInstanceIndex);
     }
 
-    void SceneProxy::removeCameraProxy(CameraProxy* cameraProxy)
+    uint32_t SceneProxy::acquireMeshInstanceIndex()
     {
-        auto it = std::find(mCameraProxies.begin(), mCameraProxies.end(), cameraProxy);
-        assert(it != mCameraProxies.end());
-        mCameraProxies.erase(it);
+        return mMeshInstanceData.acquire();
     }
 
-    void SceneProxy::addDirectionalLightProxy(DirectionalLightProxy* directionalLightProxy)
+    void SceneProxy::releaseMeshInstanceIndex(uint32_t meshInstanceIndex) noexcept
     {
-        uint32_t lightIndex = acquireLightIndex();
-        directionalLightProxy->setLightIndex(lightIndex);
-        mDirectionalLightProxies.push_back(directionalLightProxy);
+        mMeshInstanceData.release(meshInstanceIndex);
     }
 
-    void SceneProxy::removeDirectionalLightProxy(DirectionalLightProxy* directionalLightProxy)
+    Boxd SceneProxy::getSceneBounds() const noexcept
     {
-        releaseLightIndex(directionalLightProxy->getLightIndex());
-        auto it = std::find(mDirectionalLightProxies.begin(), mDirectionalLightProxies.end(), directionalLightProxy);
-        assert(it != mDirectionalLightProxies.end());
-        mDirectionalLightProxies.erase(it);
+        updateMeshBoundsIfDirty(Mobility::Static);
+        updateMeshBoundsIfDirty(Mobility::Dynamic);
+        return mStaticMeshBounds + mDynamicMeshBounds;
     }
 
-    void SceneProxy::addAtmosphereProxy(AtmosphereProxy* atmosphereProxy)
+    void SceneProxy::markMeshBoundsDirty(Mobility mobility) const noexcept
     {
-        mAtmosphereProxies.push_back(atmosphereProxy);
-        if (!mActiveAtmosphereProxy && atmosphereProxy->isVisible())
+        if (mobility == Mobility::Static)
+            mStaticMeshBoundsDirty = true;
+        else
+            mDynamicMeshBoundsDirty = true;
+    }
+
+    void SceneProxy::setLumenEnabled(bool enabled) noexcept
+    {
+        if (mLumenEnabled == enabled)
+            return;
+        mLumenEnabled = enabled;
+
+        if (enabled)
         {
-            mActiveAtmosphereProxy = atmosphereProxy;
+            for (CameraProxy* cameraProxy : mCameraProxies)
+            {
+                for (GlobalDistanceField::Cascade& cascade : cameraProxy->getGlobalDistanceField().getCascades())
+                {
+                    cascade.staticLayer.dirty = true;
+                    cascade.dynamicLayer.dirty = true;
+                }
+            }
         }
     }
 
-    void SceneProxy::removeAtmosphereProxy(AtmosphereProxy* atmosphereProxy)
+    void SceneProxy::markGlobalDistanceFieldDirty(Boxd instanceWorldBounds, Mobility mobility) const noexcept
     {
-        auto it = std::find(mAtmosphereProxies.begin(), mAtmosphereProxies.end(), atmosphereProxy);
-        assert(it != mAtmosphereProxies.end());
-        mAtmosphereProxies.erase(it);
-        if (mActiveAtmosphereProxy == atmosphereProxy)
-            mActiveAtmosphereProxy = nullptr;
+        if (!mLumenEnabled)
+            return;
+
+        for (CameraProxy* cameraProxy : mCameraProxies)
+        {
+            for (GlobalDistanceField::Cascade& cascade : cameraProxy->getGlobalDistanceField().getCascades())
+            {
+                Boxd cascadeBounds(cascade.center - double3(cascade.halfExtent), cascade.center + double3(cascade.halfExtent));
+                if (!cascadeBounds.intersect(instanceWorldBounds))
+                    continue;
+
+                // 动态层最终存的是"静态 ∪ 动态"的合并结果(见 GlobalDistanceFieldComposite.slang
+                // 顶部注释)——静态候选变化会影响动态层该合并出来的内容, 必须连带标脏; 反过来
+                // 动态候选变化不影响静态层, 不需要连带
+                if (mobility == Mobility::Static)
+                {
+                    cascade.staticLayer.dirty = true;
+                    cascade.dynamicLayer.dirty = true;
+                }
+                else
+                {
+                    cascade.dynamicLayer.dirty = true;
+                }
+            }
+        }
     }
 
-    void SceneProxy::addSkyLightProxy(SkyLightProxy* skyLightProxy)
+    void SceneProxy::updateMeshBoundsIfDirty(Mobility mobility) const noexcept
     {
-        mSkyLightProxies.push_back(skyLightProxy);
+        bool& dirty = mobility == Mobility::Static ? mStaticMeshBoundsDirty : mDynamicMeshBoundsDirty;
+        if (!dirty)
+            return;
+
+        Boxd& bounds = mobility == Mobility::Static ? mStaticMeshBounds : mDynamicMeshBounds;
+        bounds = Boxd();
+        for (MeshRenderProxy* meshRenderProxy : mMeshRenderProxies)
+        {
+            if (meshRenderProxy->getMobility() == mobility)
+                bounds += meshRenderProxy->getBoundingBox();
+        }
+        dirty = false;
     }
 
-    void SceneProxy::removeSkyLightProxy(SkyLightProxy* skyLightProxy)
+    SkyBackgroundProxy* SceneProxy::getActiveSkyBackgroundProxy() const noexcept
     {
-        auto it = std::find(mSkyLightProxies.begin(), mSkyLightProxies.end(), skyLightProxy);
-        assert(it != mSkyLightProxies.end());
-        mSkyLightProxies.erase(it);
-        if (mActiveSkyLightProxy == skyLightProxy)
-            mActiveSkyLightProxy = nullptr;
+        for (SkyBackgroundProxy* proxy : mSkyBackgroundProxies)
+        {
+            if (proxy->isVisible())
+                return proxy;
+        }
+        return nullptr;
+    }
+
+    void SceneProxy::selectSunLights(bool requireAffectAtmosphere, DirectionalLightProxy* (&sunLights)[2]) const noexcept
+    {
+        sunLights[0] = nullptr;
+        sunLights[1] = nullptr;
+        for (auto* candidate : mDirectionalLightProxies)
+        {
+            uint32_t sunLightIndex = candidate->getAtmosphereSunLightIndex();
+            if (!candidate->isVisible() ||
+                (requireAffectAtmosphere && !candidate->isAffectAtmosphere()) ||
+                sunLightIndex >= 2)
+                continue;
+
+            auto*& selected = sunLights[sunLightIndex];
+            if (!selected)
+            {
+                selected = candidate;
+                continue;
+            }
+
+            float candidateIntensitySqr = Math::lengthSqr(candidate->getIntensity());
+            float selectedIntensitySqr = Math::lengthSqr(selected->getIntensity());
+            if (candidateIntensitySqr > selectedIntensitySqr + 1e-6f)
+            {
+                selected = candidate;
+            }
+        }
+    }
+
+    AtmosphereProxy* SceneProxy::getActiveAtmosphereProxy() const noexcept
+    {
+        for (AtmosphereProxy* proxy : mAtmosphereProxies)
+        {
+            if (proxy->isVisible())
+                return proxy;
+        }
+        return nullptr;
     }
 
     SkyLightProxy* SceneProxy::getActiveSkyLightProxy() const noexcept
@@ -201,15 +280,7 @@ namespace hyp
             if (!selected || candidate->getIntensity() > selected->getIntensity() + 1e-6f)
                 selected = candidate;
         }
-        mActiveSkyLightProxy = selected;
-        return mActiveSkyLightProxy;
-    }
-
-    void SceneProxy::addGSplatRenderProxy(GSplatRenderProxy* gsplatRenderProxy)
-    {
-        uint32_t instanceIndex = acquireInstanceIndex();
-        gsplatRenderProxy->setInstanceIndex(instanceIndex);
-        mGSplatRenderProxies.push_back(gsplatRenderProxy);
+        return selected;
     }
 
     void SceneProxy::setGSplatRenderProxySplatData(GSplatRenderProxy* gsplatRenderProxy, std::vector<GPUSplatData>&& gpuSplatData)
@@ -233,57 +304,249 @@ namespace hyp
         gsplatRenderProxy->setGSplatId(gsplatId);
     }
 
-    void SceneProxy::removeGSplatRenderProxy(GSplatRenderProxy* gsplatRenderProxy)
+    void SceneProxy::clearGSplatRenderProxySplatData(GSplatRenderProxy* gsplatRenderProxy)
     {
-        releaseInstanceIndex(gsplatRenderProxy->getInstanceIndex());
-        mGSplatScene->removeGSplat(gsplatRenderProxy->getGSplatId());
-        auto it = std::find(mGSplatRenderProxies.begin(), mGSplatRenderProxies.end(), gsplatRenderProxy);
-        assert(it != mGSplatRenderProxies.end());
-        mGSplatRenderProxies.erase(it);
+        if (!mGSplatScene)
+            return;
 
+        mGSplatScene->removeGSplat(gsplatRenderProxy->getGSplatId());
         if (mGSplatRenderProxies.empty())
-        {
             mGSplatScene = nullptr;
+    }
+
+    void SceneProxy::update()
+    {
+        // 唯一的创建入口: mLumenEnabled 是显式开关(见 setLumenEnabled 的注释)
+        if (mLumenEnabled && !mLumenScene)
+        {
+            mLumenScene = std::make_unique<LumenScene>(getRenderBackend());
+        }
+
+        if (!mLumenScene)
+            return;
+
+        if (!mLumenEnabled)
+            return;
+
+        // card 分页/GDF cascade 的决策已经下放给 CardCapturePass/GlobalDistanceFieldCompositePass
+        // 自己的 builder——这里只剩阴影候选剔选还没有专属 pass 可以挂, 暂时留在这里直接调用。
+        // referenceOrigin 固定用第一个相机(跟 CardDirectLightingPass 点/聚光阴影固定用主相机
+        // GDF 是同一个简化, 见 Lumen_GI_Roadmap.md), 没有相机时退化用世界原点——这种情况下
+        // mCameraProxies 为空, updateDirectLightingShadowCandidates() 内部会直接整体跳过
+        WorldCoord referenceOrigin;
+        if (!mCameraProxies.empty())
+        {
+            referenceOrigin.fromDouble3(mCameraProxies[0]->getWorldPosition());
+        }
+        mLumenScene->updateDirectLightingShadowCandidates(mMeshRenderProxies, mCameraProxies, mDirectionalLightProxies, referenceOrigin);
+
+        // 把每盏方向光刚算出来的 tile grid 在共享 buffer 里的偏移写回它的 LightData——
+        // LumenScene 故意不持有 SceneProxy(只接收它需要的那几个 span), 这份"写回调用方
+        // 的数据"的职责因此落在这里, 不是 LumenScene 自己的事
+        for (DirectionalLightProxy* directionalLightProxy : mDirectionalLightProxies)
+        {
+            const LumenScene::DirectLightingShadowTileGrid* tileGrid =
+                mLumenScene->getDirectLightingShadowTileGrid(directionalLightProxy);
+            uint32_t lightIndex = directionalLightProxy->getLightIndex();
+            uint32_t newOffset = tileGrid ? tileGrid->gpuBufferOffset : kInvalidSurfaceCacheAtlasPageIndex;
+            if (getLightData(lightIndex).shadowTileGridOffset != newOffset)
+            {
+                getLightData(lightIndex).shadowTileGridOffset = newOffset;
+                markLightDataUpdated(lightIndex);
+            }
         }
     }
 
-    void SceneProxy::updateSceneData(rhi::CommandList& cmdList)
+    SkinningManager& SceneProxy::getOrCreateSkinningManager()
     {
-        auto& stagingAllocator = getRenderBackend().getStagingAllocator();
-
-        auto updatedInstanceRanges = generateUpdateRanges(
-            mInstanceDataUpdatedBitset,
-            mUpdatedInstanceMinIndex,
-            mUpdatedInstanceMaxIndex
-        );
-
-        auto updatedLightRanges = generateUpdateRanges(
-            mLightDataUpdatedBitset,
-            mUpdatedLightMinIndex,
-            mUpdatedLightMaxIndex
-        );
-
-        std::vector<rhi::BufferBarrier> preBarriers;
-        if (!updatedInstanceRanges.empty())
+        if (!mSkinningManager)
         {
-            rhi::BufferBarrier barrier;
-            barrier.buffer = mInstanceDataBuffer.get();
-            barrier.offset = 0;
-            barrier.size = rhi::kWholeBuffer;
-            barrier.oldState = rhi::ResourceState::Shader_Storage_Read;
-            barrier.newState = rhi::ResourceState::Transfer_Dst;
-            preBarriers.push_back(barrier);
+            mSkinningManager = std::make_unique<SkinningManager>(getRenderBackend(), kBaseSkinningMatrixCapacity);
+            createSkeletalDrawBindGroup();
+        }
+        return *mSkinningManager;
+    }
+
+    void SceneProxy::createSkeletalDrawBindGroup()
+    {
+        auto& renderBackend = getRenderBackend();
+
+        rhi::BufferBindingInfo instanceDataBinding;
+        instanceDataBinding.buffer = mInstanceDataBuffer.get();
+        instanceDataBinding.offset = 0;
+        instanceDataBinding.range = kBaseInstanceCount * sizeof(InstanceData);
+
+        rhi::BufferBindingInfo indicesBinding;
+        indicesBinding.buffer = mIndicesBuffer;
+        indicesBinding.offset = 0;
+        indicesBinding.range = mIndicesBuffer->getDesc().size;
+
+        rhi::BufferBindingInfo matrixBinding;
+        matrixBinding.buffer = &mSkinningManager->getMatrixBuffer();
+        matrixBinding.offset = 0;
+        matrixBinding.range = mSkinningManager->getMatrixBuffer().getDesc().size;
+
+        rhi::BufferBindingInfo meshInstanceDataBinding;
+        meshInstanceDataBinding.buffer = mMeshInstanceDataBuffer.get();
+        meshInstanceDataBinding.offset = 0;
+        meshInstanceDataBinding.range = kBaseMeshInstanceCount * sizeof(MeshInstanceData);
+
+        rhi::BindGroupEntry entries[4] = {};
+        entries[0].binding = 0;
+        entries[0].type = rhi::BindingType::Storage_Buffer;
+        entries[0].buffers = { &instanceDataBinding, 1 };
+        entries[1].binding = 1;
+        entries[1].type = rhi::BindingType::Storage_Buffer;
+        entries[1].buffers = { &indicesBinding, 1 };
+        entries[2].binding = 2;
+        entries[2].type = rhi::BindingType::Storage_Buffer;
+        entries[2].buffers = { &meshInstanceDataBinding, 1 };
+        entries[3].binding = 3;
+        entries[3].type = rhi::BindingType::Storage_Buffer;
+        entries[3].buffers = { &matrixBinding, 1 };
+
+        mSkeletalDrawBindGroup = renderBackend.getDevice().createBindGroup(
+            *RendererContext::createSkeletalDrawBindGroupLayout(renderBackend.getBindGroupLayoutCache())
+        );
+        mSkeletalDrawBindGroup->update({ entries, 4 });
+    }
+
+    QuadManager& SceneProxy::getOrCreateQuadManager()
+    {
+        if (!mQuadManager)
+        {
+            mQuadManager = std::make_unique<QuadManager>(getRenderBackend(), kBaseQuadElementCapacity, kBaseQuadInstanceCapacity);
+            createQuadDrawBindGroup();
+        }
+        return *mQuadManager;
+    }
+
+    void SceneProxy::createQuadDrawBindGroup()
+    {
+        auto& renderBackend = getRenderBackend();
+
+        rhi::BufferBindingInfo instanceDataBinding;
+        instanceDataBinding.buffer = mInstanceDataBuffer.get();
+        instanceDataBinding.offset = 0;
+        instanceDataBinding.range = kBaseInstanceCount * sizeof(InstanceData);
+
+        rhi::BufferBindingInfo indicesBinding;
+        indicesBinding.buffer = mIndicesBuffer;
+        indicesBinding.offset = 0;
+        indicesBinding.range = mIndicesBuffer->getDesc().size;
+
+        rhi::BufferBindingInfo elementBinding;
+        elementBinding.buffer = &mQuadManager->getElementBuffer();
+        elementBinding.offset = 0;
+        elementBinding.range = mQuadManager->getElementBuffer().getDesc().size;
+
+        rhi::BufferBindingInfo quadInstanceBinding;
+        quadInstanceBinding.buffer = &mQuadManager->getInstanceDataBuffer();
+        quadInstanceBinding.offset = 0;
+        quadInstanceBinding.range = mQuadManager->getInstanceDataBuffer().getDesc().size;
+
+        rhi::BindGroupEntry entries[4] = {};
+        entries[0].binding = 0;
+        entries[0].type = rhi::BindingType::Storage_Buffer;
+        entries[0].buffers = { &instanceDataBinding, 1 };
+        entries[1].binding = 1;
+        entries[1].type = rhi::BindingType::Storage_Buffer;
+        entries[1].buffers = { &indicesBinding, 1 };
+        entries[2].binding = 2;
+        entries[2].type = rhi::BindingType::Storage_Buffer;
+        entries[2].buffers = { &elementBinding, 1 };
+        entries[3].binding = 3;
+        entries[3].type = rhi::BindingType::Storage_Buffer;
+        entries[3].buffers = { &quadInstanceBinding, 1 };
+
+        mQuadDrawBindGroup = renderBackend.getDevice().createBindGroup(
+            *RendererContext::createQuadDrawBindGroupLayout(renderBackend.getBindGroupLayoutCache())
+        );
+        mQuadDrawBindGroup->update({ entries, 4 });
+    }
+
+    void SceneProxy::prepare(rhi::CommandList& cmdList)
+    {
+        if (mLumenScene)
+        {
+            SurfaceCacheAtlas& surfaceCacheAtlas = mLumenScene->getSurfaceCacheAtlas();
+            surfaceCacheAtlas.prepare(cmdList);
+            surfaceCacheAtlas.flushCardPageTableUploads(cmdList);
         }
 
-        if (!updatedLightRanges.empty())
+        mSectionTable->prepare(cmdList);
+
+        if (mSkinningManager)
+        {
+            mSkinningManager->prepare(cmdList);
+
+            mSkinningBaseChanges.clear();
+            mSkinningManager->takeBaseChanges(mSkinningBaseChanges);
+            for (const SkinningManager::BaseChange& change : mSkinningBaseChanges)
+            {
+                MeshInstanceData& meshInstanceData = mMeshInstanceData[change.ownerId];
+                meshInstanceData.boneMatrixRangeBase = change.currentBase;
+                meshInstanceData.prevBoneMatrixRangeBase = change.prevBase;
+                markMeshInstanceDataUpdated(change.ownerId);
+            }
+        }
+
+        if (mQuadManager)
+            mQuadManager->prepare(cmdList);
+
+        auto& stagingAllocator = getRenderBackend().getStagingAllocator();
+
+        // 上一帧发生过 Transform 变化、但本帧没有继续变化的实例，需要补写一次
+        // prev=current，让其 Velocity 从本帧开始稳定回到 0。这里只标通用上传脏位，不能再标
+        // Transform 脏位，否则该实例会每帧反复进入这个分支并永久上传。
+        for (uint32_t wordIndex = 0; wordIndex < mPrevInstanceTransformUpdatedBitset.size(); ++wordIndex)
+        {
+            uint64_t resetWord = mPrevInstanceTransformUpdatedBitset[wordIndex]
+                & ~mInstanceTransformUpdatedBitset[wordIndex];
+            while (resetWord != 0)
+            {
+                uint32_t bitIndex = static_cast<uint32_t>(std::countr_zero(resetWord));
+                uint32_t instanceIndex = wordIndex * 64 + bitIndex;
+                auto& instanceData = mInstanceData[instanceIndex];
+                instanceData.prevObjectToWorld = instanceData.objectToWorld;
+                markInstanceDataUpdated(instanceIndex);
+
+                resetWord &= resetWord - 1;
+            }
+        }
+
+        struct TableUpload
+        {
+            std::vector<std::pair<size_t, size_t>> ranges;
+            size_t elementSize;
+            uint8_t* srcData;
+            rhi::Buffer* dstBuffer;
+        };
+
+        TableUpload tableUploads[] = {
+            { mInstanceData.generateUpdateRanges(), sizeof(InstanceData), reinterpret_cast<uint8_t*>(mInstanceData.data()), mInstanceDataBuffer.get() },
+            { mLightData.generateUpdateRanges(), sizeof(LightData), reinterpret_cast<uint8_t*>(mLightData.data()), mLightDataBuffer.get() },
+            { mMeshInstanceData.generateUpdateRanges(), sizeof(MeshInstanceData), reinterpret_cast<uint8_t*>(mMeshInstanceData.data()), mMeshInstanceDataBuffer.get() },
+        };
+
+        auto makeBarrier = [](rhi::Buffer* buffer, rhi::ResourceState oldState, rhi::ResourceState newState)
         {
             rhi::BufferBarrier barrier;
-            barrier.buffer = mLightDataBuffer.get();
+            barrier.buffer = buffer;
             barrier.offset = 0;
             barrier.size = rhi::kWholeBuffer;
-            barrier.oldState = rhi::ResourceState::Shader_Storage_Read;
-            barrier.newState = rhi::ResourceState::Transfer_Dst;
-            preBarriers.push_back(barrier);
+            barrier.oldState = oldState;
+            barrier.newState = newState;
+            return barrier;
+        };
+
+        std::vector<rhi::BufferBarrier> preBarriers;
+        for (const TableUpload& upload : tableUploads)
+        {
+            if (!upload.ranges.empty())
+            {
+                preBarriers.push_back(makeBarrier(upload.dstBuffer, rhi::ResourceState::Shader_Storage_Read, rhi::ResourceState::Transfer_Dst));
+            }
         }
 
         if (!preBarriers.empty())
@@ -291,116 +554,56 @@ namespace hyp
             cmdList.insertBarriers(preBarriers);
         }
 
-        if (!updatedInstanceRanges.empty())
-        {
-            uploadData(
-                cmdList,
-                updatedInstanceRanges,
-                sizeof(InstanceData),
-                (uint8_t*)(mInstanceData.data()),
-                mInstanceDataBuffer.get(),
-                stagingAllocator
-            );
-        }
-
-        if (!updatedLightRanges.empty())
-        {
-            uploadData(
-                cmdList,
-                updatedLightRanges,
-                sizeof(LightData),
-                (uint8_t*)(mLightData.data()),
-                mLightDataBuffer.get(),
-                stagingAllocator
-            );
-        }
-
         std::vector<rhi::BufferBarrier> postBarriers;
-        if (!updatedInstanceRanges.empty())
+        for (const TableUpload& upload : tableUploads)
         {
-            rhi::BufferBarrier barrier;
-            barrier.buffer = mInstanceDataBuffer.get();
-            barrier.offset = 0;
-            barrier.size = rhi::kWholeBuffer;
-            barrier.oldState = rhi::ResourceState::Transfer_Dst;
-            barrier.newState = rhi::ResourceState::Shader_Storage_Read;
-            postBarriers.push_back(barrier);
-
-            std::fill(mInstanceDataUpdatedBitset.begin(), mInstanceDataUpdatedBitset.end(), 0);
-            mUpdatedInstanceMinIndex = UINT32_MAX;
-            mUpdatedInstanceMaxIndex = 0;
+            if (!upload.ranges.empty())
+            {
+                uploadData(cmdList, upload.ranges, upload.elementSize, upload.srcData, upload.dstBuffer, stagingAllocator);
+                postBarriers.push_back(makeBarrier(upload.dstBuffer, rhi::ResourceState::Transfer_Dst, rhi::ResourceState::Shader_Storage_Read));
+            }
         }
 
-        if (!updatedLightRanges.empty())
-        {
-            rhi::BufferBarrier barrier;
-            barrier.buffer = mLightDataBuffer.get();
-            barrier.offset = 0;
-            barrier.size = rhi::kWholeBuffer;
-            barrier.oldState = rhi::ResourceState::Transfer_Dst;
-            barrier.newState = rhi::ResourceState::Shader_Storage_Read;
-            postBarriers.push_back(barrier);
-
-            std::fill(mLightDataUpdatedBitset.begin(), mLightDataUpdatedBitset.end(), 0);
-            mUpdatedLightMinIndex = UINT32_MAX;
-            mUpdatedLightMaxIndex = 0;
-        }
+        mInstanceData.clearUpdated();
+        mLightData.clearUpdated();
+        mMeshInstanceData.clearUpdated();
 
         if (!postBarriers.empty())
         {
             cmdList.insertBarriers(postBarriers);
         }
 
-        for (AtmosphereProxy* proxy : mAtmosphereProxies)
+        // previous 只继承本帧的真实 Transform 变化；上面生成的 prev=current 修正只存在于
+        // mInstanceData 的上传脏位中，因此不会被带到下一帧形成循环上传。
+        mPrevInstanceTransformUpdatedBitset.swap(mInstanceTransformUpdatedBitset);
+        std::fill(mInstanceTransformUpdatedBitset.begin(), mInstanceTransformUpdatedBitset.end(), 0);
+
+        DirectionalLightProxy* mainLights[2];
+        selectSunLights(false, mainLights);
+        for (uint32_t i = 0; i < 2; ++i)
         {
-            if (mActiveAtmosphereProxy != proxy && proxy->isVisible())
-            {
-                mActiveAtmosphereProxy = proxy;
-                break;
-            }
+            mMainLightDirections[i] = mainLights[i] ? -mainLights[i]->getDirection() : float3(0, 0, 1);
+            mMainLightIntensities[i] = mainLights[i] ? mainLights[i]->getIntensity() : float3(0);
         }
 
-        if (mActiveAtmosphereProxy)
+        if (AtmosphereProxy* activeAtmosphere = getActiveAtmosphereProxy())
         {
-            DirectionalLightProxy* sunLights[2] = { nullptr, nullptr };
-            for (auto* candidate : mDirectionalLightProxies)
-            {
-                uint32_t sunLightIndex = candidate->getAtmosphereSunLightIndex();
-                if (!candidate->isVisible() ||
-                    !candidate->isAffectAtmosphere() ||
-                    sunLightIndex >= 2)
-                    continue;
-
-                auto*& selected = sunLights[sunLightIndex];
-                if (!selected)
-                {
-                    selected = candidate;
-                    continue;
-                }
-
-                float candidateIntensitySqr = Math::lengthSqr(candidate->getIntensity());
-                float selectedIntensitySqr = Math::lengthSqr(selected->getIntensity());
-                if (candidateIntensitySqr > selectedIntensitySqr + 1e-6f)
-                {
-                    selected = candidate;
-                }
-            }
+            DirectionalLightProxy* sunLights[2];
+            selectSunLights(true, sunLights);
 
             for (uint32_t i = 0; i < 2; ++i)
             {
                 float3 direction = sunLights[i] ? -sunLights[i]->getDirection() : float3(0, 0, 1);
                 float3 intensity = sunLights[i] ? sunLights[i]->getIntensity() : float3(0);
 
-                mActiveAtmosphereProxy->setSunLight(i, direction, intensity);
+                activeAtmosphere->setSunLight(i, direction, intensity);
             }
-            
-            mActiveAtmosphereProxy->prepare(cmdList);
+
+            activeAtmosphere->prepare(cmdList);
         }
 
         if (SkyLightProxy* activeSkyLight = getActiveSkyLightProxy())
-        {
             activeSkyLight->prepare(cmdList);
-        }
 
         if (mGSplatScene)
         {
@@ -408,17 +611,27 @@ namespace hyp
         }
     }
 
-    std::vector<SceneViewGroup> SceneProxy::gatherSceneViewGroups(ViewDataManager& viewDataManager) const
+    std::vector<SceneViewGroup> SceneProxy::gatherSceneViewGroups(ViewDataManager& viewDataManager, uint32_t frameIndex) const
     {
         std::vector<SceneViewGroup> sceneViewGroups;
-        size_t expectedSceneViewCount = mDirectionalLightProxies.size() * mCameraProxies.size() + mCameraProxies.size();
+
+        // extent 为 0 表示相机当前不输出(见 SceneViewport), 此时宽高比是 0/0, 投影矩阵会带 NaN
+        std::vector<const CameraProxy*> activeCameraProxies;
+        activeCameraProxies.reserve(mCameraProxies.size());
+        for (CameraProxy* cameraProxy : mCameraProxies)
+        {
+            if (!cameraProxy->isViewportEmpty())
+                activeCameraProxies.push_back(cameraProxy);
+        }
+
+        size_t expectedSceneViewCount = mDirectionalLightProxies.size() * activeCameraProxies.size() + activeCameraProxies.size();
         sceneViewGroups.reserve(expectedSceneViewCount);
         for (auto directionalLightProxy : mDirectionalLightProxies)
         {
-            if (!directionalLightProxy->isCastShadows())
+            if (!directionalLightProxy->isVisible() || !directionalLightProxy->isCastShadows())
                 continue;
 
-            auto shadowSceneViewGroups = directionalLightProxy->getShadowSceneViewGroups(mCameraProxies, viewDataManager);
+            auto shadowSceneViewGroups = directionalLightProxy->getShadowSceneViewGroups(activeCameraProxies, viewDataManager);
 
             sceneViewGroups.insert(
                 sceneViewGroups.end(),
@@ -426,163 +639,42 @@ namespace hyp
                 std::make_move_iterator(shadowSceneViewGroups.end())
             );
         }
-        for (auto cameraProxy : mCameraProxies)
+        for (const CameraProxy* cameraProxy : activeCameraProxies)
         {
-            sceneViewGroups.emplace_back(cameraProxy->getSceneViewGroup());
+            sceneViewGroups.emplace_back(cameraProxy->getSceneViewGroup(frameIndex));
         }
         return sceneViewGroups;
     }
 
-    TRef<rhi::BindGroupLayout> SceneProxy::createSceneAndViewBindGroupLayout(BindGroupLayoutCache& cache)
-    {
-        std::vector<rhi::BindGroupLayoutEntry> entries(4);
-        auto& indicesEntry = entries[0];
-        indicesEntry.binding = 0;
-        indicesEntry.type = rhi::BindingType::Storage_Buffer;
-        indicesEntry.access = rhi::BindingAccess::Read_Only;
-        indicesEntry.count = 1;
-        indicesEntry.stageFlags = rhi::ShaderStage::All;
-
-        auto& instanceDataEntry = entries[1];
-        instanceDataEntry.binding = 1;
-        instanceDataEntry.type = rhi::BindingType::Storage_Buffer;
-        instanceDataEntry.access = rhi::BindingAccess::Read_Only;
-        instanceDataEntry.count = 1;
-        instanceDataEntry.stageFlags = rhi::ShaderStage::All;
-
-        auto& lightDataEntry = entries[2];
-        lightDataEntry.binding = 2;
-        lightDataEntry.type = rhi::BindingType::Storage_Buffer;
-        lightDataEntry.access = rhi::BindingAccess::Read_Only;
-        lightDataEntry.count = 1;
-        lightDataEntry.stageFlags = rhi::ShaderStage::All;
-
-        auto& viewDataEntry = entries[3];
-        viewDataEntry.binding = 3;
-        viewDataEntry.type = rhi::BindingType::Dynamic_Storage_Buffer;
-        viewDataEntry.access = rhi::BindingAccess::Read_Only;
-        viewDataEntry.count = 1;
-        viewDataEntry.stageFlags = rhi::ShaderStage::All;
-
-        return cache.getOrCreate(entries);
-    }
-
-    inline int ctz64(uint64_t x)
-    {
-        if (x == 0) return 64;
-#if defined(_MSC_VER)
-        unsigned long index;
-        _BitScanForward64(&index, x);
-        return int(index);
-#else
-        return __builtin_ctzll(x);
-#endif
-    }
-
-    inline int clz64(uint64_t x) {
-        if (x == 0) return 64;
-#if defined(_MSC_VER)
-        unsigned long index;
-        _BitScanReverse64(&index, x);
-        return 63 - int(index);
-#else
-        return __builtin_clzll(x);
-#endif
-    }
-
     uint32_t SceneProxy::acquireInstanceIndex()
     {
-        uint32_t instanceIndex;
-        if (mFreeInstanceIndices.empty())
-        {
-            instanceIndex = static_cast<uint32_t>(mInstanceData.size());
-            mInstanceData.push_back(InstanceData{});
-            mInstanceDataUpdatedBitset.resize((mInstanceData.size() + 64 - 1) / 64, 0);
-        }
-        else
-        {
-            instanceIndex = mFreeInstanceIndices.back();
-            mFreeInstanceIndices.pop_back();
-        }
+        uint32_t instanceIndex = mInstanceData.acquire();
+        size_t bitsetWordCount = (mInstanceData.size() + 64 - 1) / 64;
+        mInstanceTransformUpdatedBitset.resize(bitsetWordCount, 0);
+        mPrevInstanceTransformUpdatedBitset.resize(bitsetWordCount, 0);
         return instanceIndex;
     }
 
     void SceneProxy::releaseInstanceIndex(uint32_t instanceIndex)
     {
-        mFreeInstanceIndices.push_back(instanceIndex);
+        uint32_t wordIndex = instanceIndex / 64;
+        uint64_t bit = 1ull << (instanceIndex % 64);
+        assert(wordIndex < mInstanceTransformUpdatedBitset.size());
+        mInstanceTransformUpdatedBitset[wordIndex] &= ~bit;
+        mPrevInstanceTransformUpdatedBitset[wordIndex] &= ~bit;
+        getInstanceData(instanceIndex).flags = InstanceFlags::None;
+        markInstanceDataUpdated(instanceIndex);
+        mInstanceData.release(instanceIndex);
     }
 
     uint32_t SceneProxy::acquireLightIndex()
     {
-        uint32_t lightIndex;
-        if (mFreeLightIndices.empty())
-        {
-            lightIndex = static_cast<uint32_t>(mLightData.size());
-            mLightData.push_back(LightData{});
-            mLightDataUpdatedBitset.resize((mLightData.size() + 64 - 1) / 64, 0);
-        }
-        else
-        {
-            lightIndex = mFreeLightIndices.back();
-            mFreeLightIndices.pop_back();
-        }
-        return lightIndex;
+        return mLightData.acquire();
     }
 
     void SceneProxy::releaseLightIndex(uint32_t lightIndex)
     {
-        mFreeLightIndices.push_back(lightIndex);
-    }
-
-    std::vector<std::pair<size_t, size_t>> SceneProxy::generateUpdateRanges(
-        const std::vector<uint64_t>& updatedBitset,
-        uint32_t minUpdatedIndex,
-        uint32_t maxUpdatedIndex
-    )
-    {
-        std::vector<std::pair<size_t, size_t>> ranges;
-        if (updatedBitset.empty()) return ranges;
-
-        static constexpr size_t kBitPerWord = 64;
-        static constexpr size_t kMaxHoleInInstances = 64;
-        uint32_t currentStart = UINT32_MAX;
-        uint32_t prevIndex = 0;
-
-        uint32_t minWord = minUpdatedIndex / kBitPerWord;
-        uint32_t maxWord = maxUpdatedIndex / kBitPerWord;
-
-        uint32_t lastDirtyIndex = 0;
-
-        for (uint32_t w = minWord; w <= maxWord; ++w)
-        {
-            uint64_t word = updatedBitset[w];
-            if (word != 0)
-            {
-                uint32_t firstInWord = w * kBitPerWord + ctz64(word);
-                uint32_t lastInWord = w * kBitPerWord + (63 - clz64(word));
-
-                if (currentStart == UINT32_MAX)
-                {
-                    currentStart = firstInWord;
-                }
-                else
-                {
-                    if (firstInWord - lastDirtyIndex > kMaxHoleInInstances)
-                    {
-                        ranges.emplace_back(currentStart, lastDirtyIndex - currentStart + 1);
-                        currentStart = firstInWord;
-                    }
-                }
-                lastDirtyIndex = lastInWord;
-            }
-        }
-
-        if (currentStart != UINT32_MAX)
-        {
-            ranges.emplace_back(currentStart, lastDirtyIndex - currentStart + 1);
-        }
-
-        return ranges;
+        mLightData.release(lightIndex);
     }
 
     void SceneProxy::uploadData(

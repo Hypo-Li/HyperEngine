@@ -18,9 +18,13 @@ namespace hyp
         rg::TextureHandle gbufferA;
         rg::TextureHandle gbufferB;
         rg::TextureHandle gbufferC;
+        rg::TextureHandle gbufferD;
         rg::TextureHandle sceneDepthD;
         rg::TextureHandle skyLightPrefilter;
-        rg::BufferHandle skyLightPackedSHCoeff;
+        rg::BufferHandle skyLightData;
+        rg::TextureHandle ambientOcclusion;
+        bool hasAmbientOcclusion;
+        uint32_t applyDiffuse;
     };
 
     struct IndirectLightingStorage
@@ -28,7 +32,7 @@ namespace hyp
         std::shared_ptr<PassShader> shader;
         TRef<rhi::BindGroupLayout> bindGroupLayout;
         TRef<rhi::Pipeline> pipeline;
-        std::vector<BindGroupCache<7>> perViewCaches;
+        std::vector<BindGroupCache<9>> perViewCaches;
     };
 
     void IndirectLightingPass::addToRenderGraph(
@@ -36,10 +40,11 @@ namespace hyp
         RendererContext& rendererContext,
         const SceneProxy& scene,
         const SceneView& view,
-        SkyLightProxy& skyLight
+        SkyLightProxy& skyLight,
+        bool applyDiffuse
     )
     {
-        // SpecularPrefilter/PackedSHBuffer 都是常驻在 SkyLightProxy 上的资源(不是只在 capture
+        // SpecularPrefilter/DataBuffer 都是常驻在 SkyLightProxy 上的资源(不是只在 capture
         // 帧才存在的瞬时 render graph 资源), 直接从 proxy import 进来, 不走 blackboard——这样
         // 没有新 capture 发生的普通帧也能正常读到上一次 capture 算出来的结果
         TextureProxy* specularPrefilter = skyLight.getSpecularPrefilter();
@@ -51,9 +56,9 @@ namespace hyp
             &specularPrefilter->getTextureView(),
             rhi::ResourceState::Shader_Sampled
         );
-        auto skyLightPackedSHCoeffHandle = renderGraph.importBuffer(
-            "ActiveSkyLightPackedSHCoeff"_hs(scene.getSceneId()),
-            &skyLight.getPackedSHBuffer()
+        auto skyLightDataHandle = renderGraph.importBuffer(
+            "ActiveSkyLightData"_hs(scene.getSceneId()),
+            &skyLight.getDataBuffer()
         );
 
         renderGraph.addGraphicsPass<IndirectLightingData>(
@@ -61,6 +66,7 @@ namespace hyp
             [&](rg::RenderGraph::Builder& builder, IndirectLightingData& data)
             {
                 data.sceneId = scene.getSceneId();
+                data.applyDiffuse = applyDiffuse ? 1u : 0u;
                 data.viewId = view.getViewId();
                 data.viewport = view.getViewport();
 
@@ -74,12 +80,24 @@ namespace hyp
                 data.gbufferB = builder.sample(gbufferB);
                 rg::TextureHandle gbufferC = blackboard.get<rg::TextureHandle>("GBufferC"_hs(data.viewId));
                 data.gbufferC = builder.sample(gbufferC);
+                rg::TextureHandle gbufferD = blackboard.get<rg::TextureHandle>("GBufferD"_hs(data.viewId));
+                data.gbufferD = builder.sample(gbufferD);
                 rg::TextureHandle sceneDepthD = blackboard.get<rg::TextureHandle>("SceneDepthD"_hs(data.viewId));
                 data.sceneDepthD = builder.sample(sceneDepthD);
 
+                // AOPass 只在 ambientOcclusion.enabled 时才会往 blackboard 发布这个 key——关闭时
+                // isValid() 为 false, execute 阶段回退到白纹理(不遮蔽), 等价于没有屏幕空间 AO,
+                // 不需要额外的 shader 分支
+                rg::TextureHandle ambientOcclusion = blackboard.get<rg::TextureHandle>("AmbientOcclusion"_hs(data.viewId));
+                data.hasAmbientOcclusion = ambientOcclusion.isValid();
+                if (data.hasAmbientOcclusion)
+                {
+                    data.ambientOcclusion = builder.sample(ambientOcclusion);
+                }
+
                 data.skyLightPrefilter = builder.sample(skyLightPrefilterHandle);
-                data.skyLightPackedSHCoeff = builder.accessBuffer(
-                    skyLightPackedSHCoeffHandle,
+                data.skyLightData = builder.accessBuffer(
+                    skyLightDataHandle,
                     rhi::BufferUsage::Storage,
                     rg::AccessType::Read_Only
                 );
@@ -89,7 +107,7 @@ namespace hyp
                 auto& storage = rendererContext.getPassStorage().getOrCreate<IndirectLightingPass, IndirectLightingStorage>();
 
                 auto& renderBackend = context.getRenderBackend();
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
                 if (!storage.shader)
                 {
@@ -106,8 +124,6 @@ namespace hyp
 
                 if (!storage.bindGroupLayout)
                 {
-                    // kSkyLighting_Bindings 是从 SkyLighting.slang 的 [[vk::binding(N, 2)]]
-                    // 反射生成的, 不需要在这里再手写一遍 entries[]
                     storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kSkyLighting_Bindings);
                 }
 
@@ -120,12 +136,16 @@ namespace hyp
                 const rhi::TextureView* gbufferA = context.getTexture(data.gbufferA);
                 const rhi::TextureView* gbufferB = context.getTexture(data.gbufferB);
                 const rhi::TextureView* gbufferC = context.getTexture(data.gbufferC);
+                const rhi::TextureView* gbufferD = context.getTexture(data.gbufferD);
                 const rhi::TextureView* sceneDepthD = context.getTexture(data.sceneDepthD);
                 const rhi::TextureView* skyLightPrefilter = context.getTexture(data.skyLightPrefilter);
-                rhi::Buffer* skyLightPackedSHCoeff = context.getBuffer(data.skyLightPackedSHCoeff);
+                rhi::Buffer* skyLightData = context.getBuffer(data.skyLightData);
                 rhi::TextureView* dfgLutView = &renderBackend.getDefaultResources().getDfgLutView();
+                rhi::TextureView* ambientOcclusion = data.hasAmbientOcclusion
+                    ? context.getTexture(data.ambientOcclusion)
+                    : &renderBackend.getDefaultResources().getWhiteTextureView();
 
-                if (bindGroupCache.needUpdate(gbufferA, gbufferB, gbufferC, sceneDepthD, skyLightPrefilter, skyLightPackedSHCoeff, dfgLutView))
+                if (bindGroupCache.needUpdate(gbufferA, gbufferB, gbufferC, gbufferD, sceneDepthD, skyLightPrefilter, skyLightData, dfgLutView, ambientOcclusion))
                 {
                     bindGroupCache.update(
                         renderBackend,
@@ -139,11 +159,13 @@ namespace hyp
                             writer.setTexture("GbufferAImage", gbufferA);
                             writer.setTexture("GbufferBImage", gbufferB);
                             writer.setTexture("GbufferCImage", gbufferC);
+                            writer.setTexture("GbufferDImage", gbufferD);
                             writer.setTexture("SceneDepthImage", sceneDepthD);
                             writer.setTexture("SkyLightSpecularPrefilter", skyLightPrefilter);
-                            writer.setBuffer("SkyLightPackedSHCoeff", skyLightPackedSHCoeff);
+                            writer.setBuffer("SkyLightData", skyLightData);
                             writer.setTexture("DfgLut", dfgLutView);
                             writer.setSampler("LutSampler", linearNoMipSampler);
+                            writer.setTexture("AmbientOcclusionImage", ambientOcclusion);
                             writer.apply(bindGroup);
                         }
                     );
@@ -158,18 +180,23 @@ namespace hyp
                     );
                 }
 
-                setViewportAndScissor(cmd, data.viewport);
+                setViewportAndScissor(cmdList, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Graphics,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
+                cmdList.setImmediateData(
+                    &storage.pipeline->getLayout(),
+                    0,
+                    std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&data.applyDiffuse), sizeof(data.applyDiffuse))
+                );
 
-                cmd.draw(3, 1, 0, 0);
+                cmdList.draw(3, 1, 0, 0);
             }
         );
     }

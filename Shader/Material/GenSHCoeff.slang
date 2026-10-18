@@ -58,7 +58,7 @@ void ComputeMain(uint3 dispatchThreadId : SV_DispatchThreadID, uint id : SV_Grou
         - areaElement(u1, v0)
         + areaElement(u1, v1);
     
-    float3 L = SrcCubemap.SampleLevel(dir, 4.0).rgb;
+    float3 L = SrcCubemap.SampleLevel(dir, 0.0).rgb;
 
     // SH 基
     float x1 = dir.x, y1 = dir.y, z1 = dir.z;

@@ -16,7 +16,8 @@ namespace hyp
             RendererContext& rendererContext,
             const SceneProxy& scene,
             const SceneView& view,
-            SkyLightProxy& skyLight
+            SkyLightProxy& skyLight,
+            bool applyDiffuse
         );
 
     private:

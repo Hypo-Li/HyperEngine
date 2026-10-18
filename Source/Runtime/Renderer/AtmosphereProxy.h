@@ -1,5 +1,5 @@
 #pragma once
-#include "RenderableProxy.h"
+#include "SceneElementProxy.h"
 
 #include <Core/Math/Vector.h>
 #include <RHI/Buffer.h>
@@ -33,12 +33,18 @@ namespace hyp
         float padding4;
     };
 
-    class AtmosphereProxy : public RenderableProxy
+    class AtmosphereProxy : public SceneElementProxy
     {
     public:
-        AtmosphereProxy(const AtmosphereShaderParameters& parameters);
+        struct Desc
+        {
+            bool visible = true;
+            AtmosphereShaderParameters parameters;
+        };
 
-        ~AtmosphereProxy() noexcept;
+        AtmosphereProxy(SceneProxy& sceneProxy, const Desc& desc);
+
+        ~AtmosphereProxy() noexcept override;
 
         void updateParameters(const AtmosphereShaderParameters& parameters);
 

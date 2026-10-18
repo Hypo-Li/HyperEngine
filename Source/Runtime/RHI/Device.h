@@ -38,13 +38,38 @@ namespace hyp::rhi
             return mFeatures;
         }
 
+        const ShaderCompileTarget& getShaderCompileTarget() const noexcept
+        {
+            return mShaderCompileTarget;
+        }
+
         virtual void waitIdle() const = 0;
 
-        virtual TRef<Buffer> createBuffer(const BufferDesc& desc, MemoryType memoryType) const = 0;
+        // 派生类实现 create{Buffer,Texture,Sampler}Impl(), 这里统一打一个 unique id 再返回——
+        // BindGroupCache/TransientResources 这类靠"资源是不是变了"做增量更新判断的代码, 不能只
+        // 比裸指针: 对象销毁后, 分配器可能把下一个新对象分配到同一个地址上, 裸指针会把"新建的
+        // 资源"误判成"还是原来那个没变过"。调用方(现有的 device.createBuffer()/createTexture()/
+        // createSampler() 调用点)不需要改, 签名和行为完全不变, 只是内部多打了一个 ID。
+        TRef<Buffer> createBuffer(const BufferDesc& desc, MemoryType memoryType) const
+        {
+            TRef<Buffer> buffer = createBufferImpl(desc, memoryType);
+            buffer->setUniqueId(nextUniqueId());
+            return buffer;
+        }
 
-        virtual TRef<Texture> createTexture(const TextureDesc& desc, MemoryType memoryType) const = 0;
+        TRef<Texture> createTexture(const TextureDesc& desc, MemoryType memoryType) const
+        {
+            TRef<Texture> texture = createTextureImpl(desc, memoryType);
+            texture->setUniqueId(nextUniqueId());
+            return texture;
+        }
 
-        virtual TRef<Sampler> createSampler(const SamplerDesc& desc) const = 0;
+        TRef<Sampler> createSampler(const SamplerDesc& desc) const
+        {
+            TRef<Sampler> sampler = createSamplerImpl(desc);
+            sampler->setUniqueId(nextUniqueId());
+            return sampler;
+        }
 
         virtual TRef<BindGroupLayout> createBindGroupLayout(std::span<const BindGroupLayoutEntry> entries) const = 0;
 
@@ -72,7 +97,22 @@ namespace hyp::rhi
         ) const = 0;
 
     protected:
+        virtual TRef<Buffer> createBufferImpl(const BufferDesc& desc, MemoryType memoryType) const = 0;
+
+        virtual TRef<Texture> createTextureImpl(const TextureDesc& desc, MemoryType memoryType) const = 0;
+
+        virtual TRef<Sampler> createSamplerImpl(const SamplerDesc& desc) const = 0;
+
+    protected:
         std::unique_ptr<Swapchain> mSwapchain;
         FeatureSupport mFeatures;
+        ShaderCompileTarget mShaderCompileTarget;
+
+    private:
+        static uint64_t nextUniqueId() noexcept
+        {
+            static uint64_t counter = 1;
+            return counter++;
+        }
     };
 }

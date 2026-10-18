@@ -1,12 +1,17 @@
 #pragma once
-#include "RenderProxy.h"
 #include "BindlessRegistry.h"
+#include "ProxyHandle.h"
+#include "ResourceProxy.h"
 
 #include <RHI/Sampler.h>
 
+#include <unordered_map>
+
 namespace hyp
 {
-    class SamplerProxy : public RenderProxy
+    class RenderFrontend;
+
+    class SamplerProxy : public ResourceProxy
     {
     public:
         SamplerProxy(const rhi::SamplerDesc& desc);
@@ -32,5 +37,35 @@ namespace hyp
     struct TProxyTraits<ProxyType::Sampler>
     {
         using Proxy = SamplerProxy;
+    };
+
+    class SamplerProxyCache
+    {
+    public:
+        explicit SamplerProxyCache(RenderFrontend& renderFrontend) noexcept;
+
+        ~SamplerProxyCache();
+
+        SamplerProxyHandle getOrCreate(const rhi::SamplerDesc& desc);
+
+        void shutdown();
+
+    private:
+        struct Key
+        {
+            rhi::SamplerDesc desc;
+
+            bool operator==(const Key& other) const noexcept;
+        };
+
+        struct KeyHash
+        {
+            size_t operator()(const Key& key) const noexcept;
+        };
+
+    private:
+        RenderFrontend& mRenderFrontend;
+        std::unordered_map<Key, SamplerProxyHandle, KeyHash> mCache;
+        bool mShutdown = false;
     };
 }

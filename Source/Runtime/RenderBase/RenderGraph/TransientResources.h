@@ -1,6 +1,8 @@
 #pragma once
 #include "RenderGraphTypes.h"
 
+#include <type_traits>
+
 namespace hyp::rg
 {
     class TransientResources
@@ -10,9 +12,11 @@ namespace hyp::rg
 
         ~TransientResources();
 
-        TRef<rhi::Buffer> acquireBuffer(const BufferKey& key);
+        static constexpr uint32_t kDefaultMaxUnusedFrames = 3;
 
-        TRef<rhi::TextureView> acquireTexture(const TextureKey& key);
+        TRef<rhi::Buffer> acquireBuffer(const BufferKey& key, uint32_t maxUnusedFrames = kDefaultMaxUnusedFrames);
+
+        TRef<rhi::TextureView> acquireTexture(const TextureKey& key, uint32_t maxUnusedFrames = kDefaultMaxUnusedFrames);
 
         TRef<rhi::TextureView> acquireSubTexture(const rhi::TextureView& texture, const SubTextureKey& key);
 
@@ -95,23 +99,33 @@ namespace hyp::rg
     private:
         const rhi::Device& mDevice;
 
-        template <typename T, size_t MAX_UNUSED_COUNT = 3>
+        template <typename T>
         struct ResourceRecord
         {
             TRef<T> resource;
             uint32_t unusedCount = 0;
+            uint32_t maxUnusedFrames;
 
-            ResourceRecord(T* res) : resource(res) {}
+            ResourceRecord(T* res, uint32_t maxUnusedFrames) : resource(res), maxUnusedFrames(maxUnusedFrames) {}
 
             bool shouldDestroy() noexcept
             {
-                // 连续MAX_UNUSED_COUNT没有被使用则可销毁
-                if (resource->getRefCount() == 1)
+                // 连续maxUnusedFrames帧没有被使用则可销毁
+                if (isUnused())
                     ++unusedCount;
                 else
                     unusedCount = 0;
 
-                return unusedCount == MAX_UNUSED_COUNT;
+                return unusedCount == maxUnusedFrames;
+            }
+
+        private:
+            bool isUnused() const noexcept
+            {
+                if constexpr (std::is_same_v<T, rhi::Texture>)
+                    return resource->getRefCount() == 1 && resource->getViewCount() == 0;
+                else
+                    return resource->getRefCount() == 1;
             }
         };
 
@@ -123,7 +137,12 @@ namespace hyp::rg
 
         // key用于存放texture, value为非默认textureView
         using SubTextureMap = std::unordered_map<SubTextureKey, TextureRecord, SubTextureKeyHash>;
-        std::unordered_map<TRef<rhi::Texture>, SubTextureMap> mSubTextureMaps;
+        std::unordered_map<rhi::Texture*, SubTextureMap> mSubTextureMaps;
+
+        using TextureOwnerRecord = ResourceRecord<rhi::Texture>;
+
+        // TextureView 对 Texture 只持裸引用, 存活完全靠这里的 TRef
+        std::unordered_map<rhi::Texture*, TextureOwnerRecord> mOwnedTextures;
 
         std::vector<rhi::BufferBarrier> mPrePassBufferBarriers;
         std::vector<rhi::TextureBarrier> mPrePassTextureBarriers;

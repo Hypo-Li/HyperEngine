@@ -1,6 +1,7 @@
 #include "Fence.h"
 
 #include <chrono>
+#include <thread>
 
 namespace hyp::wgpu
 {

@@ -5,7 +5,7 @@ import Constants;
 // 同时把 GlobalHistogram(每个 radix 的总数)也做一次前缀和,得到 radix 间的基准偏移
 //
 // 绑定到 group 0(而不是其它 pass 通用的 group 2):这个 shader 完全用不到全局的 group0(GlobalData)/
-// group1(SceneAndView),C++ 侧给它用的是只含自己这一个 BindGroupLayout 的精简 PipelineLayout
+// group1(View),C++ 侧给它用的是只含自己这一个 BindGroupLayout 的精简 PipelineLayout
 [[vk::binding(0, 0)]]
 StructuredBuffer<uint> ElementCounts;
 

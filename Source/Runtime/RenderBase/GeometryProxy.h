@@ -1,5 +1,5 @@
 #pragma once
-#include "RenderProxy.h"
+#include "ResourceProxy.h"
 #include "VertexLayout.h"
 #include "StagingAllocator.h"
 
@@ -8,7 +8,7 @@
 
 namespace hyp
 {
-    class GeometryProxy : public RenderProxy
+    class GeometryProxy : public ResourceProxy
     {
     public:
         struct Section
@@ -44,11 +44,44 @@ namespace hyp
             return static_cast<uint32_t>(mSections.size());
         }
 
-        void prepare(rhi::CommandList& cmdList);
+        const Section& getSection(uint32_t sectionIdx) const noexcept
+        {
+            assert(sectionIdx < mSections.size());
+            return mSections[sectionIdx];
+        }
+
+        bool prepare(rhi::CommandList& cmdList) override;
 
         void bind(rhi::CommandList& cmdList) const noexcept;
 
         void draw(rhi::CommandList& cmdList, uint32_t sectionIdx, uint32_t instanceCount, uint32_t firstInstance) const noexcept;
+
+        // 给 Visualization 的 wireframeGeometry 用: 不走 bind()/draw() 那条固定管线顶点抓取路径,
+        // 而是把这同一块 buffer 当只读 storage buffer, 在 shader 里手动按下标反查三角形边画线框
+        // (原因见 VisualizationRenderData.cpp 的注释——三角形 index buffer 不能直接当 Line_List
+        // 数据用)。只支持 Uint32 索引, 调用方需要自己 assert
+        rhi::Buffer& getBuffer() const noexcept
+        {
+            return *mBuffer;
+        }
+
+        // Position 属性的字节偏移——VertexLayout 保证只要 attributeMask 包含 Position 就一定是
+        // 第一个 binding(见 VertexLayout::writeVertexLayoutBindingsAndAttributes), 调用方需要
+        // 自己保证这份 geometry 确实带 Position
+        uint64_t getPositionByteOffset() const noexcept
+        {
+            return mVertexBindingOffsets[0];
+        }
+
+        uint64_t getIndexByteOffset() const noexcept
+        {
+            return static_cast<uint64_t>(mIndexOffset);
+        }
+
+        rhi::IndexType getIndexType() const noexcept
+        {
+            return mIndexType;
+        }
 
     private:
         void flushUploads(rhi::CommandList& cmdList);

@@ -127,6 +127,24 @@ namespace hyp
         mState.store(State::Loaded, std::memory_order_release);
     }
 
+    std::vector<uint8_t> BulkData::takeData() noexcept
+    {
+        assert(getState() != State::Loading && "cannot take data while a load is in flight");
+
+        std::vector<uint8_t> data = std::move(mData);
+        mData.clear();
+        mData.shrink_to_fit();
+        mState.store(State::Unloaded, std::memory_order_release);
+
+        if (mDirty)
+        {
+            mSize = 0;
+            mDirty = false;
+        }
+
+        return data;
+    }
+
     void BulkData::bindSource(BulkDataSource source, uint64_t offset, uint64_t size) noexcept
     {
         mSource = std::move(source);

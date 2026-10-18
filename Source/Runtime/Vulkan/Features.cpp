@@ -2,21 +2,31 @@
 
 #include <Core/Common/LogSystem.h>
 #include <algorithm>
+#include <cstring>
 
 namespace hyp::vk
 {
-    void getSupportedFeatures(uint32_t apiVersion, VkPhysicalDevice physicalDevice, rhi::FeatureSupport& features, FeatureSupport& vkFeatures)
+    void getSupportedFeatures(
+        uint32_t apiVersion,
+        uint32_t instanceApiVersion,
+        bool physicalDeviceProperties2,
+        VkPhysicalDevice physicalDevice,
+        rhi::FeatureSupport& features,
+        FeatureSupport& vkFeatures
+    )
     {
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(
+            physicalDevice,
+            nullptr,
+            &extensionCount,
+            availableExtensions.data()
+        );
+
         auto hasExtension = [&](const char* name) -> bool
             {
-                uint32_t extensionCount = 0;
-                vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
-                if (extensionCount == 0)
-                    return false;
-
-                std::vector<VkExtensionProperties> availableExtensions(extensionCount);
-                vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, availableExtensions.data());
-
                 return std::any_of(availableExtensions.begin(), availableExtensions.end(),
                     [&](const VkExtensionProperties& ext)
                     {
@@ -24,8 +34,29 @@ namespace hyp::vk
                     });
             };
 
-        // Vulkan 1.0 without VK_KHR_get_physical_device_properties2 cannot use vkGetPhysicalDeviceFeatures2.
-        const bool hasPhysicalDeviceProperties2Ext = hasExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+        const bool hasFeatures2EntryPoint =
+            instanceApiVersion >= VK_API_VERSION_1_1
+                ? vkGetPhysicalDeviceFeatures2 != nullptr &&
+                  vkGetPhysicalDeviceProperties2 != nullptr
+                : vkGetPhysicalDeviceFeatures2KHR != nullptr &&
+                  vkGetPhysicalDeviceProperties2KHR != nullptr;
+        const bool canUseFeatures2 = physicalDeviceProperties2 && hasFeatures2EntryPoint;
+
+        const bool hasCreateRenderPass2Dependencies =
+            apiVersion >= VK_API_VERSION_1_1 ||
+            (hasExtension(VK_KHR_MULTIVIEW_EXTENSION_NAME) &&
+             hasExtension(VK_KHR_MAINTENANCE_2_EXTENSION_NAME));
+        const bool hasCreateRenderPass2 =
+            apiVersion >= VK_API_VERSION_1_2 ||
+            (hasCreateRenderPass2Dependencies &&
+             hasExtension(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME));
+        const bool hasDepthStencilResolve =
+            apiVersion >= VK_API_VERSION_1_2 ||
+            (hasCreateRenderPass2 &&
+             hasExtension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME));
+        const bool hasShaderDrawParametersExtension =
+            apiVersion < VK_API_VERSION_1_1 &&
+            hasExtension(VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
 
         VkPhysicalDeviceFeatures baseFeatures = {};
         vkGetPhysicalDeviceFeatures(physicalDevice, &baseFeatures);
@@ -43,14 +74,14 @@ namespace hyp::vk
         VkPhysicalDeviceSynchronization2FeaturesKHR* sync2Features = nullptr;
         VkPhysicalDeviceTimelineSemaphoreFeatures* timelineFeatures = nullptr;
         VkPhysicalDeviceDescriptorIndexingFeatures* descriptorIndexingFeatures = nullptr;
-        VkPhysicalDeviceShaderDrawParametersFeatures* shaderDrawParamsFeatures = nullptr;
         VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures* separateDepthStencilLayouts = nullptr;
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* shaderAtomicFloatFeatures = nullptr;
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR* rayTracingPipelineFeatures = nullptr;
         VkPhysicalDeviceAccelerationStructureFeaturesKHR* accelerationStructureFeatures = nullptr;
         VkPhysicalDeviceFragmentShadingRateFeaturesKHR* fragmentShadingRateFeatures = nullptr;
-
-        const bool canUseFeatures2 = (apiVersion >= VK_API_VERSION_1_1) || hasPhysicalDeviceProperties2Ext;
+        VkPhysicalDeviceLineRasterizationFeaturesKHR* lineRasterizationFeatures = nullptr;
+        VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT* shaderDemoteToHelperInvocationFeatures = nullptr;
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR* computeShaderDerivativesFeatures = nullptr;
 
         if (canUseFeatures2)
         {
@@ -63,22 +94,27 @@ namespace hyp::vk
             if (apiVersion >= VK_API_VERSION_1_4)
                 features14 = &featureChain.add<VkPhysicalDeviceVulkan14Features>();
 
-            if (apiVersion < VK_API_VERSION_1_3 && hasExtension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+            if (apiVersion < VK_API_VERSION_1_3 &&
+                hasDepthStencilResolve &&
+                hasExtension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
                 dynamicRenderingFeatures = &featureChain.add<VkPhysicalDeviceDynamicRenderingFeaturesKHR>();
 
-            if (apiVersion < VK_API_VERSION_1_3 && hasExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME))
+            if (apiVersion < VK_API_VERSION_1_3 &&
+                hasCreateRenderPass2 &&
+                hasExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME))
                 sync2Features = &featureChain.add<VkPhysicalDeviceSynchronization2FeaturesKHR>();
 
             if (apiVersion < VK_API_VERSION_1_2 && hasExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME))
                 timelineFeatures = &featureChain.add<VkPhysicalDeviceTimelineSemaphoreFeatures>();
 
-            if (apiVersion < VK_API_VERSION_1_2 && hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))
+            if (apiVersion >= VK_API_VERSION_1_1 &&
+                apiVersion < VK_API_VERSION_1_2 &&
+                hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))
                 descriptorIndexingFeatures = &featureChain.add<VkPhysicalDeviceDescriptorIndexingFeatures>();
 
-            if (apiVersion < VK_API_VERSION_1_1 && hasExtension(VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME))
-                shaderDrawParamsFeatures = &featureChain.add<VkPhysicalDeviceShaderDrawParametersFeatures>();
-
-            if (apiVersion < VK_API_VERSION_1_2 && hasExtension(VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME))
+            if (apiVersion < VK_API_VERSION_1_2 &&
+                hasCreateRenderPass2 &&
+                hasExtension(VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME))
                 separateDepthStencilLayouts = &featureChain.add<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures>();
 
             // 下面这几个都没有被提升进任何 core Vulkan 版本,不管 apiVersion 多高都得靠扩展查
@@ -100,15 +136,34 @@ namespace hyp::vk
             if (hasFragmentShadingRateExt)
                 fragmentShadingRateFeatures = &featureChain.add<VkPhysicalDeviceFragmentShadingRateFeaturesKHR>();
 
-            if (apiVersion >= VK_API_VERSION_1_1)
+            // Vulkan 1.4 把这个特性折进了 VkPhysicalDeviceVulkan14Features(字段名同样叫
+            // smoothLines), 两个结构体不能同时出现在同一条 pNext 链上(VUID-VkDeviceCreateInfo-
+            // pNext-10360), apiVersion>=1.4 时只能靠 features14 读取/设置, 不能再单独查这个扩展的
+            // feature struct
+            const bool hasLineRasterizationExt =
+                apiVersion < VK_API_VERSION_1_4 &&
+                hasExtension(VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME);
+            if (hasLineRasterizationExt)
+                lineRasterizationFeatures = &featureChain.add<VkPhysicalDeviceLineRasterizationFeaturesKHR>();
+
+            // Vulkan 1.3 把这个特性折进了 VkPhysicalDeviceVulkan13Features, 1.3 之前得靠
+            // VK_EXT_shader_demote_to_helper_invocation 扩展的 feature struct 查
+            const bool hasShaderDemoteToHelperInvocationExt =
+                apiVersion < VK_API_VERSION_1_3 &&
+                hasExtension(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+            if (hasShaderDemoteToHelperInvocationExt)
+                shaderDemoteToHelperInvocationFeatures = &featureChain.add<VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT>();
+
+            if (hasExtension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
+                computeShaderDerivativesFeatures = &featureChain.add<VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
+
+            if (instanceApiVersion >= VK_API_VERSION_1_1)
             {
                 vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
             }
             else
             {
-                auto pfn = (PFN_vkGetPhysicalDeviceFeatures2KHR)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
-                if (pfn)
-                    pfn(physicalDevice, &features2);
+                vkGetPhysicalDeviceFeatures2KHR(physicalDevice, &features2);
             }
 
             baseFeatures = features2.features;
@@ -118,6 +173,7 @@ namespace hyp::vk
         features.independentBlend = baseFeatures.independentBlend == VK_TRUE;
         features.dualSourceBlend = baseFeatures.dualSrcBlend == VK_TRUE;
         features.multiViewport = baseFeatures.multiViewport == VK_TRUE;
+        features.depthClamp = baseFeatures.depthClamp == VK_TRUE;
 
         features.shaderInt16 = baseFeatures.shaderInt16 == VK_TRUE;
         features.shaderFloat16 = (features12 && features12->shaderFloat16 == VK_TRUE);
@@ -138,21 +194,22 @@ namespace hyp::vk
         // WaveGetLaneIndex/WaveGetLaneCount、WaveActiveBallot、WaveActiveSum/WavePrefixSum 这套引擎
         // 目前实际用到的 wave 内建函数)
         features.subgroup = false;
-        if (canUseFeatures2)
+        // Modern GroupNonUniform capabilities are enabled through Vulkan 1.1
+        // subgroup properties. The Vulkan 1.0 EXT ballot/vote extensions are
+        // not an equivalent path for the full Basic/Ballot/Arithmetic set.
+        if (apiVersion >= VK_API_VERSION_1_1 && canUseFeatures2)
         {
             StructureChain propertyChain;
             auto& properties2 = propertyChain.add<VkPhysicalDeviceProperties2>();
             auto& subgroupProperties = propertyChain.add<VkPhysicalDeviceSubgroupProperties>();
 
-            if (apiVersion >= VK_API_VERSION_1_1)
+            if (instanceApiVersion >= VK_API_VERSION_1_1)
             {
                 vkGetPhysicalDeviceProperties2(physicalDevice, &properties2);
             }
             else
             {
-                auto pfn = (PFN_vkGetPhysicalDeviceProperties2KHR)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties2KHR");
-                if (pfn)
-                    pfn(physicalDevice, &properties2);
+                vkGetPhysicalDeviceProperties2KHR(physicalDevice, &properties2);
             }
 
             constexpr VkSubgroupFeatureFlags kRequiredSubgroupOps =
@@ -161,6 +218,9 @@ namespace hyp::vk
                 (subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
                 ((subgroupProperties.supportedOperations & kRequiredSubgroupOps) == kRequiredSubgroupOps);
         }
+
+        features.computeShaderDerivatives =
+            computeShaderDerivativesFeatures && computeShaderDerivativesFeatures->computeDerivativeGroupLinear == VK_TRUE;
 
         features.depth32FloatStencil8 = true;
         features.textureCompressionBC = baseFeatures.textureCompressionBC == VK_TRUE;
@@ -184,7 +244,15 @@ namespace hyp::vk
 
         vkFeatures.shaderDrawParameters =
             (features11 && features11->shaderDrawParameters == VK_TRUE) ||
-            (shaderDrawParamsFeatures && shaderDrawParamsFeatures->shaderDrawParameters == VK_TRUE);
+            hasShaderDrawParametersExtension;
+
+        vkFeatures.maintenance1 =
+            apiVersion >= VK_API_VERSION_1_1 ||
+            hasExtension(VK_KHR_MAINTENANCE_1_EXTENSION_NAME);
+
+        vkFeatures.storageBufferStorageClass =
+            apiVersion >= VK_API_VERSION_1_1 ||
+            hasExtension(VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME);
 
         vkFeatures.separateDepthStencilLayouts =
             (features12 && features12->separateDepthStencilLayouts == VK_TRUE) ||
@@ -201,6 +269,14 @@ namespace hyp::vk
         vkFeatures.dynamicRendering =
             (features13 && features13->dynamicRendering == VK_TRUE) ||
             (dynamicRenderingFeatures && dynamicRenderingFeatures->dynamicRendering == VK_TRUE);
+
+        vkFeatures.lineRasterization =
+            (features14 && features14->smoothLines == VK_TRUE) ||
+            (lineRasterizationFeatures && lineRasterizationFeatures->smoothLines == VK_TRUE);
+
+        vkFeatures.shaderDemoteToHelperInvocation =
+            (features13 && features13->shaderDemoteToHelperInvocation == VK_TRUE) ||
+            (shaderDemoteToHelperInvocationFeatures && shaderDemoteToHelperInvocationFeatures->shaderDemoteToHelperInvocation == VK_TRUE);
     }
 
     std::vector<const char*> getVkDeviceExtensions(
@@ -215,6 +291,26 @@ namespace hyp::vk
         if (!headless)
         {
             extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        }
+
+        const bool needsCreateRenderPass2 =
+            apiVersion < VK_API_VERSION_1_2 &&
+            (vkFeatures.dynamicRendering ||
+             vkFeatures.synchronization2 ||
+             vkFeatures.separateDepthStencilLayouts);
+        if (needsCreateRenderPass2)
+        {
+            if (apiVersion < VK_API_VERSION_1_1)
+            {
+                extensions.push_back(VK_KHR_MULTIVIEW_EXTENSION_NAME);
+                extensions.push_back(VK_KHR_MAINTENANCE_2_EXTENSION_NAME);
+            }
+            extensions.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+        }
+
+        if (vkFeatures.dynamicRendering && apiVersion < VK_API_VERSION_1_2)
+        {
+            extensions.push_back(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
         }
 
         if (vkFeatures.dynamicRendering && apiVersion < VK_API_VERSION_1_3)
@@ -242,9 +338,34 @@ namespace hyp::vk
             extensions.push_back(VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
         }
 
+        if (vkFeatures.maintenance1 && apiVersion < VK_API_VERSION_1_1)
+        {
+            extensions.push_back(VK_KHR_MAINTENANCE_1_EXTENSION_NAME);
+        }
+
+        if (vkFeatures.storageBufferStorageClass && apiVersion < VK_API_VERSION_1_1)
+        {
+            extensions.push_back(VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME);
+        }
+
         if (vkFeatures.separateDepthStencilLayouts && apiVersion < VK_API_VERSION_1_2)
         {
             extensions.push_back(VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+        }
+
+        if (vkFeatures.lineRasterization && apiVersion < VK_API_VERSION_1_4)
+        {
+            extensions.push_back(VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME);
+        }
+
+        if (vkFeatures.shaderDemoteToHelperInvocation && apiVersion < VK_API_VERSION_1_3)
+        {
+            extensions.push_back(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+        }
+
+        if (features.computeShaderDerivatives)
+        {
+            extensions.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
         }
 
         return extensions;
@@ -263,6 +384,7 @@ namespace hyp::vk
         vkFeatures.independentBlend = features.independentBlend ? VK_TRUE : VK_FALSE;
         vkFeatures.dualSrcBlend = features.dualSourceBlend ? VK_TRUE : VK_FALSE;
         vkFeatures.multiViewport = features.multiViewport ? VK_TRUE : VK_FALSE;
+        vkFeatures.depthClamp = features.depthClamp ? VK_TRUE : VK_FALSE;
         vkFeatures.textureCompressionBC = features.textureCompressionBC ? VK_TRUE : VK_FALSE;
         vkFeatures.textureCompressionETC2 = features.textureCompressionETC2 ? VK_TRUE : VK_FALSE;
         vkFeatures.textureCompressionASTC_LDR = features.textureCompressionASTC ? VK_TRUE : VK_FALSE;
@@ -290,10 +412,14 @@ namespace hyp::vk
 
         FeatureSupport result;
         result.shaderDrawParameters = resolve("shaderDrawParameters", supported.shaderDrawParameters, requirements.shaderDrawParameters);
+        result.maintenance1 = resolve("maintenance1", supported.maintenance1, requirements.maintenance1);
+        result.storageBufferStorageClass = resolve("storageBufferStorageClass", supported.storageBufferStorageClass, requirements.storageBufferStorageClass);
         result.separateDepthStencilLayouts = resolve("separateDepthStencilLayouts", supported.separateDepthStencilLayouts, requirements.separateDepthStencilLayouts);
         result.timelineSemaphore = resolve("timelineSemaphore", supported.timelineSemaphore, requirements.timelineSemaphore);
         result.synchronization2 = resolve("synchronization2", supported.synchronization2, requirements.synchronization2);
         result.dynamicRendering = resolve("dynamicRendering", supported.dynamicRendering, requirements.dynamicRendering);
+        result.lineRasterization = resolve("lineRasterization", supported.lineRasterization, requirements.lineRasterization);
+        result.shaderDemoteToHelperInvocation = resolve("shaderDemoteToHelperInvocation", supported.shaderDemoteToHelperInvocation, requirements.shaderDemoteToHelperInvocation);
         return result;
     }
 
@@ -314,14 +440,15 @@ namespace hyp::vk
 
         VkPhysicalDeviceDynamicRenderingFeaturesKHR* dynamicRenderingFeatures = nullptr;
         VkPhysicalDeviceSynchronization2FeaturesKHR* sync2Features = nullptr;
-        VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures* separateDsFeatures = nullptr;
         VkPhysicalDeviceTimelineSemaphoreFeatures* timelineFeatures = nullptr;
         VkPhysicalDeviceDescriptorIndexingFeatures* descriptorIndexingFeatures = nullptr;
-        VkPhysicalDeviceShaderDrawParametersFeatures* shaderDrawParametersFeatures = nullptr;
         VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures* separateDepthStencilLayoutsFeatures = nullptr;
+        VkPhysicalDeviceLineRasterizationFeaturesKHR* lineRasterizationFeatures = nullptr;
+        VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT* shaderDemoteToHelperInvocationFeatures = nullptr;
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR* computeShaderDerivativesFeatures = nullptr;
 
         if (apiVersion >= VK_API_VERSION_1_1)
-            features11 = &featureChain.add<VkPhysicalDeviceVulkan11Features>();
+            features11 =&featureChain.add<VkPhysicalDeviceVulkan11Features>();
         if (apiVersion >= VK_API_VERSION_1_2)
             features12 = &featureChain.add<VkPhysicalDeviceVulkan12Features>();
         if (apiVersion >= VK_API_VERSION_1_3)
@@ -337,20 +464,19 @@ namespace hyp::vk
             timelineFeatures = &featureChain.add<VkPhysicalDeviceTimelineSemaphoreFeatures>();
         if (apiVersion < VK_API_VERSION_1_2 && features.bindless)
             descriptorIndexingFeatures = &featureChain.add<VkPhysicalDeviceDescriptorIndexingFeatures>();
-        if (apiVersion < VK_API_VERSION_1_1 && vkFeatures.shaderDrawParameters)
-            shaderDrawParametersFeatures = &featureChain.add<VkPhysicalDeviceShaderDrawParametersFeatures>();
         if (apiVersion < VK_API_VERSION_1_2 && vkFeatures.separateDepthStencilLayouts)
             separateDepthStencilLayoutsFeatures = &featureChain.add<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures>();
+        if (apiVersion < VK_API_VERSION_1_4 && vkFeatures.lineRasterization)
+            lineRasterizationFeatures = &featureChain.add<VkPhysicalDeviceLineRasterizationFeaturesKHR>();
+        if (apiVersion < VK_API_VERSION_1_3 && vkFeatures.shaderDemoteToHelperInvocation)
+            shaderDemoteToHelperInvocationFeatures = &featureChain.add<VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT>();
+        if (features.computeShaderDerivatives)
+            computeShaderDerivativesFeatures = &featureChain.add<VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
 
         if (features11)
         {
             features11->shaderDrawParameters = vkFeatures.shaderDrawParameters ? VK_TRUE : VK_FALSE;
         }
-        if (shaderDrawParametersFeatures)
-        {
-            shaderDrawParametersFeatures->shaderDrawParameters = VK_TRUE;
-        }
-
         if (features12)
         {
             VkBool32 bindlessEnabled = features.bindless ? VK_TRUE : VK_FALSE;
@@ -375,14 +501,22 @@ namespace hyp::vk
         }
         if (timelineFeatures) timelineFeatures->timelineSemaphore = VK_TRUE;
         if (separateDepthStencilLayoutsFeatures) separateDepthStencilLayoutsFeatures->separateDepthStencilLayouts = VK_TRUE;
+        if (lineRasterizationFeatures) lineRasterizationFeatures->smoothLines = VK_TRUE;
 
         if (features13)
         {
             features13->synchronization2 = vkFeatures.synchronization2 ? VK_TRUE : VK_FALSE;
             features13->dynamicRendering = vkFeatures.dynamicRendering ? VK_TRUE : VK_FALSE;
+            features13->shaderDemoteToHelperInvocation = vkFeatures.shaderDemoteToHelperInvocation ? VK_TRUE : VK_FALSE;
+        }
+        if (features14)
+        {
+            features14->smoothLines = vkFeatures.lineRasterization ? VK_TRUE : VK_FALSE;
         }
         if (dynamicRenderingFeatures) dynamicRenderingFeatures->dynamicRendering = VK_TRUE;
         if (sync2Features) sync2Features->synchronization2 = VK_TRUE;
+        if (shaderDemoteToHelperInvocationFeatures) shaderDemoteToHelperInvocationFeatures->shaderDemoteToHelperInvocation = VK_TRUE;
+        if (computeShaderDerivativesFeatures) computeShaderDerivativesFeatures->computeDerivativeGroupLinear = VK_TRUE;
 
         return featureChain;
     }

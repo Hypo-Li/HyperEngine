@@ -2,11 +2,6 @@
 
 #include <Core/Common/LogSystem.h>
 
-#ifdef WIN32
-#define NOMINMAX
-#include <Windows.h>
-#endif
-
 namespace hyp::wgpu
 {
     static rhi::TextureFormat convertRHISurfaceFormat(WGPUTextureFormat format) noexcept
@@ -25,7 +20,7 @@ namespace hyp::wgpu
 
     WGPUSurface Swapchain::createSurface(WGPUInstance instance, const rhi::NativeWindowInfo& nativeWindow)
     {
-#ifdef WIN32
+#ifdef _WIN32
         if (nativeWindow.type == rhi::NativeWindowType::Win32)
         {
             WGPUSurfaceSourceWindowsHWND surfaceSrc = WGPU_SURFACE_SOURCE_WINDOWS_HWND_INIT;
@@ -39,7 +34,19 @@ namespace hyp::wgpu
             return wgpuInstanceCreateSurface(instance, &surfaceDesc);
         }
 #elif defined(__linux__)
-        if (nativeWindow.type == rhi::NativeWindowType::Xlib)
+        if (nativeWindow.type == rhi::NativeWindowType::Xcb)
+        {
+            WGPUSurfaceSourceXCBWindow surfaceSrc = WGPU_SURFACE_SOURCE_XCB_WINDOW_INIT;
+            surfaceSrc.connection = nativeWindow.xcb.connection;
+            surfaceSrc.window = nativeWindow.xcb.window;
+
+            WGPUSurfaceDescriptor surfaceDesc = WGPU_SURFACE_DESCRIPTOR_INIT;
+            surfaceDesc.nextInChain = &surfaceSrc.chain;
+            surfaceDesc.label = WGPUStringView{ "UnnamedSurface", WGPU_STRLEN };
+
+            return wgpuInstanceCreateSurface(instance, &surfaceDesc);
+        }
+        else if (nativeWindow.type == rhi::NativeWindowType::Xlib)
         {
             WGPUSurfaceSourceXlibWindow surfaceSrc = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
             surfaceSrc.display = nativeWindow.xlib.display;
@@ -217,7 +224,7 @@ namespace hyp::wgpu
         return mExtent;
     }
 
-    rhi::TextureFormat Swapchain::getSwapchainTextureFormat() const
+    rhi::TextureFormat Swapchain::getSurfaceTextureFormat() const
     {
         return convertRHISurfaceFormat(mSurfaceFormat);
     }

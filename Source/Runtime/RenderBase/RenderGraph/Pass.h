@@ -87,7 +87,7 @@ namespace hyp::rg
     };
     ENABLE_ENUM_CLASS_BITWISE(PassFlags)
 
-        class RenderGraph;
+    class RenderGraph;
     class PassNode;
     class PassBase
     {
@@ -195,27 +195,11 @@ namespace hyp::rg
         void endPass(rhi::CommandList& cmdList) noexcept override;
     };
 
-    // 专用于"只做 copyBuffer/copyBufferToTexture/clearBuffer/insertBarriers、不 dispatch 任何
-    // 着色器"的 pass —— 这类操作在所有后端都是顶层 command encoder 操作, 从不需要、也不能处于
-    // 任何 pass 的 begin/end 范围内(WebGPU 尤其严格: copyBufferToBuffer 只能在 GPUCommandEncoder
-    // 上调用, 若已经 begin 了 GPUComputePassEncoder/GPURenderPassEncoder 则会直接断言失败)。
-    //
-    // 在 TransferPass 出现之前, 这类"纯上传"的工作只能借用 ComputePass、并手动传
-    // Skip_Begin_Pass(/Skip_End_Pass)来避免被自动套进 compute pass 的 begin/end —— 这是一个容易
-    // 忘记传的 flag(Vulkan 没有这个限制, 忘记传在纯 Vulkan 环境下不会暴露问题, 只有在 WebGPU
-    // 后端才会触发断言), 已经在 Test/GSplat2/GSplatPass2.cpp 里踩过一次。TransferPass 把这件事
-    // 从"记得传对 flag"变成"这类 pass 的 beginPass/endPass 天生就是空实现, 根本没有忘记的余地"——
-    // 见 TTransferPass::execute() 的注释, 它连 Skip_Begin_Pass/Skip_End_Pass 判断都不做, 无条件
-    // 跳过 begin/end。
     class TransferPass : public PassBase
     {
     public:
         TransferPass(HString name, PassFlags flags, Arena& arena) : PassBase(name, PassType::Transfer, flags, arena) {}
 
-        // 空实现, 且正常情况下不会被调用到(TTransferPass::execute() 从不调用它们)—— 只有当
-        // execute 回调里误调用了 context.beginPass()/endPass() 才会走到这里, 因此故意断言失败,
-        // 而不是悄悄地什么都不做: 需要 dispatch/draw 的工作应该用 ComputePass/GraphicsPass,
-        // 而不是把 TransferPass 当成它们的替代品。
         void beginPass(rhi::CommandList& cmdList) noexcept override;
 
         void endPass(rhi::CommandList& cmdList) noexcept override;
@@ -310,9 +294,6 @@ namespace hyp::rg
         Execute mExecute;
     };
 
-    // Execute should be void(ExecuteContext&, Data&) lambda —— 只应调用 copyBuffer/
-    // copyBufferToTexture/clearBuffer/insertBarriers 这类顶层 command encoder 操作, 不应
-    // bindPipeline/dispatch/draw(那是 ComputePass/GraphicsPass 的职责)。
     template <typename Data, typename Execute>
     class TTransferPass : public TransferPass
     {

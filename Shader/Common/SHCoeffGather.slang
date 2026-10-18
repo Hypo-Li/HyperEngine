@@ -1,4 +1,5 @@
 #include "Cubemap.slang"
+#include "SHCommon.slang"
 
 // 把一张 cubemap 的低分辨率 mip 子资源 view 投影到 9 个 3 阶球谐系数上。face size 和
 // 每行 workgroup 数由调用方传入。原来的写法用 InterlockedAdd 把所有 workgroup 的结果原子
@@ -24,16 +25,9 @@ struct GatherImmediateData
 [[vk::push_constant]]
 GatherImmediateData ImData;
 
-static constexpr float kSHConstants[9] = {
-    // L0 (1个系数)
-    0.2820947918, // Y00: 0.5 * sqrt(1/π)
-
-    // L1 (3个系数)
-    -0.4886025119, // Y1-1: sqrt(3/(4π))
-    0.4886025119,  // Y10
-    -0.4886025119, // Y11
-
-    // L2 (5个系数)
+// L0/L1(前 4 项)的基函数常量已经挪进 SHCommon.slang::shBasisFunction(), 这里只留
+// L2(5 个系数)——天光专属的完整 2 阶, radiosity 那边只要 L0/L1, 不在 SHCommon.slang 范围内
+static constexpr float kSHConstantsL2[5] = {
     1.0925484306,  // Y2-2: sqrt(15/(4π))
     -1.0925484306, // Y2-1
     0.3153915652,  // Y20: sqrt(5/(16π))
@@ -41,7 +35,6 @@ static constexpr float kSHConstants[9] = {
     0.5462742153    // Y22: sqrt(15/(16π))
 };
 
-static constexpr float PI = 3.14159265358979323846;
 static constexpr float A0 = PI;
 static constexpr float A1 = 2.0 * PI / 3.0;
 static constexpr float A2 = PI / 4.0;
@@ -84,18 +77,19 @@ void ComputeMain(uint3 dispatchThreadId : SV_DispatchThreadID, uint3 groupId : S
     // 传进来的 view 已经是单独一级 mip, 这里始终采样它的 LOD 0
     float3 L = SrcCubemap.SampleLevel(LinearSampler, dir, 0.0).rgb;
 
-    // SH 基
+    // SH 基——L0/L1(前 4 项)复用 SHCommon.slang, L2(后 5 项)天光专属, 留在这里
     float x1 = dir.x, y1 = dir.y, z1 = dir.z;
+    float4 basisL0L1 = shBasisFunction(dir);
     float basis[9];
-    basis[0] = kSHConstants[0];
-    basis[1] = kSHConstants[1] * y1;
-    basis[2] = kSHConstants[2] * z1;
-    basis[3] = kSHConstants[3] * x1;
-    basis[4] = kSHConstants[4] * x1 * y1;
-    basis[5] = kSHConstants[5] * y1 * z1;
-    basis[6] = kSHConstants[6] * (3.0*z1*z1 - 1.0);
-    basis[7] = kSHConstants[7] * x1 * z1;
-    basis[8] = kSHConstants[8] * (x1*x1 - y1*y1);
+    basis[0] = basisL0L1.x;
+    basis[1] = basisL0L1.y;
+    basis[2] = basisL0L1.z;
+    basis[3] = basisL0L1.w;
+    basis[4] = kSHConstantsL2[0] * x1 * y1;
+    basis[5] = kSHConstantsL2[1] * y1 * z1;
+    basis[6] = kSHConstantsL2[2] * (3.0*z1*z1 - 1.0);
+    basis[7] = kSHConstantsL2[3] * x1 * z1;
+    basis[8] = kSHConstantsL2[4] * (x1*x1 - y1*y1);
 
     float Al[9] = float[9](A0, A1, A1, A1, A2, A2, A2, A2, A2);
 

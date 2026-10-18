@@ -11,6 +11,7 @@
 #include "Special/StdVector.h"
 #include "Special/HypHString.h"
 #include "Special/HypBulkData.h"
+#include "Special/HypSoftRef.h"
 
 #include "Property.inl"
 #include "Class.inl"
@@ -92,13 +93,15 @@ namespace hyp
             return new HypHString;
         else if constexpr (std::is_same_v<T, BulkData>)
             return new HypBulkData;
+        else if constexpr (is_instance_of_v<T, TSoftRef>)
+            return new THypSoftRef<container_traits_t<T>>();
         else
             static_assert(!sizeof(T*), "T is an unreflectable type.");
     }
 
 #define GET_TYPE(kind) \
     template <typename T> \
-    static kind* Reflection::get##kind() \
+    kind* Reflection::get##kind() \
     { \
         return static_cast<kind*>(getType<T>()); \
     }

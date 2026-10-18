@@ -1,5 +1,7 @@
 #include "Guid.h"
+#include "../Reflection/Reflection.h"
 #include <cassert>
+#include <cstring>
 #ifdef _WIN32
 #include <objbase.h>
 #undef hyper

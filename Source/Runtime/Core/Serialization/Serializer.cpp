@@ -10,12 +10,20 @@ namespace hyp
 
     void Serializer::serializeObject(Object*& object)
     {
+        // 唯一入口开头: 这时候调用方已经把 setImportEntries()/setExportEntries()/
+        // registerKnownObject() 全部调完了, 是唯一能保证"这棵树里所有 import 都已就绪"
+        // 的时间点——见 SerializeContext::constructAllObjects() 的注释。
+        if (mArchive.isLoading())
+            mContext.constructAllObjects();
+
         serializeClass(nullptr, &object, 1);
 
         // 唯一入口收尾:整棵树(mExportTable)都已经读完、每个对象自己的 postLoad
         // 也都调过了,这里统一批量调 finalizeLoad——顺序保证见 SerializeContext::finalizeLoad
         if (mArchive.isLoading())
             mContext.finalizeLoad();
+        else
+            mContext.resolveOwners();
     }
 
     void Serializer::serializeType(Type* type, void* instance, size_t count)
@@ -78,13 +86,82 @@ namespace hyp
             saveEnumeration(enumeration, instance, count);
     }
 
+    // cook 产物和当前反射 schema 强绑定, 不需要按名字容错——直接读写枚举底层的原始整数值,
+    // 跳过名字查找(getFlagNames/getNameByValue/getValueByName/setFlagsByNames), 位标志枚举
+    // 和普通枚举统一处理, 不再需要区分成"数组名字"和"单个名字"两条分支
+    void Serializer::saveEnumerationCooked(Enumeration* enumeration, void* enums)
+    {
+        uint64_t value = enumeration->getValue(enums);
+        switch (enumeration->getSize())
+        {
+        case sizeof(uint8_t):
+        {
+            uint8_t v = static_cast<uint8_t>(value);
+            mArchive.serialize(&v);
+            break;
+        }
+        case sizeof(uint16_t):
+        {
+            uint16_t v = static_cast<uint16_t>(value);
+            mArchive.serialize(&v);
+            break;
+        }
+        case sizeof(uint32_t):
+        {
+            uint32_t v = static_cast<uint32_t>(value);
+            mArchive.serialize(&v);
+            break;
+        }
+        default:
+            mArchive.serialize(&value);
+            break;
+        }
+    }
+
+    void Serializer::loadEnumerationCooked(Enumeration* enumeration, void* enums)
+    {
+        uint64_t value = 0;
+        switch (enumeration->getSize())
+        {
+        case sizeof(uint8_t):
+        {
+            uint8_t v = 0;
+            mArchive.serialize(&v);
+            value = v;
+            break;
+        }
+        case sizeof(uint16_t):
+        {
+            uint16_t v = 0;
+            mArchive.serialize(&v);
+            value = v;
+            break;
+        }
+        case sizeof(uint32_t):
+        {
+            uint32_t v = 0;
+            mArchive.serialize(&v);
+            value = v;
+            break;
+        }
+        default:
+            mArchive.serialize(&value);
+            break;
+        }
+        enumeration->setValue(enums, value);
+    }
+
     void Serializer::saveEnumeration(Enumeration* enumeration, void* instance, size_t count)
     {
         size_t size = enumeration->getSize();
         uint8_t* enums = static_cast<uint8_t*>(instance);
         for (size_t i = 0; i < count; ++i)
         {
-            if (enumeration->isBitMask())
+            if (mArchive.isCooking())
+            {
+                saveEnumerationCooked(enumeration, enums);
+            }
+            else if (enumeration->isBitMask())
             {
                 std::vector<HString> bitNames = enumeration->getFlagNames(enums);
                 uint32_t bitCount = static_cast<uint32_t>(bitNames.size());
@@ -108,7 +185,11 @@ namespace hyp
         uint8_t* enums = static_cast<uint8_t*>(instance);
         for (size_t i = 0; i < count; ++i)
         {
-            if (enumeration->isBitMask())
+            if (mArchive.isCooking())
+            {
+                loadEnumerationCooked(enumeration, enums);
+            }
+            else if (enumeration->isBitMask())
             {
                 uint32_t bitCount = 0;
                 mArchive.beginArray(bitCount);
@@ -136,18 +217,80 @@ namespace hyp
             saveStructure(structure, instance, count);
     }
 
+    bool Serializer::shouldSerializeProperty(const Property* property) const
+    {
+        PropertyFlags flags = property->getFlags();
+        if (enumHasAnyFlags(flags, PropertyFlags::Cook_Only) && !mArchive.isCooking())
+            return false;
+        if (enumHasAnyFlags(flags, PropertyFlags::Editor_Only) && mArchive.isCooking())
+            return false;
+        return true;
+    }
+
+    // Structure 不是多态类型(见 Structure.h, 没有 base class 链), 调用方在 serializeType 里
+    // 已经拿到具体的 Structure*, cook 路径下不需要写类型名/version 做运行时分派。用户确认
+    // Structure 体积通常较小, 不值得为它做 diff-against-default, 固定顺序全量写值即可
+    std::vector<Property*> Serializer::collectCookedProperties(Structure* structure) const
+    {
+        std::vector<Property*> properties;
+        for (Property* property : structure->getProperties())
+        {
+            if (shouldSerializeProperty(property))
+                properties.push_back(property);
+        }
+        return properties;
+    }
+
+    void Serializer::saveStructureCooked(Structure* structure, void* instance)
+    {
+        for (Property* property : collectCookedProperties(structure))
+        {
+            Type* propType = property->getDeclaredType();
+            void* propPtr = property->getValuePtr(instance);
+            serializeType(propType, propPtr);
+        }
+    }
+
+    void Serializer::loadStructureCooked(Structure* structure, void* instance)
+    {
+        for (Property* property : collectCookedProperties(structure))
+        {
+            Type* propType = property->getDeclaredType();
+            void* propPtr = property->getValuePtr(instance);
+            serializeType(propType, propPtr);
+        }
+    }
+
     void Serializer::saveStructure(Structure* structure, void* instance, size_t count)
     {
         uint8_t* structs = static_cast<uint8_t*>(instance);
         size_t size = structure->getSize();
+
+        if (mArchive.isCooking())
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                saveStructureCooked(structure, structs);
+                structs += size;
+            }
+            return;
+        }
+
         HString name = structure->getName();
         uint32_t version = structure->getVersion();
-        auto properties = structure->getProperties();
-        uint32_t propCount = static_cast<uint32_t>(properties.size());
+
+        std::vector<Property*> serializedProperties;
+        for (Property* property : structure->getProperties())
+        {
+            if (shouldSerializeProperty(property))
+                serializedProperties.push_back(property);
+        }
+        uint32_t propCount = static_cast<uint32_t>(serializedProperties.size());
+
         for (size_t i = 0; i < count; ++i)
         {
             mArchive.beginStructure(name, version, propCount);
-            for (Property* property : properties)
+            for (Property* property : serializedProperties)
             {
                 HString propName = property->getName();
                 Type* propType = property->getDeclaredType();
@@ -166,6 +309,16 @@ namespace hyp
     {
         uint8_t* structs = static_cast<uint8_t*>(instance);
         size_t size = structure->getSize();
+
+        if (mArchive.isCooking())
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                loadStructureCooked(structure, structs);
+                structs += size;
+            }
+            return;
+        }
 
         for (size_t i = 0; i < count; ++i)
         {
@@ -188,7 +341,7 @@ namespace hyp
                     {
                         Object* propObject = nullptr;
                         serializeClass(static_cast<Class*>(declaredType), &propObject, 1);
-                        property->setValue(structs, &propObject);
+                        property->setRawValue(structs, &propObject);
                     }
                     else
                     {
@@ -210,6 +363,101 @@ namespace hyp
             loadClass(clazz, instance, count);
         else
             saveClass(clazz, instance, count);
+    }
+
+    // 按 while(baseClass) 遍历顺序(和 saveClass 现有的 diff 遍历顺序一致)固定收集属性——
+    // save/load 必须调用同一个函数拿到同一个顺序, presence bitmask 才能按位置对号入座
+    std::vector<Property*> Serializer::collectCookedProperties(Class* clazz) const
+    {
+        std::vector<Property*> properties;
+        Class* baseClass = clazz;
+        while (baseClass)
+        {
+            for (Property* property : baseClass->getProperties())
+            {
+                if (shouldSerializeProperty(property))
+                    properties.push_back(property);
+            }
+            baseClass = baseClass->getBaseClass();
+        }
+        return properties;
+    }
+
+    // cook 路径: 沿用 diff-against-default 的思路, 但用固定顺序 + presence bitmask 代替
+    // "属性名列表"来表达写了哪些属性——不再写 className/version/propCount/属性名/类型名。
+    // className 只用来给 loadClass 做一次一致性 assert, 真正决定分配哪个 Class 的信息来自
+    // SerializeContext 的 export 表, cook 路径下这个字段本来就是冗余的
+    void Serializer::saveClassCooked(Class* clazz, Object* object)
+    {
+        HString className = clazz->getName();
+        uint32_t version = clazz->getVersion();
+        uint32_t unusedPropCount = 0;
+        mArchive.beginObject(className, version, unusedPropCount);
+
+        std::vector<Property*> properties = collectCookedProperties(clazz);
+        size_t propertyCount = properties.size();
+        const Object* defaultObject = clazz->getDefaultObject();
+
+        // presence 按位打包(1 bit/属性), 不是每属性 1 字节——复用已有的 uint8_t 数组
+        // 序列化接口自己打包, 不改 Archive::serialize(bool*) 的通用字节布局
+        size_t presenceByteCount = (propertyCount + 7) / 8;
+        std::vector<uint8_t> presenceBits(presenceByteCount, 0);
+        for (size_t i = 0; i < propertyCount; ++i)
+        {
+            if (!properties[i]->compare(defaultObject, object))
+                presenceBits[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
+        }
+        if (presenceByteCount > 0)
+            mArchive.serialize(presenceBits.data(), presenceByteCount);
+
+        for (size_t i = 0; i < propertyCount; ++i)
+        {
+            if (!(presenceBits[i / 8] & static_cast<uint8_t>(1u << (i % 8))))
+                continue;
+            Property* property = properties[i];
+            Type* propType = property->getDeclaredType();
+            void* propPtr = property->getValuePtr(object);
+            serializeType(propType, propPtr);
+        }
+
+        mArchive.endObject();
+    }
+
+    void Serializer::loadClassCooked(Class* clazz, Object* object)
+    {
+        HString unusedName;
+        uint32_t unusedVersion = 0;
+        uint32_t unusedPropCount = 0;
+        mArchive.beginObject(unusedName, unusedVersion, unusedPropCount);
+
+        std::vector<Property*> properties = collectCookedProperties(clazz);
+        size_t propertyCount = properties.size();
+
+        size_t presenceByteCount = (propertyCount + 7) / 8;
+        std::vector<uint8_t> presenceBits(presenceByteCount, 0);
+        if (presenceByteCount > 0)
+            mArchive.serialize(presenceBits.data(), presenceByteCount);
+
+        for (size_t i = 0; i < propertyCount; ++i)
+        {
+            if (!(presenceBits[i / 8] & static_cast<uint8_t>(1u << (i % 8))))
+                continue;
+            Property* property = properties[i];
+            Type* declaredType = property->getDeclaredType();
+            if (declaredType->getKind() == Type::Kind::Class)
+            {
+                Object* propObject = nullptr;
+                serializeClass(static_cast<Class*>(declaredType), &propObject, 1);
+                property->setRawValue(object, &propObject);
+            }
+            else
+            {
+                void* propPtr = property->getValuePtr(object);
+                serializeType(declaredType, propPtr);
+            }
+        }
+
+        mArchive.endObject();
     }
 
     void Serializer::saveClass(Class* clazz, void* instance, size_t count)
@@ -240,35 +488,45 @@ namespace hyp
 
             Class* objectClass = object->getClass();
             assert(objectClass != nullptr);
-            HString className = objectClass->getName();
-            uint32_t version = objectClass->getVersion();
 
-            const Object* defaultObject = objectClass->getDefaultObject();
-            std::vector<Property*> diffProperties;
-            Class* baseClass = objectClass;
-            while (baseClass)
+            if (mArchive.isCooking())
             {
-                for (Property* property : baseClass->getProperties())
+                saveClassCooked(objectClass, object);
+            }
+            else
+            {
+                HString className = objectClass->getName();
+                uint32_t version = objectClass->getVersion();
+
+                const Object* defaultObject = objectClass->getDefaultObject();
+                std::vector<Property*> diffProperties;
+                Class* baseClass = objectClass;
+                while (baseClass)
                 {
-                    if (!property->compare(defaultObject, object))
-                        diffProperties.push_back(property);
+                    for (Property* property : baseClass->getProperties())
+                    {
+                        if (!shouldSerializeProperty(property))
+                            continue;
+                        if (!property->compare(defaultObject, object))
+                            diffProperties.push_back(property);
+                    }
+                    baseClass = baseClass->getBaseClass();
                 }
-                baseClass = baseClass->getBaseClass();
-            }
 
-            uint32_t diffPropCount = static_cast<uint32_t>(diffProperties.size());
-            mArchive.beginObject(className, version, diffPropCount);
-            for (Property* property : diffProperties)
-            {
-                HString propName = property->getName();
-                Type* propType = property->getDeclaredType();
-                HString propTypeName = propType->getName();
-                mArchive.beginProperty(propName, propTypeName);
-                void* propPtr = property->getValuePtr(object);
-                serializeType(propType, propPtr);
-                mArchive.endProperty();
+                uint32_t diffPropCount = static_cast<uint32_t>(diffProperties.size());
+                mArchive.beginObject(className, version, diffPropCount);
+                for (Property* property : diffProperties)
+                {
+                    HString propName = property->getName();
+                    Type* propType = property->getDeclaredType();
+                    HString propTypeName = propType->getName();
+                    mArchive.beginProperty(propName, propTypeName);
+                    void* propPtr = property->getValuePtr(object);
+                    serializeType(propType, propPtr);
+                    mArchive.endProperty();
+                }
+                mArchive.endObject();
             }
-            mArchive.endObject();
 
             object->postSave();
         }
@@ -294,35 +552,43 @@ namespace hyp
                 continue;
 
             Class* objectClass = objects[i]->getClass();
-            HString className;
-            uint32_t version = 0;
-            uint32_t diffPropCount = 0;
-            mArchive.beginObject(className, version, diffPropCount);
-            assert(objects[i]->getClass()->getName() == className);
-            for (uint32_t p = 0; p < diffPropCount; ++p)
+
+            if (mArchive.isCooking())
             {
-                HString propName;
-                HString propTypeName;
-                mArchive.beginProperty(propName, propTypeName);
-                Property* property = objectClass->getProperty(propName);
-                Type* declaredType = property ? property->getDeclaredType() : nullptr;
-                if (property && declaredType && declaredType->getName() == propTypeName)
-                {
-                    if (declaredType->getKind() == Type::Kind::Class)
-                    {
-                        Object* propObject = nullptr;
-                        serializeClass(static_cast<Class*>(declaredType), &propObject, 1);
-                        property->setValue(objects[i], &propObject);
-                    }
-                    else
-                    {
-                        void* propPtr = property->getValuePtr(objects[i]);
-                        serializeType(declaredType, propPtr);
-                    }
-                }
-                mArchive.endProperty();
+                loadClassCooked(objectClass, objects[i]);
             }
-            mArchive.endObject();
+            else
+            {
+                HString className;
+                uint32_t version = 0;
+                uint32_t diffPropCount = 0;
+                mArchive.beginObject(className, version, diffPropCount);
+                assert(objects[i]->getClass()->getName() == className);
+                for (uint32_t p = 0; p < diffPropCount; ++p)
+                {
+                    HString propName;
+                    HString propTypeName;
+                    mArchive.beginProperty(propName, propTypeName);
+                    Property* property = objectClass->getProperty(propName);
+                    Type* declaredType = property ? property->getDeclaredType() : nullptr;
+                    if (property && declaredType && declaredType->getName() == propTypeName)
+                    {
+                        if (declaredType->getKind() == Type::Kind::Class)
+                        {
+                            Object* propObject = nullptr;
+                            serializeClass(static_cast<Class*>(declaredType), &propObject, 1);
+                            property->setRawValue(objects[i], &propObject);
+                        }
+                        else
+                        {
+                            void* propPtr = property->getValuePtr(objects[i]);
+                            serializeType(declaredType, propPtr);
+                        }
+                    }
+                    mArchive.endProperty();
+                }
+                mArchive.endObject();
+            }
 
             // 和 postSave 对称:立即调用,只保证"这个对象自己的数据"有效,
             // 不对其它对象(包括它引用的对象)的状态做任何假设——
@@ -398,6 +664,11 @@ namespace hyp
         case Special::Case::BulkData:
         {
             serializeBulkData(static_cast<HypBulkData*>(special), instance, count);
+            break;
+        }
+        case Special::Case::HypSoftRef:
+        {
+            serializeHypSoftRef(static_cast<HypSoftRef*>(special), instance, count);
             break;
         }
         }
@@ -1055,7 +1326,17 @@ namespace hyp
                 uint64_t offset = 0;
                 if (size > 0)
                     mArchive.serialize(&offset);
-                bulkData.bindSource(mContext.getBulkDataSource(), offset, size);
+                const std::vector<uint8_t>& bulkSection = mContext.getBulkSection();
+                if (size > 0 && !bulkSection.empty())
+                {
+                    assert(offset + size <= bulkSection.size());
+                    const uint8_t* begin = bulkSection.data() + static_cast<size_t>(offset);
+                    bulkData.setData(std::vector<uint8_t>(begin, begin + static_cast<size_t>(size)));
+                }
+                else
+                {
+                    bulkData.bindSource(mContext.getBulkDataSource(), offset, size);
+                }
             }
             else
             {
@@ -1070,6 +1351,45 @@ namespace hyp
                     mContext.recordBulkDataSave(&bulkData, offset, size, wasTemporarilyLoaded);
                 }
             }
+        }
+    }
+
+    void Serializer::serializeHypSoftRef(HypSoftRef* hypSoftRef, void* instance, size_t count)
+    {
+        uint8_t* elements = static_cast<uint8_t*>(instance);
+        for (size_t i = 0; i < count; ++i)
+        {
+
+            if (!mArchive.isLoading())
+            {
+                Guid guid = hypSoftRef->getGuid(elements);
+                HString className = hypSoftRef->getClass(elements)->getName();
+
+                // 只有确认是外部(imported)对象才能顺手登记进导入表——内部对象绝不能这么做,
+                // 否则会跟它真正的 owner 字段抢 export 表的"第一次注册"名额, 导致内容漏写,
+                // 见 SerializeContext::isImported 的注释
+                Object* resolved = hypSoftRef->resolve(elements);
+                if (resolved && mContext.isImported(resolved))
+                {
+                    bool isNew = false;
+                    mContext.getOrRegisterObject(resolved, isNew);
+                }
+
+                serializeType(Reflection::getType<Guid>(), &guid);
+                serializeType(Reflection::getType<HString>(), &className);
+            }
+            else
+            {
+                Guid guid;
+                HString className;
+
+                serializeType(Reflection::getType<Guid>(), &guid);
+                serializeType(Reflection::getType<HString>(), &className);
+                Class* clazz = Reflection::getClass(className);
+                hypSoftRef->set(elements, guid, clazz);
+            }
+
+            elements += hypSoftRef->getSize();
         }
     }
 

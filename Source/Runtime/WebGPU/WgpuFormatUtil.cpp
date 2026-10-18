@@ -27,12 +27,14 @@ namespace hyp::wgpu
         case rhi::TextureFormat::A2BGR10_UNORM_PACK32: return WGPUTextureFormat_RGB10A2Unorm;
         case rhi::TextureFormat::B10G11R11_UFLOAT_PACK32: return WGPUTextureFormat_RG11B10Ufloat;
         case rhi::TextureFormat::E5B9G9R9_UFLOAT_PACK32: return WGPUTextureFormat_RGB9E5Ufloat;
+        case rhi::TextureFormat::R16_UNORM:          return WGPUTextureFormat_R16Unorm;
         case rhi::TextureFormat::R16_UINT:           return WGPUTextureFormat_R16Uint;
         case rhi::TextureFormat::R16_SINT:           return WGPUTextureFormat_R16Sint;
         case rhi::TextureFormat::R16_SFLOAT:         return WGPUTextureFormat_R16Float;
         case rhi::TextureFormat::RG16_UINT:          return WGPUTextureFormat_RG16Uint;
         case rhi::TextureFormat::RG16_SINT:          return WGPUTextureFormat_RG16Sint;
         case rhi::TextureFormat::RG16_SFLOAT:        return WGPUTextureFormat_RG16Float;
+        case rhi::TextureFormat::RGBA16_UNORM:       return WGPUTextureFormat_RGBA16Unorm;
         case rhi::TextureFormat::RGBA16_UINT:        return WGPUTextureFormat_RGBA16Uint;
         case rhi::TextureFormat::RGBA16_SINT:        return WGPUTextureFormat_RGBA16Sint;
         case rhi::TextureFormat::RGBA16_SFLOAT:      return WGPUTextureFormat_RGBA16Float;

@@ -4,9 +4,15 @@
 namespace hyp
 {
     RenderFrontend::RenderFrontend(RenderBackend& backend) :
-        mBackend(backend)
+        mBackend(backend),
+        mSamplerProxyCache(*this)
     {
 
+    }
+
+    void RenderFrontend::shutdown()
+    {
+        mSamplerProxyCache.shutdown();
     }
 
     void RenderFrontend::wakeUpRenderThread()
@@ -64,12 +70,12 @@ namespace hyp
 #endif
     }
 
-    void RenderFrontend::render(double time, float deltaTime)
+    void RenderFrontend::render(float deltaTime)
     {
         enqueueLambda(
-            [time, deltaTime](FrameContext& context)
+            [deltaTime](FrameContext& context)
             {
-                context.render(time, deltaTime);
+                context.render(deltaTime);
             }
         );
     }

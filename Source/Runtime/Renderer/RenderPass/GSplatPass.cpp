@@ -21,13 +21,13 @@ namespace hyp
         constexpr uint32_t kRadixSortPartitionSize = kRadixSortPartitionDivision * kRadixSortWorkgroupSize;
         constexpr uint32_t kRadixSortPassCount = 4;
 
-        void setRadixSortPass(rhi::CommandList& cmd, const rhi::PipelineLayout& layout, uint32_t pass)
+        void setRadixSortPass(rhi::CommandList& cmdList, const rhi::PipelineLayout& layout, uint32_t pass)
         {
-            cmd.setImmediateData(&layout, 0, std::span(reinterpret_cast<const uint8_t*>(&pass), sizeof(pass)));
+            cmdList.setImmediateData(&layout, 0, std::span(reinterpret_cast<const uint8_t*>(&pass), sizeof(pass)));
         }
 
         // 和 createComputePipeline(RenderPassUtils.h)不同,这里不套全局的 group0(GlobalData)/
-        // group1(SceneAndView)——Downsweep 自己就要 7 个 storage buffer,再加上全局那两组会超过
+        // group1(View)——Downsweep 自己就要 7 个 storage buffer,再加上全局那两组会超过
         // WebGPU 单 stage 8 个 storage buffer 的限制,而 Downsweep 其实也用不到全局那两组,所以只
         // 给它自己的 BindGroupLayout 建一个精简的 PipelineLayout,放在 group 0
         rhi::Pipeline* createStandaloneComputePipeline(
@@ -42,7 +42,7 @@ namespace hyp
             layoutKey.bindGroupLayouts[1] = nullptr;
             layoutKey.bindGroupLayouts[2] = nullptr;
             layoutKey.bindGroupLayouts[3] = nullptr;
-            rhi::PipelineLayout* pipelineLayout = pipelineCache.getOrCreate(layoutKey);
+            rhi::PipelineLayout* pipelineLayout = pipelineCache.getOrCreateLayout(layoutKey);
 
             PipelineCache::ComputeKey key;
             key.shader = shaderVariant;
@@ -58,14 +58,13 @@ namespace hyp
         void rebindGlobalBindGroups(
             rg::ExecuteContext& context,
             RendererContext& rendererContext,
-            const SceneProxy& scene,
             uint32_t viewId)
         {
             auto& renderBackend = context.getRenderBackend();
-            auto& cmd = context.getCommandList();
+            auto& cmdList = context.getCommandList();
             auto& globalBindings = renderBackend.getGlobalBindings();
 
-            cmd.setBindGroup(
+            cmdList.setBindGroup(
                 0,
                 rhi::PipelineBindPoint::Compute,
                 &globalBindings.getPipelineLayout(),
@@ -73,13 +72,13 @@ namespace hyp
                 {}
             );
 
-            const rhi::BindGroup& sceneAndViewBindGroup = scene.getSceneAndViewBindGroup();
+            const rhi::BindGroup& viewBindGroup = rendererContext.getViewDataManager().getBindGroup();
             uint32_t dynamicOffset = rendererContext.getViewDataManager().getViewDataDynamicOffset(viewId);
-            cmd.setBindGroup(
+            cmdList.setBindGroup(
                 1,
                 rhi::PipelineBindPoint::Compute,
                 &rendererContext.getGlobalPipelineLayout(),
-                &sceneAndViewBindGroup,
+                &viewBindGroup,
                 { &dynamicOffset, 1 }
             );
         }
@@ -100,15 +99,16 @@ namespace hyp
         const GSplatScene& gsplatScene
     )
     {
-        addGSplatCullingPass(renderGraph, rendererContext, view, gsplatScene);
-        addGSplatSortPass(renderGraph, rendererContext, scene, view, gsplatScene);
-        addGSplatRenderPass(renderGraph, rendererContext, view, gsplatScene);
-        //addGSplatDepthPass(renderGraph, rendererContext, view, gsplatScene);
+        addGSplatCullingPass(renderGraph, rendererContext, scene, view, gsplatScene);
+        addGSplatSortPass(renderGraph, rendererContext, view, gsplatScene);
+        addGSplatRenderPass(renderGraph, rendererContext, scene, view, gsplatScene);
+        //addGSplatDepthPass(renderGraph, rendererContext, scene, view, gsplatScene);
     }
 
     struct GSplatCullingData
     {
         uint32_t viewId;
+        const rhi::BindGroup* instanceDataBindGroup;
         const GSplatScene* gsplatScene;
         rg::BufferHandle gsplatDrawIndirect;
         rg::BufferHandle splatIndices;
@@ -126,6 +126,7 @@ namespace hyp
     void GSplatPass::addGSplatCullingPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
+        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -135,6 +136,7 @@ namespace hyp
             [&](rg::RenderGraph::Builder& builder, GSplatCullingData& data)
             {
                 data.viewId = view.getViewId();
+                data.instanceDataBindGroup = &scene.getInstanceDataBindGroup();
                 data.gsplatScene = &gsplatScene;
                 auto& blackboard = builder.getBlackboard();
 
@@ -224,11 +226,12 @@ namespace hyp
                     storage.pipeline = createComputePipeline(
                         rendererContext,
                         storage.shader->getVariant(),
-                        bindGroupCache.getBindGroup()->getLayout()
+                        bindGroupCache.getBindGroup()->getLayout(),
+                        &rendererContext.getInstanceDataBindGroupLayout()
                     );
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
                 if (firstCulling)
                 {
@@ -238,9 +241,9 @@ namespace hyp
                     region.srcOffset = allocation.offset;
                     region.dstOffset = offsetof(DrawIndirectCommand, vertexCount);
                     region.size = sizeof(uint32_t);
-                    cmd.copyBuffer(allocation.buffer, gsplatDrawIndirect, { &region, 1 });
+                    cmdList.copyBuffer(allocation.buffer, gsplatDrawIndirect, { &region, 1 });
                 }
-                cmd.clearBuffer(gsplatDrawIndirect, offsetof(DrawIndirectCommand, instanceCount), sizeof(uint32_t));
+                cmdList.clearBuffer(gsplatDrawIndirect, offsetof(DrawIndirectCommand, instanceCount), sizeof(uint32_t));
 
                 rhi::BufferBarrier barrier;
                 barrier.buffer = gsplatDrawIndirect;
@@ -248,21 +251,22 @@ namespace hyp
                 barrier.size = rhi::kWholeBuffer;
                 barrier.oldState = rhi::ResourceState::Transfer_Dst;
                 barrier.newState = rhi::ResourceState::Compute_Shader_Storage;
-                cmd.insertBarriers({ &barrier, 1 });
+                cmdList.insertBarriers({ &barrier, 1 });
 
                 context.beginPass();
 
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
+                cmdList.setBindGroup(3, rhi::PipelineBindPoint::Compute, &storage.pipeline->getLayout(), data.instanceDataBindGroup, {});
                 uint32_t splatCount = data.gsplatScene->getTotalSplatCount();
-                cmd.setImmediateData(&storage.pipeline->getLayout(), 0, std::span(reinterpret_cast<const uint8_t*>(&splatCount), sizeof(splatCount)));
-                cmd.dispatch(uint32_t(std::ceil(splatCount / 256.0f)), 1, 1);
+                cmdList.setImmediateData(&storage.pipeline->getLayout(), 0, std::span(reinterpret_cast<const uint8_t*>(&splatCount), sizeof(splatCount)));
+                cmdList.dispatch(uint32_t(std::ceil(splatCount / 256.0f)), 1, 1);
             },
             rg::PassFlags::Skip_Begin_Pass
         );
@@ -378,7 +382,7 @@ namespace hyp
                 }
                 if (!storage.upsweepPipeline)
                 {
-                    // 完全用不到全局的 group0(GlobalData)/group1(SceneAndView),用不含这两组的精简
+                    // 完全用不到全局的 group0(GlobalData)/group1(View),用不含这两组的精简
                     // PipelineLayout(见 createStandaloneComputePipeline 的注释),自己的 BindGroupLayout 放在 group 0
                     storage.upsweepPipeline = createStandaloneComputePipeline(rendererContext, storage.upsweepShader->getVariant(), *storage.upsweepLayout);
                 }
@@ -411,7 +415,7 @@ namespace hyp
                     });
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
                 if (data.pass == 0)
                 {
@@ -426,15 +430,15 @@ namespace hyp
                     clearBarrier.size = rhi::kWholeBuffer;
                     clearBarrier.oldState = rhi::ResourceState::Transfer_Dst;
                     clearBarrier.newState = rhi::ResourceState::Compute_Shader_Storage;
-                    cmd.clearBuffer(globalHistogram, 0, rhi::kWholeBuffer);
-                    cmd.insertBarriers({ &clearBarrier, 1 });
+                    cmdList.clearBuffer(globalHistogram, 0, rhi::kWholeBuffer);
+                    cmdList.insertBarriers({ &clearBarrier, 1 });
                     context.beginPass();
                 }
 
-                cmd.bindPipeline(storage.upsweepPipeline.get());
-                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.upsweepPipeline->getLayout(), cache.getBindGroup(), {});
-                setRadixSortPass(cmd, storage.upsweepPipeline->getLayout(), data.pass);
-                cmd.dispatch(data.partitionCount, 1, 1);
+                cmdList.bindPipeline(storage.upsweepPipeline.get());
+                cmdList.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.upsweepPipeline->getLayout(), cache.getBindGroup(), {});
+                setRadixSortPass(cmdList, storage.upsweepPipeline->getLayout(), data.pass);
+                cmdList.dispatch(data.partitionCount, 1, 1);
             },
             firstPass ? rg::PassFlags::Skip_Begin_Pass : rg::PassFlags::None
         );
@@ -521,11 +525,11 @@ namespace hyp
                     });
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.spinePipeline.get());
-                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.spinePipeline->getLayout(), perView.spineCache.getBindGroup(), {});
-                setRadixSortPass(cmd, storage.spinePipeline->getLayout(), data.pass);
-                cmd.dispatch(kRadixSortRadix, 1, 1);
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.spinePipeline.get());
+                cmdList.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.spinePipeline->getLayout(), perView.spineCache.getBindGroup(), {});
+                setRadixSortPass(cmdList, storage.spinePipeline->getLayout(), data.pass);
+                cmdList.dispatch(kRadixSortRadix, 1, 1);
             }
         );
         globalHistogram = computePass.getData().globalHistogram;
@@ -534,7 +538,6 @@ namespace hyp
 
     struct GSplatRadixSortDownsweepData
     {
-        const SceneProxy* scene;
         uint32_t viewId;
         uint32_t partitionCount;
         uint32_t pass;
@@ -550,7 +553,6 @@ namespace hyp
     void GSplatPass::addRadixSortDownsweepPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
-        const SceneProxy& scene,
         uint32_t viewId,
         uint32_t splatCount,
         uint32_t partitionCount,
@@ -578,7 +580,6 @@ namespace hyp
             passNames[pass](viewId),
             [&](rg::RenderGraph::Builder& builder, GSplatRadixSortDownsweepData& data)
             {
-                data.scene = &scene;
                 data.viewId = viewId;
                 data.partitionCount = partitionCount;
                 data.pass = pass;
@@ -662,19 +663,19 @@ namespace hyp
                     });
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.downsweepPipeline.get());
-                cmd.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.downsweepPipeline->getLayout(), cache.getBindGroup(), {});
-                setRadixSortPass(cmd, storage.downsweepPipeline->getLayout(), data.pass);
-                cmd.dispatch(data.partitionCount, 1, 1);
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.downsweepPipeline.get());
+                cmdList.setBindGroup(0, rhi::PipelineBindPoint::Compute, &storage.downsweepPipeline->getLayout(), cache.getBindGroup(), {});
+                setRadixSortPass(cmdList, storage.downsweepPipeline->getLayout(), data.pass);
+                cmdList.dispatch(data.partitionCount, 1, 1);
 
                 if (data.pass == kRadixSortPassCount - 1)
                 {
                     // 整趟排序期间 Upsweep/Spine/Downsweep 用的都是不含全局 group0(GlobalData)/group1
-                    // (SceneAndView)的精简 PipelineLayout,紧接着的 GSplatRender pass(以及后面帧里其它
+                    // (View)的精简 PipelineLayout,紧接着的 GSplatRender pass(以及后面帧里其它
                     // 任何 pass)还是用正常的 group0/1/2 布局、并且不会自己重新绑定 group0/1(它们假设这
                     // 两组从帧开始就一直有效绑定),所以最后一趟 Downsweep 结束前必须重新绑一次,不能遗漏
-                    rebindGlobalBindGroups(context, rendererContext, *data.scene, data.viewId);
+                    rebindGlobalBindGroups(context, rendererContext, data.viewId);
                 }
             }
         );
@@ -685,7 +686,6 @@ namespace hyp
     void GSplatPass::addGSplatSortPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
-        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -716,7 +716,7 @@ namespace hyp
 
             addRadixSortUpsweepPass(renderGraph, rendererContext, viewId, partitionCount, pass, gsplatDrawIndirect, keyBuffers[inSide], globalHistogram, partitionHistogram);
             addRadixSortSpinePass(renderGraph, rendererContext, viewId, pass, gsplatDrawIndirect, globalHistogram, partitionHistogram);
-            addRadixSortDownsweepPass(renderGraph, rendererContext, scene, viewId, splatCount, partitionCount, pass, gsplatDrawIndirect, globalHistogram, partitionHistogram, keyBuffers[inSide], keyBuffers[outSide], valueBuffers[inSide], valueBuffers[outSide]);
+            addRadixSortDownsweepPass(renderGraph, rendererContext, viewId, splatCount, partitionCount, pass, gsplatDrawIndirect, globalHistogram, partitionHistogram, keyBuffers[inSide], keyBuffers[outSide], valueBuffers[inSide], valueBuffers[outSide]);
         }
 
         blackboard.put("SplatDistances"_hs(viewId), keyBuffers[0]);
@@ -727,6 +727,7 @@ namespace hyp
     struct GSplatRenderData
     {
         uint32_t viewId;
+        const rhi::BindGroup* instanceDataBindGroup;
         float4 viewport;
         const GSplatScene* gsplatScene;
         rg::TextureHandle sceneColor;
@@ -746,6 +747,7 @@ namespace hyp
     void GSplatPass::addGSplatRenderPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
+        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -755,6 +757,7 @@ namespace hyp
             [&](rg::RenderGraph::Builder& builder, GSplatRenderData& data)
             {
                 data.viewId = view.getViewId();
+                data.instanceDataBindGroup = &scene.getInstanceDataBindGroup();
                 data.viewport = view.getViewport();
                 data.gsplatScene = &gsplatScene;
 
@@ -834,24 +837,25 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
                 context.beginPass();
 
-                cmd.bindPipeline(storage.pipeline.get());
+                cmdList.bindPipeline(storage.pipeline.get());
 
-                setViewportAndScissor(cmd, data.viewport);
+                setViewportAndScissor(cmdList, data.viewport);
 
-                cmd.setBindGroup(
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Graphics,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
+                cmdList.setBindGroup(3, rhi::PipelineBindPoint::Graphics, &storage.pipeline->getLayout(), data.instanceDataBindGroup, {});
 
                 const rhi::Buffer* gsplatDrawIndirect = context.getBuffer(data.gsplatDrawIndirect);
-                cmd.drawIndirect(
+                cmdList.drawIndirect(
                     gsplatDrawIndirect,
                     0,
                     1,
@@ -865,6 +869,7 @@ namespace hyp
     struct GSplatDepthData
     {
         uint32_t viewId;
+        const rhi::BindGroup* instanceDataBindGroup;
         float4 viewport;
         const GSplatScene* gsplatScene;
         rg::TextureHandle gsplatDepth;
@@ -883,6 +888,7 @@ namespace hyp
     void GSplatPass::addGSplatDepthPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
+        const SceneProxy& scene,
         const SceneView& view,
         const GSplatScene& gsplatScene
     )
@@ -893,6 +899,7 @@ namespace hyp
             {
                 builder.markSideEffect();
                 data.viewId = view.getViewId();
+                data.instanceDataBindGroup = &scene.getInstanceDataBindGroup();
                 data.viewport = view.getViewport();
                 data.gsplatScene = &gsplatScene;
 
@@ -975,20 +982,21 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
-                setViewportAndScissor(cmd, data.viewport);
+                setViewportAndScissor(cmdList, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Graphics,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
+                cmdList.setBindGroup(3, rhi::PipelineBindPoint::Graphics, &storage.pipeline->getLayout(), data.instanceDataBindGroup, {});
 
-                cmd.drawIndirect(
+                cmdList.drawIndirect(
                     gsplatDrawIndirect,
                     0,
                     1,
@@ -1004,7 +1012,7 @@ namespace hyp
         const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr, &rendererContext.getInstanceDataBindGroupLayout());
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
         // 新 RHI 没有 Triangle_Fan(WebGPU 不支持),GSplat/GSplatDepth 顶点 shader 画的四边形改用
@@ -1031,7 +1039,7 @@ namespace hyp
         const rhi::BindGroupLayout& bindGroupLayout
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr, &rendererContext.getInstanceDataBindGroupLayout());
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
         // 新 RHI 没有 Triangle_Fan(WebGPU 不支持),GSplat/GSplatDepth 顶点 shader 画的四边形改用

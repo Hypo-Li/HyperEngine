@@ -4,6 +4,7 @@
 #include "SceneProxy.h"
 #include "SceneView.h"
 #include "RendererContext.h"
+#include "CameraProxy.h"
 
 #include <RenderBase/RenderGraph/RenderGraph.h>
 
@@ -17,7 +18,8 @@ namespace hyp
             RendererContext& rendererContext,
             const SceneProxy& scene,
             const SceneView& view,
-            const RenderData& renderData
+            const RenderData& renderData,
+            const CameraProxy& camera
         );
     };
 
@@ -30,7 +32,8 @@ namespace hyp
             const SceneProxy& scene,
             std::span<const SceneView> views,
             std::span<const RenderData> renderData,
-            const DirectionalLightProxy& directionalLight
+            const DirectionalLightProxy& directionalLight,
+            const CameraProxy& camera
         );
     };
 }

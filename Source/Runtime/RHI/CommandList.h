@@ -7,6 +7,7 @@
 #include <Core/Math/Vector.h>
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <functional>
 
@@ -166,7 +167,10 @@ namespace hyp::rhi
     enum class AttachmentStoreOp : uint8_t
     {
         Store,
-        Dont_Care
+        Dont_Care,
+        // Preserve the attachment contents without performing a store access.
+        // Only valid for attachment aspects that are read-only in the pass.
+        None
     };
 
     union ClearColorValue
@@ -332,9 +336,6 @@ namespace hyp::rhi
         ResourceState newState;
     };
 
-    // buffer/texture barrier 合成一条 command,底层(Vulkan)可以用一个 VkDependencyInfo/
-    // vkCmdPipelineBarrier2 同时携带 pBufferMemoryBarriers 和 pImageMemoryBarriers,
-    // 不用为同一个同步点分别发两次 pipeline barrier
     struct BarrierCommand : public CommandHeader
     {
         uint32_t bufferBarrierCount;
@@ -570,12 +571,6 @@ namespace hyp::rhi
 
         void insertDebugMarker(HString label, float4 color);
 
-        // 调用方按值传入(可以直接传一个临时 lambda), 不需要自己另外保证生命周期 ——
-        // CommandList 会把它 move 进一份堆分配的稳定存储(mNativeCallbacks), 一直保留到
-        // reset() 才释放。reset() 只在下一帧开始录制前才被调用, 而这一帧的 decode() 严格发生
-        // 在 reset() 之前(FrameContext::render() 里先 execute() 记录、再 submit() 内部调用
-        // decode() 重放, 都在渲染线程同一次调用里顺序发生), 所以 decode() 真正执行这条指令时,
-        // 存储一定还没被清空。
         void invokeNativeCallback(NativeRenderCallback callback);
 
 #ifdef HYP_RHI_COMMAND_RECORDING_IMMEDIATE
@@ -675,11 +670,6 @@ namespace hyp::rhi
         const Device& mDevice;
         QueueType mQueueType;
         std::vector<uint8_t> mStorage;
-        // invokeNativeCallback() 的稳定存储, 见其注释; reset() 清空。用 deque 而不是 vector:
-        // 标准保证 deque 的 push_back/emplace_back 不会使已有元素的引用/指针失效(它按块分配,
-        // 已构造的元素不会被搬移), 因此可以直接把 NativeRenderCallback 存在这里、取地址交给
-        // NativeCallbackCommand::callback —— 不像 vector<unique_ptr<...>> 那样每个 callback
-        // 还需要额外一次堆分配才能拿到稳定地址。
         std::deque<NativeRenderCallback> mNativeCallbacks;
     };
 }

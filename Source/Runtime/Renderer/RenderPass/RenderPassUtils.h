@@ -13,6 +13,8 @@
 #include <RHI/BindGroup.h>
 #include <RHI/Pipeline.h>
 #include <RHI/CommandList.h>
+#include <RenderBase/PassShaderUtils.h>
+#include <RenderBase/RenderGraph/RenderGraph.h>
 
 namespace hyp
 {
@@ -59,9 +61,14 @@ namespace hyp
         rhi::BindGroup* getBindGroup() const noexcept { return mBindGroup.get(); }
 
     private:
-        static uint64_t handleToUint64(const rhi::Buffer* buffer) noexcept { return reinterpret_cast<uint64_t>(buffer); }
-        static uint64_t handleToUint64(const rhi::TextureView* textureView) noexcept { return reinterpret_cast<uint64_t>(textureView); }
-        static uint64_t handleToUint64(const rhi::Sampler* sampler) noexcept { return reinterpret_cast<uint64_t>(sampler); }
+        // 用 getUniqueId() 而不是裸指针: 对象销毁后分配器可能把下一个新对象分配到同一个地址上,
+        // 裸指针会把"新建的资源"误判成"还是原来那个没变过", 导致 needUpdate() 漏判、绑定组里
+        // 留着指向已销毁资源的句柄不放。这里故意一个类型写一个重载而不是塞进一个模板, 哪天有新的
+        // descriptor 类型接进 BindGroupCache 却忘了给它加 getUniqueId(), 编译期就直接报错,
+        // 不会悄悄退化回裸指针比较。
+        static uint64_t handleToUint64(const rhi::Buffer* buffer) noexcept { return buffer ? buffer->getUniqueId() : 0; }
+        static uint64_t handleToUint64(const rhi::TextureView* textureView) noexcept { return textureView ? textureView->getUniqueId() : 0; }
+        static uint64_t handleToUint64(const rhi::Sampler* sampler) noexcept { return sampler ? sampler->getUniqueId() : 0; }
         static uint64_t handleToUint64(std::nullptr_t) noexcept { return 0; }
 
         TRef<rhi::BindGroup> mBindGroup;
@@ -69,24 +76,7 @@ namespace hyp
         std::array<uint64_t, HandleCount> mPendingHandles{};
     };
 
-    // 从 CompilePassShader.cmake 反射生成的 PassShaderBindingDesc[](见对应 .generated.h 里的
-    // k<Name>_Bindings)直接建 BindGroupLayout, 取代过去每个 Pass 手写 BindGroupLayoutEntry[]
-    // 的做法——binding/type/access/textureViewType/textureSampleType/stageFlags 这些信息现在
-    // 只在 .slang 源码里的 [[vk::binding(N, 2)]] 声明一份, 不需要再在 C++ 里抄一份保持同步。
-    inline TRef<rhi::BindGroupLayout> createPassBindGroupLayout(
-        RenderBackend& renderBackend,
-        std::span<const rhi::PassShaderBindingDesc> bindings)
-    {
-        std::vector<rhi::BindGroupLayoutEntry> entries;
-        entries.reserve(bindings.size());
-        for (const rhi::PassShaderBindingDesc& desc : bindings)
-        {
-            entries.push_back(desc.toBindGroupLayoutEntry());
-        }
-        return renderBackend.getBindGroupLayoutCache().getOrCreate(entries);
-    }
-
-    // 配合 createPassBindGroupLayout: 按 .slang 里的资源名字(而不是数字下标)写 BindGroupEntry,
+    // 配合 createPassBindGroupLayout(见 RenderBase/PassShaderUtils.h): 按 .slang 里的资源名字(而不是数字下标)写 BindGroupEntry,
     // 名字→binding 索引的查找表就是同一份 PassShaderBindingDesc[]。setXxx 只是把 (name, resource)
     // 缓存起来, 真正的 rhi::BindGroup::update() 调用要等 apply() 才发生——BindGroupEntry 的
     // buffers/textures/samplers 字段是 span, 指向的资源指针必须活到 update() 调用那一刻,
@@ -171,48 +161,7 @@ namespace hyp
         std::vector<rhi::BindGroupEntry> mEntries;
     };
 
-    // 拼出 CompilePassShader.cmake 按 k<Name>_<Stage>_Spirv / k<Name>_<Stage>_Wgsl 规则生成的这对符号名,
-    // 展开成 makeComputeBytecode/makeVertexFragmentBytecode 要的 span+string_view 参数对,调用点不用手写全名
-    #define GET_PASS_SHADER_BYTECODE(name, stage) \
-        std::span(generated::k##name##_##stage##_Spirv), std::string_view(generated::k##name##_##stage##_Wgsl)
-
-    // 按当前后端从 spirv/wgsl 中选出实际要用的那一份,包成 PassShaderStageBytecode 的原始字节 span,
-    // 不做拷贝(底层是构建期生成头文件里的 static 常量数组,生命周期覆盖整个程序)
-    inline std::span<const uint8_t> selectStageBytecode(rhi::Backend backend, std::span<const uint32_t> spirv, std::string_view wgsl)
-    {
-        if (backend == rhi::Backend::WebGPU)
-        {
-            // 保留末尾的 '\0',和 ShaderCompiler::compileToWgsls 运行时编译出来的格式一致
-            const uint8_t* begin = reinterpret_cast<const uint8_t*>(wgsl.data());
-            return std::span<const uint8_t>(begin, wgsl.size() + 1);
-        }
-        const uint8_t* begin = reinterpret_cast<const uint8_t*>(spirv.data());
-        return std::span<const uint8_t>(begin, spirv.size_bytes());
-    }
-
-    // 构建期预编译产出的字节码(见 CMake/CompilePassShader.cmake 生成的 <Name>.generated.h)按当前后端
-    // 选好格式,包装成 PassShader 构造函数要的 PassShaderBytecode,vertex+fragment 或纯 compute 各一个重载
-    inline PassShaderBytecode makeComputeBytecode(rhi::Backend backend, std::span<const uint32_t> spirv, std::string_view wgsl)
-    {
-        PassShaderBytecode bytecode;
-        bytecode.codeFormat = backend == rhi::Backend::WebGPU ? rhi::ShaderCodeFormat::Wgsl : rhi::ShaderCodeFormat::Spirv;
-        bytecode.compute = selectStageBytecode(backend, spirv, wgsl);
-        return bytecode;
-    }
-
-    inline PassShaderBytecode makeVertexFragmentBytecode(
-        rhi::Backend backend,
-        std::span<const uint32_t> vertexSpirv, std::string_view vertexWgsl,
-        std::span<const uint32_t> fragmentSpirv, std::string_view fragmentWgsl)
-    {
-        PassShaderBytecode bytecode;
-        bytecode.codeFormat = backend == rhi::Backend::WebGPU ? rhi::ShaderCodeFormat::Wgsl : rhi::ShaderCodeFormat::Spirv;
-        bytecode.vertex = selectStageBytecode(backend, vertexSpirv, vertexWgsl);
-        bytecode.fragment = selectStageBytecode(backend, fragmentSpirv, fragmentWgsl);
-        return bytecode;
-    }
-
-    // 各 Pass 的 GraphicsPipelineState 里,光栅化/深度/模板这一组字段(topology/polygonMode/
+    // 各 Pass 的 GraphicsPipelineState 里,光栅化/深度/模板这一组字段(topology/
     // samples/cullMode/frontFace/depthTestEnable/depthWriteEnable/depthCompareOp/stencil*)
     // 在同一类 Pass 之间几乎完全重复,真正逐 Pass 不同的只有 shader/vertexLayout(网格类 Pass 才有)/
     // colorBlendState/attachmentFormats。这里按已经出现过的三种组合各提供一个工厂函数,调用方
@@ -227,7 +176,6 @@ namespace hyp
         {
             GraphicsPipelineState state;
             state.topology = static_cast<uint32_t>(rhi::PrimitiveTopology::Triangle_List);
-            state.polygonMode = static_cast<uint32_t>(rhi::PolygonMode::Fill);
             state.samples = 0;
             state.cullMode = static_cast<uint32_t>(rhi::CullMode::Back);
             state.frontFace = static_cast<uint32_t>(rhi::FrontFace::Counter_Clockwise);
@@ -246,7 +194,6 @@ namespace hyp
         {
             GraphicsPipelineState state;
             state.topology = static_cast<uint32_t>(rhi::PrimitiveTopology::Triangle_Strip);
-            state.polygonMode = static_cast<uint32_t>(rhi::PolygonMode::Fill);
             state.samples = 0;
             state.cullMode = static_cast<uint32_t>(rhi::CullMode::Back);
             state.frontFace = static_cast<uint32_t>(rhi::FrontFace::Counter_Clockwise);
@@ -267,7 +214,6 @@ namespace hyp
         {
             GraphicsPipelineState state;
             state.topology = static_cast<uint32_t>(rhi::PrimitiveTopology::Triangle_List);
-            state.polygonMode = static_cast<uint32_t>(rhi::PolygonMode::Fill);
             state.samples = 0;
             state.cullMode = static_cast<uint32_t>(doubleSided ? rhi::CullMode::None : rhi::CullMode::Back);
             state.frontFace = static_cast<uint32_t>(rhi::FrontFace::Counter_Clockwise);
@@ -282,27 +228,33 @@ namespace hyp
     }
 
     // passLayout/materialLayout 都为空是合法的(比如共享 geometry-only shader 的 pipeline,
-    // 完全没有 pass/材质相关的资源要绑),此时生成的 pipeline layout 只有 set0/set1,没有 set2
+    // 完全没有 pass/材质相关的资源要绑),此时生成的 pipeline layout 只有 set0/set1,没有 set2。
+    // instanceLayout 是 set3, 给"顶点数据不是普通逐 instance 数据, 需要额外一份绑定才能在
+    // 顶点属性 getter 里查出真正的 instanceIndex/其它每种几何各自的附加数据"这类顶点布局用
+    // (目前是 Skeletal_Mesh 的 SkinningManager, 以后 spline 一类的顶点布局也走这个位置)——
+    // 是不是要传、传哪个具体的 layout, 由调用方按 vertexLayout 的类型决定, 这个函数不关心
     inline rhi::PipelineLayout* createRenderPassPipelineLayout(
         RendererContext& rendererContext,
         const rhi::BindGroupLayout* passLayout = nullptr,
-        const rhi::BindGroupLayout* materialLayout = nullptr)
+        const rhi::BindGroupLayout* materialLayout = nullptr,
+        const rhi::BindGroupLayout* instanceLayout = nullptr)
     {
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
         PipelineCache::PipelineLayoutKey key;
         key.bindGroupLayouts[0] = &rendererContext.getGlobalDataBindGroupLayout();
-        key.bindGroupLayouts[1] = &rendererContext.getSceneAndViewBindGroupLayout();
+        key.bindGroupLayouts[1] = &rendererContext.getViewDataManager().getBindGroupLayout();
         key.bindGroupLayouts[2] = materialLayout != nullptr ? materialLayout : passLayout;
-        key.bindGroupLayouts[3] = nullptr;
-        return pipelineCache.getOrCreate(key);
+        key.bindGroupLayouts[3] = instanceLayout;
+        return pipelineCache.getOrCreateLayout(key);
     }
 
     inline rhi::Pipeline* createComputePipeline(
         RendererContext& rendererContext,
         ShaderVariant shaderVariant,
-        const rhi::BindGroupLayout& passLayout)
+        const rhi::BindGroupLayout& passLayout,
+        const rhi::BindGroupLayout* instanceLayout = nullptr)
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &passLayout, nullptr);
+        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &passLayout, nullptr, instanceLayout);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
         PipelineCache::ComputeKey key;
         key.shader = shaderVariant;
@@ -310,9 +262,26 @@ namespace hyp
         return pipelineCache.getOrCreateComputePipeline(key);
     }
 
-    inline void setViewportAndScissor(rhi::CommandList& cmd, float4 inViewport)
+    // render graph 的 importTexture()/importBuffer() 不做去重——同一份物理资源被两次 import()
+    // 会变成两个互不知情的独立资源节点, 各自的访问历史/自动 barrier 推导都看不到对方那一份,
+    // 必须靠调用方自己保证"同一份物理资源这一帧只 import 一次"。这个帮助函数把"先查 blackboard,
+    // 有就直接复用, 没有才现 import 并存回去"这个模式抽出来, 照抄 GlobalDistanceFieldVisualizerPass
+    // 里 CardAtlasAlbedo 那份已有的手写模式
+    template <typename Handle, typename ImportFn>
+    Handle getOrImportResource(rg::RenderGraph& renderGraph, HString key, ImportFn&& importFn)
     {
-        cmd.setViewport(
+        Handle handle = renderGraph.getBlackboard().get<Handle>(key);
+        if (!handle.isValid())
+        {
+            handle = std::forward<ImportFn>(importFn)();
+            renderGraph.getBlackboard().put(key, handle);
+        }
+        return handle;
+    }
+
+    inline void setViewportAndScissor(rhi::CommandList& cmdList, float4 inViewport)
+    {
+        cmdList.setViewport(
             inViewport.x,
             inViewport.y,
             inViewport.z,
@@ -320,7 +289,7 @@ namespace hyp
             0.0f,
             1.0f
         );
-        cmd.setScissor(
+        cmdList.setScissor(
             static_cast<int32_t>(inViewport.x),
             static_cast<int32_t>(inViewport.y),
             static_cast<uint32_t>(inViewport.z),

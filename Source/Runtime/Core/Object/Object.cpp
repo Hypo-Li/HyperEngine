@@ -21,6 +21,7 @@ namespace hyp
             Object::sContextStack.emplace_back(context);
             clazz->construct(object);
             Object::sContextStack.pop_back();
+            clazz->registerGuid(context.guid, object);
             return object;
         }
     }
@@ -42,6 +43,7 @@ namespace hyp
         Object::sContextStack.emplace_back(context);
         clazz->construct(object);
         Object::sContextStack.pop_back();
+        clazz->registerGuid(guid, object);
         return object;
     }
 
@@ -49,8 +51,11 @@ namespace hyp
     {
         Class* clazz = object->getClass();
         ObjectHandle handle = object->getHandle();
+        bool isDefaultObject = enumHasAllFlags(object->getFlags(), ObjectFlags::Default_Object);
+        if (!isDefaultObject)
+            clazz->unregisterGuid(object->getGuid());
         clazz->destruct(object);
-        if (enumHasAllFlags(object->getFlags(), ObjectFlags::Default_Object))
+        if (isDefaultObject)
         {
             std::free(object);
         }
@@ -58,6 +63,32 @@ namespace hyp
         {
             clazz->free(handle);
         }
+    }
+
+    void rebuildObject(Object* object) noexcept
+    {
+        Class* clazz = object->getClass();
+
+        Object::ConstructionContext context;
+        context.owner = object->getOwner();
+        context.flags = object->getFlags();
+        context.guid = object->getGuid();
+        context.handle = object->getHandle();
+        size_t refCount = object->getRefCount();
+
+        clazz->unregisterGuid(context.guid);
+        clazz->destruct(object);
+
+        Object::sContextStack.emplace_back(context);
+        clazz->construct(object);
+        Object::sContextStack.pop_back();
+
+        clazz->registerGuid(context.guid, object);
+
+        // construct() 跑完 Refable() 的构造函数把 mRefCount 清成了 0, 这里用现成的 incRef()
+        // 补回重建之前外部已经持有的那些份引用——不新增"直接设成任意值"的后门。
+        for (size_t i = 0; i < refCount; ++i)
+            object->incRef();
     }
 
     thread_local std::vector<Object::ConstructionContext> Object::sContextStack;

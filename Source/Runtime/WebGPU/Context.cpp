@@ -64,7 +64,7 @@ namespace hyp::wgpu
 
         WGPURequestAdapterOptions options = WGPU_REQUEST_ADAPTER_OPTIONS_INIT;
         options.powerPreference = WGPUPowerPreference_HighPerformance;
-        options.backendType = WGPUBackendType_Vulkan;
+        options.backendType = WGPUBackendType_Undefined;
         options.forceFallbackAdapter = WGPU_FALSE;
         options.compatibleSurface = tempSurface;
 

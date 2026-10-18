@@ -1,7 +1,7 @@
 #include "PresentPass.h"
 #include "RenderPassUtils.h"
 
-#include <Present.generated.h>
+#include <CopyTexture.generated.h>
 
 #include <cassert>
 
@@ -51,11 +51,11 @@ namespace hyp
                 {
                     storage.shader = std::make_shared<PassShader>(
                         renderBackend.getDevice(),
-                        "Present",
+                        "CopyTexture",
                         makeVertexFragmentBytecode(
                             renderBackend.getRHIBackend(),
-                            GET_PASS_SHADER_BYTECODE(Present, Vertex),
-                            GET_PASS_SHADER_BYTECODE(Present, Fragment)
+                            GET_PASS_SHADER_BYTECODE(CopyTexture, Vertex),
+                            GET_PASS_SHADER_BYTECODE(CopyTexture, Fragment)
                         )
                     );
                 }
@@ -66,10 +66,7 @@ namespace hyp
                 {
                     if (!storage.bindGroupLayout)
                     {
-                        // kPresent_Bindings 是 CompilePassShader.cmake 从 Present.slang 的
-                        // [[vk::binding(0, 2)]] Texture2D<float4> SceneColor 反射生成的,
-                        // 不需要在这里再手写一遍 entries[]。
-                        storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kPresent_Bindings);
+                        storage.bindGroupLayout = createPassBindGroupLayout(renderBackend, generated::kCopyTexture_Bindings);
                     }
 
                     bindGroupCache.update(
@@ -77,8 +74,8 @@ namespace hyp
                         *storage.bindGroupLayout,
                         [&](rhi::BindGroup& bindGroup)
                         {
-                            PassBindGroupWriter writer(generated::kPresent_Bindings);
-                            writer.setTexture("SceneColor", sceneColor);
+                            PassBindGroupWriter writer(generated::kCopyTexture_Bindings);
+                            writer.setTexture("SourceTexture", sceneColor);
                             writer.apply(bindGroup);
                         }
                     );
@@ -90,24 +87,24 @@ namespace hyp
                         rendererContext,
                         storage.shader->getVariant(),
                         *storage.bindGroupLayout,
-                        context.getSwapchain().getSwapchainTextureFormat()
+                        context.getSwapchain().getSurfaceTextureFormat()
                     );
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
                 uint2 swapchainExtent = context.getSwapchain().getExtent();
-                setViewportAndScissor(cmd, float4(0.0f, 0.0f, static_cast<float>(swapchainExtent.x), static_cast<float>(swapchainExtent.y)));
+                setViewportAndScissor(cmdList, float4(0.0f, 0.0f, static_cast<float>(swapchainExtent.x), static_cast<float>(swapchainExtent.y)));
 
-                cmd.bindPipeline(storage.pipeline.get());
-                cmd.setBindGroup(
-                    2,
+                cmdList.bindPipeline(storage.pipeline.get());
+                cmdList.setBindGroup(
+                    0,
                     rhi::PipelineBindPoint::Graphics,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
 
-                cmd.draw(3, 1, 0, 0);
+                cmdList.draw(3, 1, 0, 0);
             }
         );
     }
@@ -119,8 +116,11 @@ namespace hyp
         rhi::TextureFormat swapchainFormat
     )
     {
-        auto* pipelineLayout = createRenderPassPipelineLayout(rendererContext, &bindGroupLayout, nullptr);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
+        // 纯拷贝 pass, 不需要引擎全局的 material/view 绑定表, 只用 set0 的独立 layout
+        PipelineCache::PipelineLayoutKey layoutKey{};
+        layoutKey.bindGroupLayouts[0] = &bindGroupLayout;
+        TRef<rhi::PipelineLayout> pipelineLayout = pipelineCache.getOrCreateLayout(layoutKey);
 
         PipelineCache::GraphicsKey pipelineKey;
         pipelineKey.pipelineState = PipelineStatePresets::fullscreenTriangle();

@@ -1,21 +1,27 @@
 #include "AtmosphereProxy.h"
+#include "SceneProxy.h"
 
 #include <RenderBase/RenderBackend.h>
 
 namespace hyp
 {
-    AtmosphereProxy::AtmosphereProxy(const AtmosphereShaderParameters& parameters) :
-        mParameters(parameters)
+    AtmosphereProxy::AtmosphereProxy(SceneProxy& sceneProxy, const Desc& desc) :
+        SceneElementProxy(sceneProxy, desc.visible),
+        mParameters(desc.parameters)
     {
         auto& device = getRenderBackend().getDevice();
         rhi::BufferDesc bufferDesc;
         bufferDesc.size = sizeof(AtmosphereShaderParameters);
         bufferDesc.usage = rhi::BufferUsage::Uniform | rhi::BufferUsage::Transfer_Dst;
         mParametersBuffer = device.createBuffer(bufferDesc, rhi::MemoryType::Gpu_Only);
+
+        sceneProxy.registerElement(this);
     }
 
     AtmosphereProxy::~AtmosphereProxy() noexcept
     {
+        getSceneProxy().unregisterElement(this);
+
         getRenderBackend().getDeferredTaskQueue().push(
             [parametersBuffer = std::move(mParametersBuffer)]() mutable
             {

@@ -6,9 +6,9 @@
 
 namespace hyp::rg
 {
-    BufferHandle RenderGraph::Builder::createBuffer(HString name, const rhi::BufferDesc& desc)
+    BufferHandle RenderGraph::Builder::createBuffer(HString name, const rhi::BufferDesc& desc, uint32_t maxUnusedFrames)
     {
-        return mRenderGraph.createResource<BufferResource>(name, desc, mRenderGraph.getArena());
+        return mRenderGraph.createResource<BufferResource>(name, desc, mRenderGraph.getArena(), maxUnusedFrames);
     }
 
     BufferHandle RenderGraph::Builder::importBuffer(HString name, BufferResource::PhysicalResource* physicalResource)
@@ -21,9 +21,9 @@ namespace hyp::rg
         return mRenderGraph.access<BufferResource>(mPassNode, handle, usage, accessType);
     }
 
-    TextureHandle RenderGraph::Builder::createTexture(HString name, const rhi::TextureDesc& desc)
+    TextureHandle RenderGraph::Builder::createTexture(HString name, const rhi::TextureDesc& desc, uint32_t maxUnusedFrames)
     {
-        return mRenderGraph.createResource<TextureResource>(name, desc, mRenderGraph.getArena());
+        return mRenderGraph.createResource<TextureResource>(name, desc, mRenderGraph.getArena(), maxUnusedFrames);
     }
 
     TextureHandle RenderGraph::Builder::importTexture(HString name, TextureResource::PhysicalResource* physicalResource, rhi::ResourceState defaultState)
@@ -38,7 +38,7 @@ namespace hyp::rg
 
     TextureHandle RenderGraph::Builder::syncTextures(TextureHandle source, TextureHandle target)
     {
-        auto checkSyncResources = [=]() -> bool
+        auto checkSyncResources = [this, source, target]() -> bool
             {
                 bool isValid = false;
                 VirtualResource* srcResource = mRenderGraph.getResource(source);
@@ -180,7 +180,7 @@ namespace hyp::rg
     RenderGraph::RenderGraph(TransientResources& transientResources, rhi::Swapchain& swapchain) noexcept :
         mTransientResources(transientResources),
         mSwapchain(swapchain),
-        mArena(256 * 1024),
+        mArena(1024 * 1024),
         mDAG(mArena),
         mResources(StlAllocator<VirtualResource*>(mArena)),
         mResourceNodes(StlAllocator<ResourceNode*>(mArena)),
@@ -452,8 +452,12 @@ namespace hyp::rg
 
         for (auto passNode : mPassNodes)
         {
-            std::destroy_at(passNode->getPass());
-            mArena.free(passNode->getPass(), passNode->getPass()->getTypeSize());
+            // getTypeSize() 是纯虚函数, 必须在 std::destroy_at 之前取值——析构链跑完后
+            // 对象的 vtable 指针会停在 PassBase 这一层, 再调用 getTypeSize() 会落到纯虚桩上。
+            PassBase* pass = passNode->getPass();
+            size_t typeSize = pass->getTypeSize();
+            std::destroy_at(pass);
+            mArena.free(pass, typeSize);
             mArena.destroy(passNode);
         }
         mPassNodes.clear();
@@ -501,14 +505,15 @@ namespace hyp::rg
             assert(recordIt != accessRecords.end());
             auto& record = *recordIt;
 
-            // 推导storeOp
-            // 对于导入纹理, 应该始终Store
-            // 对于普通纹理, 如果后续没有其它 pass 对本 attachment 纹理的
-            // SubresourceRange 内的访问操作, 则为 Dont Care, 否则为Store
+            // 推导storeOp。只读的depth/stencil aspect使用None，在不产生store访问的同时保留原内容。
+            // 对于发生写入的aspect：导入纹理始终Store；普通纹理如果后续没有其它pass访问其
+            // SubresourceRange则为Dont Care，否则为Store。
             rhi::AttachmentStoreOp storeOp = rhi::AttachmentStoreOp::Dont_Care;
             if (textureResource->isImported())
             {
                 storeOp = rhi::AttachmentStoreOp::Store;
+                if (!isColorAttachment)
+                    pass->mDepthStencilAttachmentInfo.stencilStoreOp = rhi::AttachmentStoreOp::Store;
             }
             else
             {
@@ -546,7 +551,12 @@ namespace hyp::rg
             {
                 pass->mDepthStencilAttachmentInfo.textureView = textureView;
                 pass->mDepthStencilAttachmentInfo.state = inferTextureState(record.usage, record.accessType, record.range.aspect, PassType::Graphics);
-                pass->mDepthStencilAttachmentInfo.depthStoreOp = storeOp;
+
+                const bool writesDepth = enumHasAnyFlags(record.accessType, AccessType::Write_Only);
+                const bool writesStencil = enumHasAnyFlags(record.accessType, AccessType::Stencil_Write_Only);
+                pass->mDepthStencilAttachmentInfo.depthStoreOp = writesDepth ? storeOp : rhi::AttachmentStoreOp::None;
+                if (!writesStencil)
+                    pass->mDepthStencilAttachmentInfo.stencilStoreOp = rhi::AttachmentStoreOp::None;
             }
 
             // 如果 renderArea 无效, 则主动设置 renderArea

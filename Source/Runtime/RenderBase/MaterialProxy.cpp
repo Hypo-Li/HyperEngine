@@ -25,6 +25,15 @@ namespace hyp
         gFreeMaterialIds.push_back(id);
     }
 
+    static void markBoundTextureNeedsPrepare(const MaterialProxy::Parameter& parameter)
+    {
+        if (!isTextureParameterType(parameter.type))
+            return;
+
+        if (TextureProxy* texture = std::get<std::pair<TextureProxy*, SamplerProxy*>>(parameter.value).first)
+            texture->markNeedsPrepare();
+    }
+
     MaterialProxy::MaterialProxy(
         Attributes attributes,
         MaterialShader* materialShader,
@@ -90,6 +99,9 @@ namespace hyp
                     copyParameterBindingToUniformBufferCache(binding);
                     mParametersDirty = true;
                 }
+
+                markBoundTextureNeedsPrepare(parameter);
+                markNeedsPrepare();
             }
         }
     }
@@ -144,21 +156,13 @@ namespace hyp
         }
     }
 
-    void MaterialProxy::prepare(rhi::CommandList& cmdList)
+    bool MaterialProxy::prepare(rhi::CommandList& cmdList)
     {
         if (isParametersDirty())
         {
             uploadToGPU(cmdList);
         }
-
-        for (auto& binding : mParameterBindings)
-        {
-            if (isTextureParameterType(binding.parameter.type))
-            {
-                auto value = std::get<std::pair<TextureProxy*, SamplerProxy*>>(binding.parameter.value);
-                value.first->prepare(cmdList);
-            }
-        }
+        return true;
     }
 
     ShaderVariant MaterialProxy::getOrCreateShaderVariant(
@@ -166,13 +170,19 @@ namespace hyp
         VertexLayout vertexLayout
     ) noexcept
     {
+        auto& materialShaderManager = getRenderBackend().getMaterialShaderManager();
+
         if (usesSharedGeometryShader(renderTag))
         {
-            auto& renderBackend = getRenderBackend();
-            MaterialShader* sharedShader = renderBackend.getMaterialShaderManager().getOrCreateSharedGeometryShader(renderTag);
-            return sharedShader->getOrCreateVariant(renderTag, vertexLayout, {});
+            MaterialShader* sharedShader = materialShaderManager.getOrCreateSharedGeometryShader(renderTag);
+            if (auto variant = sharedShader->getOrCreateVariant(renderTag, vertexLayout, {}))
+                return *variant;
+            return materialShaderManager.getErrorMaterialShader(renderTag, vertexLayout);
         }
-        return mMaterialShader->getOrCreateVariant(renderTag, vertexLayout, mShaderMacros);
+
+        if (auto variant = mMaterialShader->getOrCreateVariant(renderTag, vertexLayout, mShaderMacros))
+            return *variant;
+        return materialShaderManager.getErrorMaterialShader(renderTag, vertexLayout);
     }
 
     bool MaterialProxy::usesSharedGeometryShader(HString renderTag) const noexcept
@@ -225,6 +235,13 @@ namespace hyp
                         indices[1] = arg.second->getBindlessHandle().index;
                         memcpy(mParametersBufferCache.data() + binding.offset, indices, binding.size);
                     }
+                }
+                else if constexpr (std::is_same_v<T, bool>)
+                {
+                    // C++ bool 只有 1 字节, binding.size(Bool 类型对应 uint, 4 字节)按原始
+                    // memcpy 会多读 3 字节没初始化的垃圾——显式转成 uint32_t 再拷贝
+                    uint32_t boolValue = arg ? 1u : 0u;
+                    memcpy(mParametersBufferCache.data() + binding.offset, &boolValue, binding.size);
                 }
                 else
                 {
@@ -296,6 +313,12 @@ namespace hyp
         {
             mTextureParametersDirty = true;
         }
+
+        for (const auto& binding : mParameterBindings)
+        {
+            markBoundTextureNeedsPrepare(binding.parameter);
+        }
+        markNeedsPrepare();
     }
 
     void MaterialProxy::uploadToGPU(rhi::CommandList& cmdList)
@@ -401,21 +424,28 @@ namespace hyp
 
     uint32_t MaterialProxy::evaluateBuiltinRenderMask(Attributes attributes) noexcept
     {
-        return getRenderBackend().getRenderTagRegistry().getApplicableRenderMask(attributes.domain, attributes.blendMode);
+        return getRenderBackend().getRenderTagRegistry().getBuiltinRenderMask(attributes.domain, attributes.blendMode);
     }
 
     std::vector<ShaderMacro> MaterialProxy::makeShaderMacros(Attributes attributes) const
     {
         std::vector<ShaderMacro> shaderMacros;
-        shaderMacros.reserve(6);
-        shaderMacros.emplace_back("MATERIAL_DOMAIN"_hs, HString(std::to_string(uint32_t(attributes.domain))));
-        shaderMacros.emplace_back("BLEND_MODE"_hs, HString(std::to_string(uint32_t(attributes.blendMode))));
+        shaderMacros.reserve(8);
+        shaderMacros.emplace_back("MATERIAL_DOMAIN"_hs, HString(getShaderMacroName(attributes.domain)));
+        shaderMacros.emplace_back("BLEND_MODE"_hs, HString(getShaderMacroName(attributes.blendMode)));
         shaderMacros.emplace_back("ALPHA_CUTOFF"_hs, HString(std::to_string(attributes.alphaCutoff)));
-        shaderMacros.emplace_back("SHADING_MODEL"_hs, HString(std::to_string(uint32_t(attributes.shadingModel))));
+        shaderMacros.emplace_back("SHADING_MODEL"_hs, HString(getShaderMacroName(attributes.shadingModel)));
         if (attributes.doubleSided)
-            shaderMacros.emplace_back("DOUBLE_SIDED"_hs, HString());
-        if (attributes.tangentSpaceNormal)
-            shaderMacros.emplace_back("TANGENT_SPACE_NORMAL"_hs, HString());
+            shaderMacros.emplace_back("DOUBLE_SIDED"_hs, "1"_hs);
+        // 不能像上下几个那样只在 true 时发射——宏缺席时 Opaque.slang 的 #ifndef 兜底会把它定义成 1
+        shaderMacros.emplace_back("TANGENT_SPACE_NORMAL"_hs, attributes.tangentSpaceNormal ? "1"_hs : "0"_hs);
+        if (attributes.anisotropic)
+            shaderMacros.emplace_back("IS_ANISOTROPIC"_hs, "1"_hs);
+        // 消费处见 Opaque.slang 的 HAS_VPO/TIME_DEPENDENT_VPO
+        if (attributes.hasVertexPositionOffset)
+            shaderMacros.emplace_back("HAS_VPO"_hs, "1"_hs);
+        if (attributes.hasVertexPositionOffset && attributes.isTimeDependent)
+            shaderMacros.emplace_back("TIME_DEPENDENT_VPO"_hs, "1"_hs);
         return shaderMacros;
     }
 

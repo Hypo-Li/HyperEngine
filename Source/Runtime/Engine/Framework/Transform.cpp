@@ -12,7 +12,7 @@ namespace hyp
         mLocalPosition = localPosition;
         mWorldDirty = true;
         mWorldMatrixDirty = true;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
         mVersion++;
     }
 
@@ -22,7 +22,7 @@ namespace hyp
         mWorldDirty = true;
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setLocalRotationEuler(float3 eulerAngles) noexcept
@@ -36,7 +36,7 @@ namespace hyp
         mWorldDirty = true;
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setLocalTransform(const double3& localPosition, Quaternion localRotation, float3 localScale) noexcept
@@ -47,7 +47,7 @@ namespace hyp
         mWorldDirty = true;
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setWorldPosition(const double3& worldPosition) noexcept
@@ -55,9 +55,10 @@ namespace hyp
         mWorldPosition = worldPosition;
         if (mParent)
         {
-            auto& parentWorldPosition = mParent->getWorldPosition();
-            Quaternion parentWorldRotation = mParent->getWorldRotation();
-            float3 parentWorldScale = mParent->getWorldScale();
+            double3 parentWorldPosition;
+            Quaternion parentWorldRotation;
+            float3 parentWorldScale;
+            getEffectiveParentTransform(parentWorldPosition, parentWorldRotation, parentWorldScale);
             mLocalPosition = (glm::dquat(glm::inverse(parentWorldRotation)) * (mWorldPosition - parentWorldPosition)) / double3(parentWorldScale);
         }
         else
@@ -66,7 +67,7 @@ namespace hyp
         }
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setWorldRotation(Quaternion worldRotation) noexcept
@@ -74,7 +75,10 @@ namespace hyp
         mWorldRotation = worldRotation;
         if (mParent)
         {
-            Quaternion parentWorldRotation = mParent->getWorldRotation();
+            double3 parentWorldPosition;
+            Quaternion parentWorldRotation;
+            float3 parentWorldScale;
+            getEffectiveParentTransform(parentWorldPosition, parentWorldRotation, parentWorldScale);
             mLocalRotation = glm::inverse(parentWorldRotation) * mWorldRotation;
         }
         else
@@ -83,7 +87,7 @@ namespace hyp
         }
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setWorldRotationEuler(float3 eulerAngles) noexcept
@@ -96,7 +100,10 @@ namespace hyp
         mWorldScale = worldScale;
         if (mParent)
         {
-            float3 parentWorldScale = mParent->getWorldScale();
+            double3 parentWorldPosition;
+            Quaternion parentWorldRotation;
+            float3 parentWorldScale;
+            getEffectiveParentTransform(parentWorldPosition, parentWorldRotation, parentWorldScale);
             mLocalScale = mWorldScale / parentWorldScale;
         }
         else
@@ -105,7 +112,7 @@ namespace hyp
         }
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     void Transform::setWorldTransform(const double3& worldPosition, Quaternion worldRotation, float3 worldScale) noexcept
@@ -116,9 +123,10 @@ namespace hyp
 
         if (mParent)
         {
-            auto& parentWorldPosition = mParent->getWorldPosition();
-            Quaternion parentWorldRotation = mParent->getWorldRotation();
-            float3 parentWorldScale = mParent->getWorldScale();
+            double3 parentWorldPosition;
+            Quaternion parentWorldRotation;
+            float3 parentWorldScale;
+            getEffectiveParentTransform(parentWorldPosition, parentWorldRotation, parentWorldScale);
             mLocalPosition = (glm::dquat(glm::inverse(parentWorldRotation)) * (mWorldPosition - parentWorldPosition)) / double3(parentWorldScale);
             mLocalRotation = glm::inverse(parentWorldRotation) * mWorldRotation;
             mLocalScale = mWorldScale / parentWorldScale;
@@ -132,7 +140,7 @@ namespace hyp
 
         mWorldMatrixDirty = true;
         mVersion++;
-        notifyChildrenDirtyWorld();
+        markChildrenWorldDirty();
     }
 
     const double3& Transform::getLocalPosition() const noexcept
@@ -234,6 +242,43 @@ namespace hyp
         return child->setParent(nullptr, reparentMode);
     }
 
+    size_t Transform::getSiblingIndex() const noexcept
+    {
+        if (!mParent)
+            return 0;
+
+        auto it = std::find(mParent->mChildren.begin(), mParent->mChildren.end(), this);
+        return static_cast<size_t>(it - mParent->mChildren.begin());
+    }
+
+    bool Transform::setSiblingIndex(size_t index)
+    {
+        if (!mParent)
+            return false;
+
+        std::vector<Transform*>& siblings = mParent->mChildren;
+        auto it = std::find(siblings.begin(), siblings.end(), this);
+        assert(it != siblings.end());
+        siblings.erase(it);
+        siblings.insert(siblings.begin() + std::min(index, siblings.size()), this);
+        return true;
+    }
+
+    void Transform::setSocketName(HString socketName) noexcept
+    {
+        mSocketName = socketName;
+        mWorldDirty = true;
+        mWorldMatrixDirty = true;
+        mVersion++;
+        markChildrenWorldDirty();
+    }
+
+    void Transform::setSocketProvider(ISocketProvider* provider) noexcept
+    {
+        mSocketProvider = provider;
+        markChildrenWorldDirty();
+    }
+
     void Transform::removeChildren(size_t startIndex, size_t count, ReparentMode reparentMode)
     {
         if (startIndex >= mChildren.size())
@@ -293,14 +338,14 @@ namespace hyp
         return getWorldRotation() * RightVector;
     }
 
-    void Transform::notifyChildrenDirtyWorld() noexcept
+    void Transform::markChildrenWorldDirty() noexcept
     {
         for (Transform* child : mChildren)
         {
             child->mWorldDirty = true;
             child->mWorldMatrixDirty = true;
             child->mVersion++;
-            child->notifyChildrenDirtyWorld();
+            child->markChildrenWorldDirty();
         }
     }
 
@@ -315,9 +360,10 @@ namespace hyp
         }
         else
         {
-            auto& parentWorldPosition = mParent->getWorldPosition();
-            Quaternion parentWorldRotation = mParent->getWorldRotation();
-            float3 parentWorldScale = mParent->getWorldScale();
+            double3 parentWorldPosition;
+            Quaternion parentWorldRotation;
+            float3 parentWorldScale;
+            getEffectiveParentTransform(parentWorldPosition, parentWorldRotation, parentWorldScale);
             mWorldPosition = parentWorldPosition + glm::dquat(parentWorldRotation) * (double3(parentWorldScale) * mLocalPosition);
             mWorldRotation = parentWorldRotation * mLocalRotation;
             mWorldScale = parentWorldScale * mLocalScale;
@@ -325,15 +371,31 @@ namespace hyp
         mWorldDirty = false;
     }
 
+    void Transform::getEffectiveParentTransform(double3& outPosition, Quaternion& outRotation, float3& outScale) const noexcept
+    {
+        assert(mParent);
+        if (!mSocketName.empty() && mParent->mSocketProvider &&
+            mParent->mSocketProvider->getSocketWorldTransform(mSocketName, outPosition, outRotation, outScale))
+        {
+            return;
+        }
+        outPosition = mParent->getWorldPosition();
+        outRotation = mParent->getWorldRotation();
+        outScale = mParent->getWorldScale();
+    }
+
     void Transform::updateWorldMatrix() const noexcept
     {
         assert(mWorldMatrixDirty);
         if (mWorldDirty)
             updateWorldFromLocal();
-        auto T = glm::translate(glm::identity<double4x4>(), mWorldPosition);
-        auto R = glm::mat4_cast(glm::dquat(mWorldRotation));
-        auto S = glm::scale(glm::identity<double4x4>(), double3(mWorldScale));
-        mWorldMatrix = T * R * S;
+        double3x3 rotationBasis = glm::mat3_cast(glm::dquat(mWorldRotation));
+        double4x4 worldMatrix(rotationBasis);
+        worldMatrix[0] *= mWorldScale.x;
+        worldMatrix[1] *= mWorldScale.y;
+        worldMatrix[2] *= mWorldScale.z;
+        worldMatrix[3] = double4(mWorldPosition, 1.0);
+        mWorldMatrix = worldMatrix;
         mWorldMatrixDirty = false;
     }
 
@@ -358,7 +420,7 @@ namespace hyp
             mWorldDirty = true;
             mWorldMatrixDirty = true;
             mVersion++;
-            notifyChildrenDirtyWorld();
+            markChildrenWorldDirty();
         }
         else if (reparentMode == ReparentMode::Reset_Local)
         {
@@ -366,8 +428,78 @@ namespace hyp
         }
     }
 
+    void Transform::postCopy()
+    {
+        // mWorldPosition/mWorldRotation/mWorldScale/mWorldMatrix 都没有参与反射(它们是由
+        // Local Position/Rotation/Scale + Parent 链推导出来的缓存, 不是需要独立保存/复制的
+        // 数据), 复制完成后这几个字段还停在默认构造值上, mWorldDirty/mWorldMatrixDirty
+        // 也还是默认的 false——不强制标脏的话, getWorldPosition()/getWorldMatrix() 会因为
+        // "看起来不脏"直接返回这份错误的缓存, 不会真正从已经复制好的 Local Transform 和
+        // Parent 链重新算出来。
+        mWorldDirty = true;
+        mWorldMatrixDirty = true;
+        mVersion++;
+    }
+
+    void Transform::finalizeCopy()
+    {
+        // Children 是 CopyPolicy::Ignore, 复制过程中完全没被处理, 此刻仍是默认构造的空
+        // vector; 而 Parent 在 populate 阶段已经按 CopyPolicy 解析完毕、对本次操作涉及的
+        // 所有副本都已经落定, 反过来把自己塞回 mParent 的孩子列表即可复原这一半关系。
+        // 这里直接用 addChildInternal 而不是公开的 setParent(): 这不是一次真正的"改父子
+        // 关系"操作(mParent 本身不会再变), 不需要 setParent() 里的循环检测和世界变换保持
+        // 逻辑, 单纯把复制时被跳过的另一半数据补上。
+        if (mParent)
+            mParent->addChildInternal(this);
+    }
+
+    void Transform::postLoad()
+    {
+        // 跟 postCopy() 同样的道理: World* 系列字段和 mWorldDirty/mWorldMatrixDirty 都没有
+        // 参与反射, load 完成后这几个字段还停在默认构造值上——不强制标脏,
+        // getWorldPosition()/getWorldMatrix() 会因为"看起来不脏"直接返回这份错误的缓存,
+        // 不会真正从已经读回来的 Local Transform 和 Parent 链重新算出来。
+        mWorldDirty = true;
+        mWorldMatrixDirty = true;
+        mVersion++;
+    }
+
+    void Transform::finalizeLoad()
+    {
+        // Parent 是普通反射属性, load 阶段已经解析完毕、指向的对象也已经落定。如果 mParent
+        // 这时候在这次反序列化范围之外(比如撤销删除单个 Entity, 父节点是外部现查现给的活
+        // 对象), 它的 mChildren 从没被这次 load 碰过, 这里要补上这一半; 但如果 mParent 也在
+        // 这次范围之内(整棵子树一起读回来), 它的 mChildren 早就在自己的属性反序列化阶段
+        // 正常填过了, addChildInternal 会重复 push——查重后再决定要不要补。
+        if (mParent)
+            mParent->addChildInternal(this);
+
+        // Children 同样是普通反射属性, load 阶段已经把它填成了"当时"那批子节点的活指针——
+        // 但每个子节点自己的 mParent 是它们各自的数据, 不属于这次反序列化的对象图, 不会被
+        // 这次 load 碰到, 这期间完全可能已经被别的操作重新挂到别处(比如这个 Transform 的
+        // owner 被删除时, Scene::destroyEntity() 会先把子节点挪到别的 parent 下面, 这个
+        // Transform 才轮到被序列化/反序列化)。这里反过来把每个子节点的 mParent 纠正回来,
+        // 顺带从它当前(可能是别处)的 parent 手里摘掉——不能调用公开的 setParent(), 它会
+        // 往 mChildren 里重复 push 一次(load 那份已经填过了, 这里只用得上 mParent 那一半)。
+        // mParent 已经正确指向 this 时(整棵子树一起读回来的正常情况)跳过, 不然
+        // Keep_World 那趟 local/world 往返换算会给刚读出来的精确值引入没必要的浮点误差。
+        for (Transform* child : mChildren)
+        {
+            Transform* staleParent = child->mParent;
+            if (staleParent == this)
+                continue;
+            if (staleParent)
+                staleParent->removeChildInternal(child);
+            child->setParentInternal(this, ReparentMode::Keep_World);
+        }
+    }
+
     void Transform::addChildInternal(Transform* newChild)
     {
+        // mParent 也在同一次反序列化范围内时, mChildren 早就被属性系统正常填过一次了
+        // (见 finalizeLoad() 的注释)——查重, 不会把同一个子节点塞进来两次。
+        if (std::find(mChildren.begin(), mChildren.end(), newChild) != mChildren.end())
+            return;
         mChildren.push_back(newChild);
     }
 
@@ -406,6 +538,7 @@ namespace hyp
         c->addProperty("Local Scale", &Transform::mLocalScale);
         c->addProperty("Parent", &Transform::mParent);
         c->addProperty("Children", &Transform::mChildren, CopyPolicy::Ignore);
+        c->addProperty("Socket Name", &Transform::mSocketName);
         return c;
     }
 }

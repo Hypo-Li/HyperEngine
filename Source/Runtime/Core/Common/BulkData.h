@@ -77,6 +77,10 @@ namespace hyp
         // 立即把 state 变成 Loaded 并标脏,下次 save 时会把这份新数据写盘
         void setData(std::vector<uint8_t> data) noexcept;
 
+        // unload() 的带走版本:字节交给调用方而不是丢弃,所以不像 unload() 那样对 dirty 止步——
+        // dirty 意味着没有磁盘副本可回退,取走之后本对象一并归空
+        std::vector<uint8_t> takeData() noexcept;
+
     private:
         // 仅供 Serializer 在反序列化(load)时调用,把来源信息灌进来
         void bindSource(BulkDataSource source, uint64_t offset, uint64_t size) noexcept;

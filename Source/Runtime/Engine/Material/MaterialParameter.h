@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 
+#include "../Font/Font.h"
 #include "../Texture/Texture2D.h"
 #include "../Texture/Texture2DArray.h"
 #include "../Texture/Texture3D.h"
@@ -38,6 +39,11 @@ namespace hyp
     {
         TRef<Texture2D> texture;
         std::optional<SampleState> sampleStateOverride;
+
+        // MaterialParameterValue::operator== needs every variant alternative to support ==
+        // (see MaterialInstanceEditor's parameter reset button, which compares whole
+        // MaterialParameterValues) — same rationale as SampleState::operator==.
+        friend bool operator==(const SampledTexture2D&, const SampledTexture2D&) = default;
     };
     template <> Type* Reflection::createType<SampledTexture2D>();
 
@@ -45,6 +51,8 @@ namespace hyp
     {
         TRef<Texture2DArray> texture;
         std::optional<SampleState> sampleStateOverride;
+
+        friend bool operator==(const SampledTexture2DArray&, const SampledTexture2DArray&) = default;
     };
     template <> Type* Reflection::createType<SampledTexture2DArray>();
 
@@ -52,6 +60,8 @@ namespace hyp
     {
         TRef<Texture3D> texture;
         std::optional<SampleState> sampleStateOverride;
+
+        friend bool operator==(const SampledTexture3D&, const SampledTexture3D&) = default;
     };
     template <> Type* Reflection::createType<SampledTexture3D>();
 
@@ -59,8 +69,18 @@ namespace hyp
     {
         TRef<TextureCube> texture;
         std::optional<SampleState> sampleStateOverride;
+
+        friend bool operator==(const SampledTextureCube&, const SampledTextureCube&) = default;
     };
     template <> Type* Reflection::createType<SampledTextureCube>();
+
+    struct SampledFont
+    {
+        TRef<Font> font;
+
+        friend bool operator==(const SampledFont&, const SampledFont&) = default;
+    };
+    template <> Type* Reflection::createType<SampledFont>();
 
     template <typename T>
     struct is_sampled_texture : std::false_type {};
@@ -91,6 +111,9 @@ namespace hyp
 
     template <>
     struct material_parameter_type<SampledTextureCube> { static constexpr MaterialParameterType value = MaterialParameterType::Texture_Cube; };
+
+    template <>
+    struct material_parameter_type<SampledFont> { static constexpr MaterialParameterType value = MaterialParameterType::Font; };
 
     class MaterialParameterValue
     {
@@ -128,6 +151,8 @@ namespace hyp
 
         MaterialParameterValue(TextureCube* texture, SampleState sampleState) : mValue(SampledTextureCube{ texture, sampleState }) {}
 
+        MaterialParameterValue(Font* font) : mValue(SampledFont{ font }) {}
+
         MaterialParameterType getType() const noexcept
         {
             return static_cast<MaterialParameterType>(mValue.index());
@@ -160,6 +185,14 @@ namespace hyp
             std::visit(std::move(lambda), mValue);
         }
 
+        // Needed by DrawPropertyReset<MaterialParameterValue> (MaterialInstanceEditor's
+        // per-parameter reset button compares a stored override against the template's current
+        // default). Different alternative types compare unequal automatically via std::variant.
+        bool operator==(const MaterialParameterValue& other) const noexcept
+        {
+            return mValue == other.mValue;
+        }
+
     private:
         using Value = std::variant<
             bool,
@@ -171,7 +204,8 @@ namespace hyp
             SampledTexture2D,
             SampledTexture2DArray,
             SampledTexture3D,
-            SampledTextureCube
+            SampledTextureCube,
+            SampledFont
         >;
         Value mValue;
     };
@@ -181,8 +215,21 @@ namespace hyp
     {
         HString name;
         MaterialParameterValue value;
+        HString group; // 空 = 隐式的 "Common" 组, 纯编辑器展示用, 不影响 shader 生成
     };
     template <> Type* Reflection::createType<MaterialParameter>();
+
+    // Font 参数在渲染代理和 shader 里展开成三个参数: 页数组纹理、Int 的 sdfType、Float 的 spreadUv
+    struct FontParameterNames
+    {
+        HString pages;
+        HString sdfType;
+        HString spreadUv;
+    };
+
+    FontParameterNames makeFontParameterNames(HString fontParameterName);
+
+    std::pair<TextureProxyHandle, SamplerProxyHandle> makeTextureBinding(Texture& texture, const std::optional<SampleState>& sampleStateOverride);
 
     void makeMaterialProxyParameters(
         std::span<MaterialParameter> parameters,

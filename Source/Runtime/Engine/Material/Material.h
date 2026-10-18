@@ -14,6 +14,8 @@ namespace hyp
 
         MaterialProxyHandle getOrCreateMaterialProxy();
 
+        virtual void onParameterResourceChanged() = 0;
+
     protected:
         MaterialProxyHandle getMaterialProxyHandle() const noexcept
         {

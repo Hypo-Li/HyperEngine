@@ -16,16 +16,17 @@ namespace hyp::rg
             subTextureMap.clear();
         }
         mSubTextureMaps.clear();
+        mOwnedTextures.clear();
     }
 
-    TRef<rhi::Buffer> TransientResources::acquireBuffer(const BufferKey& key)
+    TRef<rhi::Buffer> TransientResources::acquireBuffer(const BufferKey& key, uint32_t maxUnusedFrames)
     {
         TRef<rhi::Buffer> result;
         auto it = mBufferMap.find(key);
         if (it == mBufferMap.end())
         {
             result = createBuffer(mDevice, key);
-            mBufferMap.emplace(key, result);
+            mBufferMap.try_emplace(key, result.get(), maxUnusedFrames);
         }
         else
         {
@@ -34,16 +35,18 @@ namespace hyp::rg
         return result;
     }
 
-    TRef<rhi::TextureView> TransientResources::acquireTexture(const TextureKey& key)
+    TRef<rhi::TextureView> TransientResources::acquireTexture(const TextureKey& key, uint32_t maxUnusedFrames)
     {
         TRef<rhi::TextureView> result;
         auto it = mTextureMap.find(key);
         if (it == mTextureMap.end())
         {
             auto [texture, textureView] = createTexture(mDevice, key);
-            mSubTextureMaps.emplace(texture, SubTextureMap{});
+            // TextureView 对 Texture 只持裸引用, owner 记录的冷却时间必须跟这份 view 记录保持一致,
+            // 否则 view 记录还没到期就可能因为 owner 先到期被销毁, 留下悬空指针
+            mOwnedTextures.try_emplace(texture.get(), texture.get(), maxUnusedFrames);
             result = textureView;
-            mTextureMap.emplace(key, result);
+            mTextureMap.try_emplace(key, result.get(), maxUnusedFrames);
         }
         else
         {
@@ -54,14 +57,16 @@ namespace hyp::rg
 
     TRef<rhi::TextureView> TransientResources::acquireSubTexture(const rhi::TextureView& texture, const SubTextureKey& key)
     {
-        SubTextureMap& subTextureMap = mSubTextureMaps[&texture.getTexture()];
+        rhi::Texture* parentTexture = &texture.getTexture();
+        mOwnedTextures.try_emplace(parentTexture, parentTexture, kDefaultMaxUnusedFrames);
+        SubTextureMap& subTextureMap = mSubTextureMaps[parentTexture];
         auto subTextureIt = subTextureMap.find(key);
         if (subTextureIt != subTextureMap.end())
         {
             return subTextureIt->second.resource;
         }
         TRef<rhi::TextureView> result = createSubTexture(texture.getTexture(), key);
-        subTextureMap.emplace(key, result);
+        subTextureMap.try_emplace(key, result.get(), kDefaultMaxUnusedFrames);
         return result;
     }
 
@@ -110,10 +115,22 @@ namespace hyp::rg
                 }
             }
 
-            if (subTextureMap.empty() && textureIt->first->getViewCount() == 0)
+            if (subTextureMap.empty())
                 textureIt = mSubTextureMaps.erase(textureIt);
             else
                 ++textureIt;
+        }
+
+        for (auto it = mOwnedTextures.begin(); it != mOwnedTextures.end();)
+        {
+            if (it->second.shouldDestroy())
+            {
+                it = mOwnedTextures.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
 

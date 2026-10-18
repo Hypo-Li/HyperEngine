@@ -42,6 +42,7 @@ namespace hyp::wgpu
         {
         case rhi::AttachmentStoreOp::Store:     return WGPUStoreOp_Store;
         case rhi::AttachmentStoreOp::Dont_Care: return WGPUStoreOp_Discard;
+        case rhi::AttachmentStoreOp::None:      return WGPUStoreOp_Undefined;
         default:                                return WGPUStoreOp_Store;
         }
     }
@@ -552,6 +553,7 @@ namespace hyp::wgpu
             wgpuDepthStencilAttachment.view = static_cast<const TextureView*>(ds.textureView)->getHandle();
 
             wgpuDepthStencilAttachment.depthReadOnly =
+                ds.state == rhi::ResourceState::Depth_Attachment_Read ||
                 ds.state == rhi::ResourceState::Depth_Stencil_Attachment_Read ||
                 ds.state == rhi::ResourceState::Depth_Read_Stencil_Attachment;
             bool depthDisabled = rhi::isStencilFormat(ds.textureView->getDesc().format) ||
@@ -564,6 +566,7 @@ namespace hyp::wgpu
             wgpuDepthStencilAttachment.depthClearValue = ds.clearDepthStencil.depth;
 
             wgpuDepthStencilAttachment.stencilReadOnly =
+                ds.state == rhi::ResourceState::Stencil_Attachment_Read ||
                 ds.state == rhi::ResourceState::Depth_Stencil_Read_Attachment ||
                 ds.state == rhi::ResourceState::Depth_Stencil_Attachment_Read;
             bool stencilDisabled = rhi::isDepthFormat(ds.textureView->getDesc().format) ||

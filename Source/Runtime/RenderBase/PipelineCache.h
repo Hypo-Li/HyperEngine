@@ -1,5 +1,6 @@
 #pragma once
 #include "PipelineState.h"
+#include "BindGroupLayoutCache.h"
 #include <RHI/Pipeline.h>
 #include <RHI/Device.h>
 
@@ -8,7 +9,7 @@ namespace hyp
     class PipelineCache
     {
     public:
-        PipelineCache(const rhi::Device& device);
+        PipelineCache(const rhi::Device& device, BindGroupLayoutCache& bindGroupLayoutCache);
 
         struct PipelineLayoutKey
         {
@@ -18,7 +19,7 @@ namespace hyp
             bool operator==(const PipelineLayoutKey& other) const noexcept;
         };
 
-        TRef<rhi::PipelineLayout> getOrCreate(const PipelineLayoutKey& key);
+        TRef<rhi::PipelineLayout> getOrCreateLayout(const PipelineLayoutKey& key);
 
         struct GraphicsKey
         {
@@ -49,6 +50,7 @@ namespace hyp
 
     private:
         const rhi::Device& mDevice;
+        BindGroupLayoutCache& mBindGroupLayoutCache;
         struct PipelineLayoutKeyHash
         {
             size_t operator()(const PipelineLayoutKey& key) const noexcept;

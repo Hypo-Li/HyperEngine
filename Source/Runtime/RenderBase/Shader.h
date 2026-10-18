@@ -1,5 +1,8 @@
 #pragma once
 #include <filesystem>
+#include <mutex>
+#include <optional>
+#include <unordered_set>
 
 #include "VertexLayout.h"
 #include "RenderTagRegistry.h"
@@ -96,6 +99,7 @@ namespace hyp
             const rhi::Device& device,
             RenderTagRegistry& renderTagRegistry,
             ShaderCache& shaderCache,
+            const std::filesystem::path& shaderDir,
             HString name,
             std::string&& materialImplementation
         );
@@ -103,18 +107,21 @@ namespace hyp
         // shaderMacros 是每次调用才给的(不再是构造期固定的),同一个 MaterialShader 可以被多个
         // MaterialProxy(不同的 Template 默认值/Instance 覆写组合)共用,各自要各自的宏组合变体,
         // 所以宏也要进 VariantKey,否则不同宏组合会互相顶掉对方在 mVariants 里缓存的结果
-        ShaderVariant getOrCreateVariant(HString renderTag, VertexLayout vertexLayout, std::span<const ShaderMacro> shaderMacros);
+        //
+        // 返回 nullopt 表示这个变体既没有命中本地/烘焙缓存、也没有可用的 IShaderCompiler 编译它——
+        // 调用方(MaterialProxy::getOrCreateShaderVariant)需要据此回退到
+        // MaterialShaderManager::getErrorMaterialShader()
+        std::optional<ShaderVariant> getOrCreateVariant(HString renderTag, VertexLayout vertexLayout, std::span<const ShaderMacro> shaderMacros);
 
     private:
-        ShaderVariant createVariant(HString renderTag, VertexLayout vertexLayout, std::span<const ShaderMacro> shaderMacros);
-
-        std::string makeShaderSource(HString renderTag, VertexLayout vertexLayout);
+        std::optional<ShaderVariant> createVariant(HString renderTag, VertexLayout vertexLayout, std::span<const ShaderMacro> shaderMacros);
 
     private:
         rhi::Backend mRHIBackend;
         const rhi::Device& mDevice;
         RenderTagRegistry& mRenderTagRegistry;
         ShaderCache& mShaderCache;
+        std::filesystem::path mShaderDir;
         HString mName;
         // 参数结构体定义(makeParameterDefines) + 顶点位置偏移函数(用户写的或默认返回 0 的) +
         // 材质着色函数(evaluateMaterial), 三段拼在一起、整体 splice 进 shader 模板的
@@ -138,6 +145,9 @@ namespace hyp
         };
 
         std::unordered_map<VariantKey, ShaderVariant, VariantKeyHash> mVariants;
+
+        // 失败的 key 缓存, 避免重复触发编译/打印同一条错误——换新 MaterialShader 实例时自然清空
+        std::unordered_set<VariantKey, VariantKeyHash> mFailedVariants;
     };
 
     class MaterialShaderHandle
@@ -178,19 +188,20 @@ namespace hyp
     class MaterialShaderManager
     {
     public:
-        MaterialShaderManager(rhi::Backend rhiBackend, const rhi::Device& device, RenderTagRegistry& renderTagRegistry);
+        MaterialShaderManager(rhi::Backend rhiBackend, const rhi::Device& device, RenderTagRegistry& renderTagRegistry, const std::filesystem::path& shaderDir);
 
         // Logic thread methods:
 
+        // 索引什么时候能被复用完全由渲染线程说了算(见 unrefMaterialShader() 的说明)——
+        // 这里不再有对称的 freeHandle(), 逻辑线程只管分配, 不管回收。
         MaterialShaderHandle allocateHandle();
-
-        void freeHandle(MaterialShaderHandle handle);
 
         // Render thread methods:
 
         void createMaterialShader(
             MaterialShaderHandle handle,
             HString name,
+            const std::string& materialFunctionLibrarySource,
             const std::string& materialSource,
             const std::string& vertexPositionOffsetSource,
             std::span<const MaterialParameterMetadata> parameterMetadata
@@ -209,14 +220,35 @@ namespace hyp
         // 天然在内容寻址缓存里收敛成同一份编译产物
         MaterialShader* getOrCreateSharedGeometryShader(HString renderTag);
 
+        // 材质变体既没有本地/烘焙缓存、也没有可用编译器时的兜底——固定品红自发光、零材质参数的
+        // MaterialShader, 走和正常材质完全一样的 renderTag 模板 + splice + 编译/缓存路径, 对任意
+        // renderTag 都能产出签名匹配的 shader, 新增 render tag 不需要额外写兜底 shader。cook 阶段
+        // 必须保证这个 shader 对所有 renderTag 都能编译成功并进 ShaderCache, 否则这里会 assert
+        ShaderVariant getErrorMaterialShader(HString renderTag, VertexLayout vertexLayout);
+
     private:
         rhi::Backend mRHIBackend;
         const rhi::Device& mDevice;
         RenderTagRegistry& mRenderTagRegistry;
         ShaderCache mShaderCache;
+        std::filesystem::path mShaderDir;
         bool mBindlessEnabled = false;
+        std::unique_ptr<MaterialShader> mErrorMaterialShader;
+
+        // mVersions/mReclaimedIndices 现在是逻辑线程(allocateHandle())和渲染线程
+        // (unrefMaterialShader() 引用计数归零时)共同touch的状态, 用 mHandleMutex 保护——
+        // 之前 mVersions/mFreeIndices 只由逻辑线程touch, 靠 freeHandle() 立刻把 index 塞回
+        // 空闲列表, 但那时候渲染线程侧的 slot.refCount 不一定真的归零了(比如 MaterialInstance
+        // 会额外 refMaterialShader() 一次), 复用同一个 index 建新 shader 时会撞上
+        // assert(slot.shader == nullptr)。现在 index 只有在渲染线程确认"引用计数真的归零"
+        // 之后才会被交还, 逻辑线程自己不再直接决定一个 index 能不能被回收。
+        std::mutex mHandleMutex;
         std::vector<uint32_t> mVersions;
-        std::vector<uint32_t> mFreeIndices;
+        std::vector<uint32_t> mReclaimedIndices;
+
+        // mSlots 只由渲染线程 touch(createMaterialShader/refMaterialShader/
+        // unrefMaterialShader/getMaterialShader 都只在渲染线程执行的 lambda 里被调用),
+        // 不需要加锁。
         struct Slot
         {
             std::unique_ptr<MaterialShader> shader;

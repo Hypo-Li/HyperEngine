@@ -30,6 +30,10 @@ namespace hyp::rhi
             else
                 viewDesc.type = TextureViewType::Texture_View_2D_Array;
         }
+        else if (textureDesc.type == TextureType::Texture_2D_Array)
+        {
+            viewDesc.type = TextureViewType::Texture_View_2D_Array;
+        }
         else if (textureDesc.type == TextureType::Texture_3D)
         {
             viewDesc.type = TextureViewType::Texture_View_3D;

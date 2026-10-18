@@ -183,16 +183,17 @@ namespace hyp::wgpu
     PipelineLayout::PipelineLayout(const Device& device, const rhi::PipelineLayoutDesc& desc)
         : rhi::PipelineLayout(device)
     {
+        // desc.bindGroupLayouts 从下标 0 起连续非空, 中间不会有洞——见 Vulkan/Pipeline.cpp
+        // 里同一处注释, hyp::PipelineCache::createPipelineLayout() 已经统一处理过了
         uint32_t layoutCount = 0;
         std::array<WGPUBindGroupLayout, 4> layouts = { nullptr, nullptr, nullptr, nullptr };
 
         for (uint32_t i = 0; i < 4; ++i)
         {
-            if (desc.bindGroupLayouts[i])
-            {
-                layouts[i] = static_cast<const BindGroupLayout*>(desc.bindGroupLayouts[i])->getHandle();
-                layoutCount = i + 1;
-            }
+            if (!desc.bindGroupLayouts[i])
+                break;
+            layouts[i] = static_cast<const BindGroupLayout*>(desc.bindGroupLayouts[i])->getHandle();
+            layoutCount = i + 1;
         }
 
         WGPUPipelineLayoutDescriptor layoutDesc = {};
@@ -280,6 +281,7 @@ namespace hyp::wgpu
         primitiveState.stripIndexFormat = WGPUIndexFormat_Undefined;
         primitiveState.frontFace = convertFrontFace(desc.rasterizationState.frontFace);
         primitiveState.cullMode = convertCullMode(desc.rasterizationState.cullMode);
+        primitiveState.unclippedDepth = desc.rasterizationState.depthClampEnable;
 
         WGPUDepthStencilState depthStencilState = {};
         WGPUDepthStencilState* pDepthStencilState = nullptr;

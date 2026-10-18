@@ -69,10 +69,11 @@ namespace hyp
             }
         }
 
+        // 跟 TClass::addProperty() 保持对称(同一份逻辑), 见那边的注释。
         template <typename Declared>
-        Property* addProperty(HString name, Declared T::* memberPtr, CopyPolicy copyPolicy = CopyPolicy::Shallow)
+        TProperty<Declared, T>* addProperty(HString name, Declared T::* memberPtr, CopyPolicy copyPolicy = CopyPolicy::Shallow, PropertyFlags flags = PropertyFlags::None)
         {
-            Property* property = new TProperty<Declared, T>(name, memberPtr, copyPolicy);
+            TProperty<Declared, T>* property = new TProperty<Declared, T>(name, memberPtr, copyPolicy, flags);
             mProperties.emplace_back(property);
             return property;
         }

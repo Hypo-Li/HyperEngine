@@ -95,7 +95,14 @@ namespace hyp
         {
             if (!toRemove[i])
             {
-                mPendingOperations[write++] = std::move(mPendingOperations[i]);
+                // write == i 时是原地保留, 不需要挪动——std::vector 的自我 move 赋值不保证是
+                // no-op(libstdc++ 的实现会先清空再"接管"已被清空的自身, 导致数据丢失),必须
+                // 显式跳过, 不能指望 write == i 走 std::move(mPendingOperations[i]) 也安全。
+                if (write != i)
+                {
+                    mPendingOperations[write] = std::move(mPendingOperations[i]);
+                }
+                ++write;
             }
         }
         mPendingOperations.resize(write);

@@ -1,7 +1,7 @@
 #pragma once
 #include <variant>
 
-#include "RenderProxy.h"
+#include "ResourceProxy.h"
 #include "Shader.h"
 #include "TextureProxy.h"
 #include "SamplerProxy.h"
@@ -14,7 +14,7 @@
 
 namespace hyp
 {
-    class MaterialProxy : public RenderProxy
+    class MaterialProxy : public ResourceProxy
     {
     public:
         struct Attributes
@@ -25,9 +25,13 @@ namespace hyp
             float alphaCutoff = 0.3333f;
             bool doubleSided = true;
             bool tangentSpaceNormal = true;
-            // 对应 MaterialTemplate::hasVertexPositionOffset(),渲染线程判断这个材质在
-            // RenderTagFlags::Geometry_Only 的 render tag 下能否走跨材质共享的 shader/pipeline 时要用
+            // 对应 MaterialTemplate::isAnisotropic(), 驱动 IS_ANISOTROPIC 宏, 见 Opaque.slang
+            bool anisotropic = false;
+            // 对应 MaterialTemplate::hasVertexPositionOffset(): 渲染线程判断能否走共享 shader/pipeline
+            // 用它, makeShaderMacros() 也靠它驱动 HAS_VPO 宏(见 Opaque.slang)
             bool hasVertexPositionOffset = false;
+            // 对应 MaterialTemplate::isTimeDependent(), 驱动 TIME_DEPENDENT_VPO 宏, 见 Opaque.slang
+            bool isTimeDependent = false;
         };
 
         struct Parameter
@@ -87,7 +91,7 @@ namespace hyp
             return mParametersBindGroup;
         }
 
-        void prepare(rhi::CommandList& cmdList);
+        bool prepare(rhi::CommandList& cmdList) override;
 
         bool isParametersDirty() const noexcept
         {

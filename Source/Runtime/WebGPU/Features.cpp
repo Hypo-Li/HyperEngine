@@ -36,6 +36,7 @@ namespace hyp::wgpu
         features.independentBlend = true;
         features.dualSourceBlend = hasFeature(supportedFeatures, WGPUFeatureName_DualSourceBlending);
         features.multiViewport = false;
+        features.depthClamp = hasFeature(supportedFeatures, WGPUFeatureName_DepthClipControl);
 
         features.shaderInt16 = false;
         features.shaderInt64 = false;
@@ -44,6 +45,7 @@ namespace hyp::wgpu
         features.shaderAtomics = true;
         features.shaderFloatAtomics = false;
         features.subgroup = hasFeature(supportedFeatures, WGPUFeatureName_Subgroups);
+        features.computeShaderDerivatives = false;
 
         features.depth32FloatStencil8 = hasFeature(supportedFeatures, WGPUFeatureName_Depth32FloatStencil8);
         features.textureCompressionBC = hasFeature(supportedFeatures, WGPUFeatureName_TextureCompressionBC);
@@ -57,9 +59,42 @@ namespace hyp::wgpu
         features.variableRateShading = false;
 
         wgpuFeatures.immediateAddressSpace = hasWGSLLanguageFeature(supportedWGSLLanguageFeatures, WGPUWGSLLanguageFeatureName_ImmediateAddressSpace);
+        wgpuFeatures.textureFormatsTier1 =
+            hasFeature(supportedFeatures, WGPUFeatureName_TextureFormatsTier1) &&
+            hasWGSLLanguageFeature(supportedWGSLLanguageFeatures, WGPUWGSLLanguageFeatureName_TextureFormatsTier1);
+        wgpuFeatures.textureFormatsTier2 = hasFeature(supportedFeatures, WGPUFeatureName_TextureFormatsTier2);
+        wgpuFeatures.float32Filterable = hasFeature(supportedFeatures, WGPUFeatureName_Float32Filterable);
+        wgpuFeatures.primitiveIndex = hasFeature(supportedFeatures, WGPUFeatureName_PrimitiveIndex);
 
         wgpuSupportedWGSLLanguageFeaturesFreeMembers(supportedWGSLLanguageFeatures);
         wgpuSupportedFeaturesFreeMembers(supportedFeatures);
+    }
+
+    FeatureSupport resolveWgpuFeatures(
+        const FeatureSupport& supported,
+        const FeatureRequirements& requirements
+    )
+    {
+        auto resolve = [](const char* name, bool supported, rhi::FeaturePolicy level) -> bool
+            {
+                if (level == rhi::FeaturePolicy::Required && !supported)
+                {
+                    LOG_ERROR("Required WebGPU feature '{}' is not supported", name);
+                }
+                else if (level == rhi::FeaturePolicy::Optional && !supported)
+                {
+                    LOG_INFO("Optional WebGPU feature '{}' is not supported, disabling", name);
+                }
+                return ((level == rhi::FeaturePolicy::Required) || (level == rhi::FeaturePolicy::Optional)) && supported;
+            };
+
+        FeatureSupport result;
+        result.immediateAddressSpace = resolve("immediateAddressSpace", supported.immediateAddressSpace, requirements.immediateAddressSpace);
+        result.textureFormatsTier1 = resolve("textureFormatsTier1", supported.textureFormatsTier1, requirements.textureFormatsTier1);
+        result.textureFormatsTier2 = resolve("textureFormatsTier2", supported.textureFormatsTier2, requirements.textureFormatsTier2);
+        result.float32Filterable = resolve("float32Filterable", supported.float32Filterable, requirements.float32Filterable);
+        result.primitiveIndex = resolve("primitiveIndex", supported.primitiveIndex, requirements.primitiveIndex);
+        return result;
     }
 
     std::vector<WGPUFeatureName> buildRequiredFeatureList(
@@ -69,8 +104,21 @@ namespace hyp::wgpu
     {
         std::vector<WGPUFeatureName> requiredFeatures;
 
+        // wgpuFeatures 这里预期已经是 resolveWgpuFeatures() 处理过的结果——Required 但不支持的
+        // 特性已经在那边报过 LOG_ERROR 了, 这里只管按结果决定要不要请求, 不重复判断/报错。
+        if (wgpuFeatures.textureFormatsTier1)
+            requiredFeatures.push_back(WGPUFeatureName_TextureFormatsTier1);
+        if (wgpuFeatures.textureFormatsTier2)
+            requiredFeatures.push_back(WGPUFeatureName_TextureFormatsTier2);
+        if (wgpuFeatures.float32Filterable)
+            requiredFeatures.push_back(WGPUFeatureName_Float32Filterable);
+        if (wgpuFeatures.primitiveIndex)
+            requiredFeatures.push_back(WGPUFeatureName_PrimitiveIndex);
+
         if (features.dualSourceBlend)
             requiredFeatures.push_back(WGPUFeatureName_DualSourceBlending);
+        if (features.depthClamp)
+            requiredFeatures.push_back(WGPUFeatureName_DepthClipControl);
         if (features.shaderFloat16)
             requiredFeatures.push_back(WGPUFeatureName_ShaderF16);
         if (features.subgroup)
@@ -89,16 +137,5 @@ namespace hyp::wgpu
             requiredFeatures.push_back(WGPUFeatureName_IndirectFirstInstance);
 
         return requiredFeatures;
-    }
-
-    std::vector<WGPUWGSLLanguageFeatureName> buildRequiredWGSLFeatures(
-        const rhi::FeatureSupport& features,
-        const FeatureSupport& wgpuFeatures
-    )
-    {
-        std::vector<WGPUWGSLLanguageFeatureName> requiredWGSLFeatures;
-        if (wgpuFeatures.immediateAddressSpace)
-            requiredWGSLFeatures.push_back(WGPUWGSLLanguageFeatureName_ImmediateAddressSpace);
-        return requiredWGSLFeatures;
     }
 }

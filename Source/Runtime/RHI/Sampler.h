@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdint>
+
 #include <Core/Common/Refable.h>
 
 namespace hyp::rhi
@@ -54,6 +56,7 @@ namespace hyp::rhi
     class Device;
     class Sampler : public Refable
     {
+        friend class Device;
     public:
         Sampler(const Device& device) :
             mDevice(device)
@@ -67,7 +70,20 @@ namespace hyp::rhi
             return mDevice;
         }
 
+        // Device::createSampler() 创建完之后赋值一次, 原因见 Buffer::getUniqueId() 的注释
+        uint64_t getUniqueId() const noexcept
+        {
+            return mUniqueId;
+        }
+
+    private:
+        void setUniqueId(uint64_t uniqueId) noexcept
+        {
+            mUniqueId = uniqueId;
+        }
+
     private:
         const Device& mDevice;
+        uint64_t mUniqueId = 0;
     };
 }

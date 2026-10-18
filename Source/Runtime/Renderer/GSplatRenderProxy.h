@@ -1,14 +1,16 @@
 #pragma once
-#include "RenderableProxy.h"
+#include "InstanceProxy.h"
 
 namespace hyp
 {
-    class GSplatRenderProxy : public RenderableProxy
+    class GSplatRenderProxy : public InstanceProxy
     {
     public:
-        GSplatRenderProxy() = default;
+        using Desc = InstanceProxy::Desc;
 
-        ~GSplatRenderProxy() noexcept = default;
+        GSplatRenderProxy(SceneProxy& sceneProxy, const Desc& desc);
+
+        ~GSplatRenderProxy() noexcept override;
 
         void setGSplatId(uint32_t gsplatId)
         {

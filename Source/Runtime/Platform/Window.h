@@ -13,8 +13,9 @@ namespace hyp
     {
         Unknown,
         Win32,
-        X11,
         Wayland,
+        Xcb,
+        Xlib,
     };
 
     class Window : public Refable
@@ -65,6 +66,10 @@ namespace hyp
         void getX11Display(void* display) const;
 
         void getX11Handle(void* window) const;
+
+        void getXcbConnection(void* connection) const;
+
+        void getXcbHandle(void* window) const;
 
         void getWaylandDisplay(void* display) const;
 

@@ -22,10 +22,6 @@ namespace hyp::rhi
         RG8_UINT,
         RG8_SINT,
         RG8_SRGB,
-        // 没有 RGB8_*/BGR8_*(24bpp, 3 通道)——D3D12/WebGPU 没有对应的原生格式, Vulkan 虽然有
-        // 但引擎的 Texture::convertToRHITextureFormat() 从不会真的产出这几个值(3 通道源数据
-        // 会先在 bakeMips() 里 pad 成 4 通道再交给 RHI), 保留只是死代码, 已删除。3 通道的
-        // *源像素数据* 描述仍然用 hyp::PixelFormat(Engine 层), 和这里是两回事, 不受影响
         RGBA8_UNORM,
         RGBA8_SNORM,
         RGBA8_UINT,
@@ -53,7 +49,6 @@ namespace hyp::rhi
         RG16_UINT,
         RG16_SINT,
         RG16_SFLOAT,
-        // 同上, 没有 RGB16_*(48bpp, 3 通道)
         RGBA16_UNORM,
         RGBA16_SNORM,
         RGBA16_UINT,
@@ -66,7 +61,6 @@ namespace hyp::rhi
         RG32_UINT,
         RG32_SINT,
         RG32_SFLOAT,
-        // 同上, 没有 RGB32_*(96bpp, 3 通道)
         RGBA32_UINT,
         RGBA32_SINT,
         RGBA32_SFLOAT,
@@ -143,6 +137,7 @@ namespace hyp::rhi
     class Texture;
     class TextureView : public Refable
     {
+        friend class Texture;
     public:
         TextureView(Texture& texture, const TextureViewDesc& desc) :
             mTexture(texture), mDesc(desc) {
@@ -170,10 +165,29 @@ namespace hyp::rhi
             return mDebugName;
         }
 
+        // Texture::createView() 创建完之后赋值一次, 原因见 Texture::getUniqueId() 的注释——
+        // 不能借用所属 Texture 的 ID: 同一个 Texture 可以同时有好几个不同的 View(比如深度/
+        // 模板两个 aspect 各一个 view), 而且某个具体 View 也可能在所属 Texture 不变的情况下
+        // 单独被销毁重建(见 TransientResources 里子纹理各自独立的淘汰计时), 两种情况都需要
+        // View 自己的身份, 不能和 Texture 的身份混用
+        uint64_t getUniqueId() const noexcept
+        {
+            return mUniqueId;
+        }
+
+    private:
+        void setUniqueId(uint64_t uniqueId) noexcept
+        {
+            mUniqueId = uniqueId;
+        }
+
     protected:
         Texture& mTexture;
         TextureViewDesc mDesc;
         HString mDebugName;
+
+    private:
+        uint64_t mUniqueId = 0;
     };
 
     enum class TextureType
@@ -181,6 +195,7 @@ namespace hyp::rhi
         Texture_2D,
         Texture_3D,
         Texture_Cube,
+        Texture_2D_Array,
     };
 
     enum class TextureUsage
@@ -210,6 +225,7 @@ namespace hyp::rhi
     class Texture : public Refable
     {
         friend class TextureView;
+        friend class Device;
     public:
         Texture(const Device& device, const TextureDesc& desc, MemoryType memoryType) :
             mDevice(device), mDesc(desc), mMemoryType(memoryType) {
@@ -232,7 +248,15 @@ namespace hyp::rhi
             return mMemoryType;
         }
 
-        virtual TRef<TextureView> createView(const TextureViewDesc& desc) = 0;
+        // 派生类实现 createViewImpl(), 这里统一打一个 unique id 再返回——调用方(TransientResources
+        // 的 acquireSubTexture() 这类靠"资源是不是变了"做增量更新判断的代码)不需要各自记得去
+        // setUniqueId(), 只要是从这个入口拿到的 TextureView 就一定带着 ID。
+        TRef<TextureView> createView(const TextureViewDesc& desc)
+        {
+            TRef<TextureView> view = createViewImpl(desc);
+            view->setUniqueId(nextViewUniqueId());
+            return view;
+        }
 
         virtual void setDebugName(HString name)
         {
@@ -249,7 +273,15 @@ namespace hyp::rhi
             return mViewCount;
         }
 
+        // Device::createTexture() 创建完之后赋值一次, 原因见 Buffer::getUniqueId() 的注释
+        uint64_t getUniqueId() const noexcept
+        {
+            return mUniqueId;
+        }
+
     protected:
+        virtual TRef<TextureView> createViewImpl(const TextureViewDesc& desc) = 0;
+
         void incViewCount() noexcept
         {
             ++mViewCount;
@@ -266,6 +298,21 @@ namespace hyp::rhi
         MemoryType mMemoryType;
         uint32_t mViewCount = 0;
         HString mDebugName;
+
+    private:
+        void setUniqueId(uint64_t uniqueId) noexcept
+        {
+            mUniqueId = uniqueId;
+        }
+
+        static uint64_t nextViewUniqueId() noexcept
+        {
+            static uint64_t counter = 1;
+            return counter++;
+        }
+
+    private:
+        uint64_t mUniqueId = 0;
     };
 
     inline bool isDepthStencilFormat(TextureFormat format)

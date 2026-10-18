@@ -1,11 +1,12 @@
 #include "BinaryLoader.h"
 #include <cassert>
+#include <cstring>
 
 namespace hyp
 {
-    bool BinaryLoader::isLoading() const
+    BinaryLoader::BinaryLoader(bool isCooking) :
+        BinaryArchive(true, isCooking)
     {
-        return true;
     }
 
     void BinaryLoader::serialize(bool* value, size_t count)
@@ -124,6 +125,9 @@ namespace hyp
     {
         uint32_t newObjectBufferIdx = static_cast<uint32_t>(-mCurrentObjectRef - 1);
         pushObjectBufferIdx(newObjectBufferIdx);
+        // 和 BinarySaver::beginObject 对称: cook 产物没有写这三个字段, 不读
+        if (isCooking())
+            return;
         serialize(&typeName);
         serialize(&version);
         serialize(&propCount);

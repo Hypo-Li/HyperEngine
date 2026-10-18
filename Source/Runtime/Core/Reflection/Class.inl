@@ -26,7 +26,7 @@ namespace hyp
             return *static_cast<const T*>(instance1) == *static_cast<const T*>(instance2);
         else
         {
-            Class* clazz = const_cast<Class*>(dynamic_cast<const Class*>(this));
+            Class* clazz = const_cast<Class*>(static_cast<const Class*>(this));
             while (clazz)
             {
                 for (const Property* prop : clazz->getProperties())
@@ -61,9 +61,9 @@ namespace hyp
 
     template <ObjectType T, ObjectType Base, AllocateFrequency ALLOC_FREQ>
     template <typename Declared>
-    Property* TClass<T, Base, ALLOC_FREQ>::addProperty(HString name, Declared T::* memberPtr, CopyPolicy copyPolicy)
+    TProperty<Declared, T>* TClass<T, Base, ALLOC_FREQ>::addProperty(HString name, Declared T::* memberPtr, CopyPolicy copyPolicy, PropertyFlags flags)
     {
-        Property* property = new TProperty<Declared, T>(name, memberPtr, copyPolicy);
+        TProperty<Declared, T>* property = new TProperty<Declared, T>(name, memberPtr, copyPolicy, flags);
         mProperties.emplace_back(property);
         return property;
     }

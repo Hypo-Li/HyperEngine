@@ -74,7 +74,7 @@ namespace hyp::rg
         using PhysicalResource = rhi::Buffer;
         using Usage = rhi::BufferUsage;
 
-        BufferResource(HString name, const Description& desc, Arena& arena) noexcept;
+        BufferResource(HString name, const Description& desc, Arena& arena, uint32_t maxUnusedFrames = TransientResources::kDefaultMaxUnusedFrames) noexcept;
 
         BufferResource(HString name, PhysicalResource* physicalResource, Arena& arena) noexcept;
 
@@ -112,6 +112,7 @@ namespace hyp::rg
 
     private:
         BufferKey mKey;
+        uint32_t mMaxUnusedFrames;
         TRef<PhysicalResource> mPhysicalResource;
         ArenaVector<BufferAccessRecord> mAccessRecords;
     };
@@ -123,7 +124,7 @@ namespace hyp::rg
         using PhysicalResource = rhi::TextureView;
         using Usage = rhi::TextureUsage;
 
-        TextureResource(HString name, const Description& desc, Arena& arena) noexcept;
+        TextureResource(HString name, const Description& desc, Arena& arena, uint32_t maxUnusedFrames = TransientResources::kDefaultMaxUnusedFrames) noexcept;
 
         TextureResource(HString name, PhysicalResource* physicalResource, rhi::ResourceState defaultState, Arena& arena) noexcept;
 
@@ -166,6 +167,7 @@ namespace hyp::rg
 
     private:
         TextureKey mKey;
+        uint32_t mMaxUnusedFrames;
         TRef<PhysicalResource> mPhysicalResource;
         rhi::ResourceState mDefaultState = rhi::ResourceState::None;
         ArenaVector<TextureAccessRecord> mAccessRecords;

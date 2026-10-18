@@ -10,17 +10,10 @@ namespace hyp
         const SceneProxy* scene;
         std::vector<uint32_t> viewIds;
         std::vector<float4> viewports;
-        std::vector<std::shared_ptr<DrawItemBucket>> shadowDepthBuckets;
+        std::vector<float2> biases; // .x = depthBias, .y = slopeDepthBias, 按 cascade 对齐
+        std::vector<std::shared_ptr<DrawItemList>> drawItems;
+        std::vector<std::shared_ptr<DrawBatchList>> shadowDepthBatches;
         rg::TextureHandle shadowDepth;
-    };
-
-    struct DrawBatch
-    {
-        MaterialProxy* material;
-        GeometryProxy* geometry;
-        uint32_t sectionIndex;
-        uint32_t instanceCount;
-        uint32_t firstInstance;
     };
 
     // ShadowDepth 这个 render tag 的 shader(见 Shader/Material/ShadowDepth.slang)只用得到
@@ -47,7 +40,8 @@ namespace hyp
         const SceneProxy& scene,
         std::span<const SceneView> views,
         std::span<const RenderData> renderData,
-        const DirectionalLightProxy& directionalLight
+        const DirectionalLightProxy& directionalLight,
+        const CameraProxy& camera
     )
     {
         renderGraph.addGraphicsPass<CascadeShadowDepthData>(
@@ -61,20 +55,29 @@ namespace hyp
                 uint32_t cascadeCount = static_cast<uint32_t>(views.size());
                 data.viewIds.resize(cascadeCount);
                 data.viewports.resize(cascadeCount);
-                data.shadowDepthBuckets.resize(cascadeCount);
+                data.biases.resize(cascadeCount);
+                data.drawItems.resize(cascadeCount);
+                data.shadowDepthBatches.resize(cascadeCount);
+                std::span<const CascadeShadowData> cascadeShadowData = directionalLight.getCascadeShadowData(&camera);
+                assert(cascadeShadowData.size() == cascadeCount);
                 for (uint32_t i = 0; i < cascadeCount; i++)
                 {
                     data.viewIds[i] = views[i].getViewId();
                     data.viewports[i] = views[i].getViewport();
-                    data.shadowDepthBuckets[i] = renderData[i].shadowDepthBucket;
+                    data.biases[i] = float2(cascadeShadowData[i].depthBias, cascadeShadowData[i].slopeDepthBias);
+                    data.drawItems[i] = renderData[i].drawItems;
+                    data.shadowDepthBatches[i] = renderData[i].shadowDepthBatches;
                 }
 
                 uint32_t cascadeSize = uint32_t(data.viewports[0].w);
+                uint32_t atlasColumnCount = std::min(cascadeCount, DirectionalLightProxy::CascadeAtlasColumnCount);
+                uint32_t atlasRowCount = (cascadeCount + DirectionalLightProxy::CascadeAtlasColumnCount - 1u)
+                    / DirectionalLightProxy::CascadeAtlasColumnCount;
 
                 rhi::TextureDesc shadowDepthDesc;
                 shadowDepthDesc.type = rhi::TextureType::Texture_2D;
                 shadowDepthDesc.format = rhi::TextureFormat::D16_UNORM;
-                shadowDepthDesc.extent = { cascadeSize * cascadeCount, cascadeSize, 1 };
+                shadowDepthDesc.extent = { cascadeSize * atlasColumnCount, cascadeSize * atlasRowCount, 1 };
                 shadowDepthDesc.mipCount = 1;
                 shadowDepthDesc.layerCount = 1;
                 shadowDepthDesc.samples = 1;
@@ -88,140 +91,98 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, CascadeShadowDepthData& data)
             {
-                HString renderTag = "Builtin_ShadowDepth"_hs;
+                HString renderTag = BuiltinRenderTags::ShadowDepth;
                 auto& cmdList = context.getCommandList();
-                uint32_t cascadeCount = static_cast<uint32_t>(data.shadowDepthBuckets.size());
+                uint32_t cascadeCount = static_cast<uint32_t>(data.shadowDepthBatches.size());
 
-                std::vector<DrawBatch> drawBatches;
                 std::vector<uint32_t> instanceIndices;
+                std::vector<uint32_t> cascadeFirstInstance(cascadeCount, 0);
                 uint32_t totalInstanceCount = 0;
                 for (uint32_t i = 0; i < cascadeCount; ++i)
                 {
-                    totalInstanceCount += static_cast<uint32_t>(data.shadowDepthBuckets[i]->size());
+                    totalInstanceCount += static_cast<uint32_t>(data.shadowDepthBatches[i]->instanceIndices.size());
                 }
-                drawBatches.reserve(totalInstanceCount);
                 instanceIndices.reserve(totalInstanceCount);
 
-                std::vector<uint32_t> drawBatchCount(cascadeCount, 0);
-
-                for (uint32_t i = 0; i < cascadeCount; i++)
+                for (uint32_t i = 0; i < cascadeCount; ++i)
                 {
-                    MaterialProxy* prevMaterial = nullptr;
-                    GeometryProxy* prevGeometry = nullptr;
-                    uint32_t prevSectionIndex = ~0u;
-
-                    for (const auto& sortedDrawItem : *data.shadowDepthBuckets[i])
-                    {
-                        auto& drawItem = sortedDrawItem.drawItem;
-
-                        bool canInstance = (drawItem.material == prevMaterial) &&
-                            (drawItem.geometry == prevGeometry) &&
-                            (drawItem.sectionIndex == prevSectionIndex);
-                        if (!canInstance)
-                        {
-                            drawBatches.emplace_back(
-                                drawItem.material,
-                                drawItem.geometry,
-                                drawItem.sectionIndex,
-                                0,
-                                static_cast<uint32_t>(instanceIndices.size())
-                            );
-                            drawBatchCount[i]++;
-                            prevMaterial = drawItem.material;
-                            prevGeometry = drawItem.geometry;
-                            prevSectionIndex = drawItem.sectionIndex;
-                        }
-
-                        drawBatches.back().instanceCount++;
-                        instanceIndices.push_back(drawItem.instanceIndex);
-                    }
+                    const std::vector<uint32_t>& cascadeInstanceIndices = data.shadowDepthBatches[i]->instanceIndices;
+                    cascadeFirstInstance[i] = static_cast<uint32_t>(instanceIndices.size());
+                    instanceIndices.insert(instanceIndices.end(), cascadeInstanceIndices.begin(), cascadeInstanceIndices.end());
                 }
 
-                auto& stagingAllocator = rendererContext.getRenderBackend().getStagingAllocator();
-
-                auto& indicesBuffer = data.scene->getIndicesBuffer();
-                size_t indicesBufferSize = instanceIndices.size() * sizeof(uint32_t);
-                auto indicesAllocation = stagingAllocator.forceAllocate(indicesBufferSize);
-                std::memcpy(indicesAllocation.mappedData, instanceIndices.data(), indicesBufferSize);
-
-                rhi::BufferBarrier preBarrier;
-                preBarrier.buffer = &indicesBuffer;
-                preBarrier.offset = 0;
-                preBarrier.size = indicesBufferSize;
-                preBarrier.oldState = rhi::ResourceState::Shader_Storage_Read;
-                preBarrier.newState = rhi::ResourceState::Transfer_Dst;
-                cmdList.insertBarriers({ &preBarrier, 1 });
-
+                if (!rendererContext.getIndicesBuffer().upload(cmdList, instanceIndices))
                 {
-                    rhi::BufferCopyRegion copyRegion;
-                    copyRegion.srcOffset = indicesAllocation.offset;
-                    copyRegion.dstOffset = 0;
-                    copyRegion.size = indicesBufferSize;
-                    cmdList.copyBuffer(indicesAllocation.buffer, &indicesBuffer, { &copyRegion, 1 });
+                    context.beginPass();
+                    return;
                 }
-
-                rhi::BufferBarrier postBarrier;
-                postBarrier.buffer = &indicesBuffer;
-                postBarrier.offset = 0;
-                postBarrier.size = indicesBufferSize;
-                postBarrier.oldState = rhi::ResourceState::Transfer_Dst;
-                postBarrier.newState = rhi::ResourceState::Shader_Storage_Read;
-                cmdList.insertBarriers({ &postBarrier, 1 });
 
                 context.beginPass();
                 auto& viewDataManager = rendererContext.getViewDataManager();
-                uint32_t drawBatchOffset = 0;
 
                 for (uint32_t i = 0; i < cascadeCount; i++)
                 {
-                    const rhi::BindGroup& sceneAndViewBindGroup = data.scene->getSceneAndViewBindGroup();
                     uint32_t dynamicOffset = viewDataManager.getViewDataDynamicOffset(data.viewIds[i]);
                     cmdList.setBindGroup(
                         1,
                         rhi::PipelineBindPoint::Graphics,
                         &rendererContext.getGlobalPipelineLayout(),
-                        &sceneAndViewBindGroup,
+                        &rendererContext.getViewDataManager().getBindGroup(),
                         { &dynamicOffset, 1 }
                     );
 
                     setViewportAndScissor(cmdList, data.viewports[i]);
 
                     rhi::Pipeline* currentPipeline = nullptr;
+                    const rhi::PipelineLayout* instanceBindLayout = nullptr;
                     MaterialProxy* prevMaterial = nullptr;
                     GeometryProxy* prevGeometry = nullptr;
-                    for (uint32_t j = 0; j < drawBatchCount[i]; ++j)
+                    for (const DrawBatch& drawBatch : data.shadowDepthBatches[i]->batches)
                     {
-                        auto& drawBatch = drawBatches[drawBatchOffset + j];
+                        const DrawItem& batchDrawItem = (*data.drawItems[i])[drawBatch.itemIndex];
+                        MaterialProxy* batchMaterial = batchDrawItem.material;
 
-                        VertexLayout vertexLayout = drawBatch.geometry->getVertexLayout();
+                        VertexLayout vertexLayout = batchDrawItem.getVertexLayout();
                         // 只对"真的会走共享 shader 路径、且是静态网格"的组合做归一化——非共享路径
                         // (有顶点位置偏移/Masked 等)、或骨骼网格(现在 writeVertexLayoutBindingsAndAttributes
                         // 还没实现 Skeletal_Mesh 分支, 归一化到 Static_Mesh 类型没有意义), 都保持用
                         // 网格自己真实的 vertexLayout, 行为和归一化之前一致
-                        if (drawBatch.material->usesSharedGeometryShader(renderTag) &&
+                        if (batchMaterial->usesSharedGeometryShader(renderTag) &&
                             vertexLayout.getType() == VertexLayoutType::Static_Mesh)
                         {
                             vertexLayout = getSharedShadowVertexLayout(vertexLayout);
                         }
-                        rhi::Pipeline* pipeline = drawBatch.material->getCachedPipeline(renderTag, vertexLayout);
+                        rhi::Pipeline* pipeline = batchMaterial->getCachedPipeline(renderTag, vertexLayout);
                         if (!pipeline)
                         {
-                            pipeline = createPipeline(rendererContext, *drawBatch.material, renderTag, vertexLayout);
-                            drawBatch.material->cachePipeline(renderTag, vertexLayout, pipeline);
+                            pipeline = createPipeline(rendererContext, *batchMaterial, renderTag, vertexLayout);
+                            batchMaterial->cachePipeline(renderTag, vertexLayout, pipeline);
                         }
                         if (pipeline != currentPipeline)
                         {
                             cmdList.bindPipeline(pipeline);
                             currentPipeline = pipeline;
+
+                            // 这一级 cascade 的 depth bias(见 ShadowDepth.slang 的 ShadowDepthBiasParams)——
+                            // pipeline 在同一级 cascade 内按材质切换时会重复发, 值不变, 无害, 不值得
+                            // 为了去重再加状态跟踪
+                            cmdList.setImmediateData(
+                                &pipeline->getLayout(),
+                                0,
+                                std::span<const uint8_t>(
+                                    reinterpret_cast<const uint8_t*>(&data.biases[i]),
+                                    sizeof(data.biases[i])
+                                )
+                            );
                         }
 
-                        if (drawBatch.material != prevMaterial)
+                        if (batchMaterial != prevMaterial)
                         {
                             // 共享 shader 的 pipeline layout 根本没有材质参数这个 set,即便材质
                             // 自己的 mParametersBindGroup 因为要给 Gbuffer 用而非空,这里也不能绑
-                            const rhi::BindGroup* parametersBindGroup = drawBatch.material->usesSharedGeometryShader(renderTag)
+                            const rhi::BindGroup* parametersBindGroup = batchMaterial->usesSharedGeometryShader(renderTag)
                                 ? nullptr
-                                : drawBatch.material->getParametersBindGroup();
+                                : batchMaterial->getParametersBindGroup();
                             if (parametersBindGroup)
                             {
                                 cmdList.setBindGroup(
@@ -232,19 +193,25 @@ namespace hyp
                                     {}
                                 );
                             }
-                            prevMaterial = drawBatch.material;
+                            prevMaterial = batchMaterial;
                         }
 
-                        if (drawBatch.geometry != prevGeometry)
+                        // set3 必须排在 set2 之后绑, 否则 set2 换了布局会让它失效
+                        if (&currentPipeline->getLayout() != instanceBindLayout)
                         {
-                            drawBatch.geometry->bind(cmdList);
-                            prevGeometry = drawBatch.geometry;
+                            const rhi::BindGroup& instanceBindGroup = data.scene->getDrawBindGroup(vertexLayout.getType());
+                            cmdList.setBindGroup(3, rhi::PipelineBindPoint::Graphics, &currentPipeline->getLayout(), &instanceBindGroup, {});
+                            instanceBindLayout = &currentPipeline->getLayout();
                         }
 
-                        drawBatch.geometry->draw(cmdList, drawBatch.sectionIndex, drawBatch.instanceCount, drawBatch.firstInstance);
-                    }
+                        if (batchDrawItem.geometry != prevGeometry)
+                        {
+                            batchDrawItem.bind(cmdList);
+                            prevGeometry = batchDrawItem.geometry;
+                        }
 
-                    drawBatchOffset += drawBatchCount[i];
+                        batchDrawItem.draw(cmdList, drawBatch.instanceCount, cascadeFirstInstance[i] + drawBatch.firstInstance);
+                    }
                 }
             },
             rg::PassFlags::Skip_Begin_Pass
@@ -261,18 +228,23 @@ namespace hyp
         auto shaderVariant = material.getOrCreateShaderVariant(renderTag, vertexLayout);
         auto& pipelineCache = rendererContext.getRenderBackend().getPipelineCache();
 
+        const rhi::BindGroupLayout* instanceLayout = &rendererContext.getDrawBindGroupLayout(vertexLayout.getType());
+
         const bool usesSharedGeometryShader = material.usesSharedGeometryShader(renderTag);
         const rhi::BindGroup* materialParameterBindGroup = usesSharedGeometryShader ? nullptr : material.getParametersBindGroup();
         auto* pipelineLayout = createRenderPassPipelineLayout(
             rendererContext,
             nullptr,
-            materialParameterBindGroup ? &materialParameterBindGroup->getLayout() : nullptr
+            materialParameterBindGroup ? &materialParameterBindGroup->getLayout() : nullptr,
+            instanceLayout
         );
 
         PipelineCache::GraphicsKey pipelineKey;
         // 这里用正向 Z 的 Less, 不是其它 pass 统一使用的 reversed-Z Greater_Equal——阴影贴图独立
         // 于主相机深度约定, 沿用的是传统正向深度比较
         pipelineKey.pipelineState = PipelineStatePresets::opaqueMesh(material.getAttributes().doubleSided, rhi::CompareOp::Less);
+        // Keeps upstream casters (DirectionalLightProxy.cpp's casterCullingFrustum) from being near-clipped.
+        pipelineKey.pipelineState.depthClampEnable = 1;
         pipelineKey.pipelineState.shader = shaderVariant;
         pipelineKey.pipelineState.vertexLayout = vertexLayout;
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<rhi::TextureFormat::D16_UNORM>();

@@ -1,8 +1,9 @@
 #include "Window.h"
 #include <Core/Common/LogSystem.h>
+#include <stdexcept>
 
 #include <GLFW/glfw3.h>
-#ifdef WIN32
+#ifdef _WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
 #elif defined(__linux__)
 // 实际用 X11 还是 Wayland 是运行时探测出来的(见构造函数),两边的 native API 都要暴露出来
@@ -10,9 +11,38 @@
 #define GLFW_EXPOSE_NATIVE_WAYLAND
 #endif
 #include <GLFW/glfw3native.h>
+#if defined(__linux__) && defined(HYP_HAS_XCB)
+#include <X11/Xlib-xcb.h>
+#include <xcb/xcb.h>
+#endif
 
 namespace hyp
 {
+    static bool initializeGlfw()
+    {
+#ifdef _WIN32
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WIN32);
+        return glfwInit() == GLFW_TRUE;
+#elif defined(__linux__)
+        constexpr int platformPriority[] = {
+            GLFW_PLATFORM_WAYLAND,
+            GLFW_PLATFORM_X11,
+        };
+        for (int platform : platformPriority)
+        {
+            if (glfwPlatformSupported(platform) != GLFW_TRUE)
+                continue;
+
+            glfwInitHint(GLFW_PLATFORM, platform);
+            if (glfwInit() == GLFW_TRUE)
+                return true;
+        }
+        return false;
+#else
+        return glfwInit() == GLFW_TRUE;
+#endif
+    }
+
     static std::unordered_map<void*, Window*> gWindowMap;
 
     static std::unordered_map<void*, std::function<void(Window*, int, int)>> gResizeCallbackMap;
@@ -99,24 +129,26 @@ namespace hyp
     Window::Window(int width, int height, const std::string& title) :
         mTitle(title)
     {
-        if (gWindowMap.size() == 0)
+        const bool isFirstWindow = gWindowMap.empty();
+        if (isFirstWindow)
         {
-            glfwInit();
+            if (!initializeGlfw())
+                throw std::runtime_error("Failed to initialize GLFW with a supported windowing system");
+
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-#ifdef _WIN32
-            glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_WIN32);
-#elif defined(__linux__)
-            if (glfwPlatformSupported(GLFW_PLATFORM_WAYLAND))
-                glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
-            else
-                glfwWindowHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
-#endif
             glfwSetJoystickCallback(joystickCallback);
         }
 
         mWindow = glfwCreateWindow(width, height, mTitle.c_str(), nullptr, nullptr);
+        if (!mWindow)
+        {
+            if (isFirstWindow)
+                glfwTerminate();
+            throw std::runtime_error("Failed to create GLFW window");
+        }
+
         mFramebufferSize.store(uint2{ width, height }, std::memory_order_release);
-        glfwSetWindowSizeCallback((GLFWwindow*)mWindow, resizeCallback);
+        glfwSetFramebufferSizeCallback((GLFWwindow*)mWindow, resizeCallback);
         glfwSetMouseButtonCallback((GLFWwindow*)mWindow, mouseButtonCallback);
         glfwSetCursorPosCallback((GLFWwindow*)mWindow, cursorPositionCallback);
         glfwSetScrollCallback((GLFWwindow*)mWindow, scrollCallback);
@@ -141,9 +173,21 @@ namespace hyp
 #ifdef _WIN32
         return WindowingSystem::Win32;
 #elif defined(__linux__)
-        return glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? WindowingSystem::Wayland : WindowingSystem::X11;
+        switch (glfwGetPlatform())
+        {
+        case GLFW_PLATFORM_WAYLAND:
+            return WindowingSystem::Wayland;
+        case GLFW_PLATFORM_X11:
+#ifdef HYP_HAS_XCB
+            if (XGetXCBConnection(glfwGetX11Display()) != nullptr)
+                return WindowingSystem::Xcb;
+#endif
+            return WindowingSystem::Xlib;
+        default:
+            return WindowingSystem::Unknown;
+        }
 #else
-        return WindowingSystem::Unknow;
+        return WindowingSystem::Unknown;
 #endif
     }
 
@@ -251,6 +295,20 @@ namespace hyp
 #ifdef __linux__
         // ::Window 显式取全局命名空间下 X11 的 Window(XID)类型,避免和 hyp::Window 这个类同名冲突
         *(::Window*)(window) = glfwGetX11Window((GLFWwindow*)mWindow);
+#endif
+    }
+
+    void Window::getXcbConnection(void* connection) const
+    {
+#if defined(__linux__) && defined(HYP_HAS_XCB)
+        *(xcb_connection_t**)(connection) = XGetXCBConnection(glfwGetX11Display());
+#endif
+    }
+
+    void Window::getXcbHandle(void* window) const
+    {
+#if defined(__linux__) && defined(HYP_HAS_XCB)
+        *(xcb_window_t*)(window) = static_cast<xcb_window_t>(glfwGetX11Window((GLFWwindow*)mWindow));
 #endif
     }
 

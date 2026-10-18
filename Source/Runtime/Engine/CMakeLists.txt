@@ -8,7 +8,6 @@ target_link_libraries (Engine
         Platform
         RenderBase
         Renderer
-        ispc_texcomp::ispc_texcomp
         Jolt::Jolt
 )
 
@@ -16,4 +15,6 @@ target_link_libraries (Engine
 # 也是靠 REGISTER_CLASS 自注册的,同样需要强制整库链接。
 if (MSVC)
     target_link_options(Engine INTERFACE "/WHOLEARCHIVE:$<TARGET_FILE:Engine>")
+else()
+    target_link_options(Engine INTERFACE "-Wl,--whole-archive" "$<TARGET_FILE:Engine>" "-Wl,--no-whole-archive")
 endif()

@@ -1,14 +1,18 @@
 #pragma once
 #include <atomic>
+#include <concepts>
 
 namespace hyp
 {
+    class Object;
+
     // NOTE: 我们需要考虑是否使用Refable作为Object类型的基类, 后者完全可以使用标志清除法做GC
 
     class Refable
     {
         template <typename T>
         friend class TRef;
+        friend void rebuildObject(Object* object) noexcept;
     public:
         Refable(const Refable&) = delete;
         Refable& operator=(const Refable&) = delete;
@@ -44,8 +48,8 @@ namespace hyp
         }
     };
 
-    class Object;
     void destroyObject(Object* object) noexcept;
+    void rebuildObject(Object* object) noexcept;
 
     template <typename T>
     class TRef

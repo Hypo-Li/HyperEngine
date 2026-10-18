@@ -20,11 +20,12 @@ Texture2D<float4> MultiScatteringLutTexture;
 
 [[vk::binding(4, 2)]]
 [format("rgba16f")]
-WTexture2DArray<float4> SkyCubemapImage;
+RWTexture2DArray<float4> SkyCubemapImage;
 
 struct PushConstants
 {
     WorldCoord captureOrigin;
+    uint hasBackground;
 };
 [[vk::push_constant]]
 PushConstants PC;
@@ -43,13 +44,17 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
 
     float3 worldDir = faceUVToCubemapDir(globalID.z, uv);
 
+    float3 background = PC.hasBackground != 0 ? SkyCubemapImage[globalID].rgb : float3(0.0);
+
     float3 worldPos = getWorldPos(Atmosphere, PC.captureOrigin);
+    bool intersectGround = rayIntersectSphere(worldPos, worldDir, float4(0, 0, 0, Atmosphere.bottomRadiusKm)) >= 0.0;
     if (!moveToTopAtmosphere(Atmosphere, worldPos, worldDir))
     {
-        SkyCubemapImage.Store(globalID, float4(0.0, 0.0, 0.0, 1.0));
+        SkyCubemapImage[globalID] = float4(background, 1.0);
         return;
     }
     float3 lum, fms, trans;
     rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, Atmosphere.sun0Direction, 0.3, 30.0, 9000000.0, lum, fms, trans);
-    SkyCubemapImage.Store(globalID, float4(lum, 1.0));
+    float transmittance = intersectGround ? 0.0 : dot(trans, float3(1.0 / 3.0));
+    SkyCubemapImage[globalID] = float4(background * transmittance + lum, 1.0);
 }

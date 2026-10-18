@@ -17,6 +17,10 @@ namespace hyp
         uint32_t timeWrapCount;
         float deltaTime;
         uint32_t frameIndex;
+        float prevWrappedTime;
+        uint32_t prevTimeWrapCount;
+        uint32_t padding0;
+        uint32_t padding1;
     };
 
     class RenderBackend;

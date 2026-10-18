@@ -25,12 +25,11 @@ WTexture2D<float4> SkyViewLutImage;
 [numthreads(8, 8, 1)]
 void ComputeMain(uint3 globalID : SV_DispatchThreadID)
 {
-    ViewData viewData = sViewData[0];
     float2 uv = (globalID.xy + 0.5) / float2(192, 104);
-    float3 worldPos = getWorldPos(Atmosphere, viewData.cameraOrigin);
+    float3 worldPos = getWorldPos(Atmosphere, uViewData.cameraOrigin);
     float viewHeight = length(worldPos);
-    float viewZenithCos, lightViewCos;
-    uvToSkyViewLutParameters(Atmosphere, viewHeight, uv, viewZenithCos, lightViewCos);
+    float viewZenithCos, lightViewCos, lightViewSin;
+    uvToSkyViewLutParameters(Atmosphere, viewHeight, uv, viewZenithCos, lightViewCos, lightViewSin);
 
     float3 upVector = worldPos / viewHeight;
     float lightZenithCos = dot(upVector, Atmosphere.sun0Direction);
@@ -39,7 +38,7 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     float viewZenithSin = sqrt(max(1.0 - viewZenithCos * viewZenithCos, 0.0));
     float3 worldDir;
     worldDir.x = viewZenithSin * lightViewCos;
-    worldDir.y = viewZenithSin * sqrt(max(1.0 - lightViewCos * lightViewCos, 0.0));
+    worldDir.y = viewZenithSin * lightViewSin;
     worldDir.z = viewZenithCos;
 
     worldPos = float3(0.0, 0.0, viewHeight);
@@ -50,5 +49,5 @@ void ComputeMain(uint3 globalID : SV_DispatchThreadID)
     }
     float3 lum, fms, trans;
     rayMarchAtmosphere(Atmosphere, LutSampler, TransmittanceLutTexture, MultiScatteringLutTexture, worldPos, worldDir, lightDir, 0.3, 30.0, 9000000.0, lum, fms, trans);
-    SkyViewLutImage.Store(globalID.xy, float4(lum, 1.0));
+    SkyViewLutImage.Store(globalID.xy, float4(lum, dot(trans, float3(1.0 / 3.0))));
 }

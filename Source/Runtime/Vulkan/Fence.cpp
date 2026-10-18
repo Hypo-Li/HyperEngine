@@ -24,7 +24,11 @@ namespace hyp::vk
     uint64_t Fence::getCompletedValue() const
     {
         uint64_t value = 0;
-        VkResult result = vkGetSemaphoreCounterValue(getVkDevice().getHandle(), mSemaphore, &value);
+        VkResult result = getVkDevice().getDispatch().getSemaphoreCounterValue(
+            getVkDevice().getHandle(),
+            mSemaphore,
+            &value
+        );
         assert(result == VK_SUCCESS);
         return value;
     }
@@ -37,6 +41,10 @@ namespace hyp::vk
         waitInfo.pSemaphores = &mSemaphore;
         waitInfo.pValues = &value;
 
-        vkWaitSemaphores(getVkDevice().getHandle(), &waitInfo, timeout);
+        getVkDevice().getDispatch().waitSemaphores(
+            getVkDevice().getHandle(),
+            &waitInfo,
+            timeout
+        );
     }
 }

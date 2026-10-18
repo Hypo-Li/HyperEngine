@@ -172,8 +172,61 @@ namespace hyp
         return nullptr;
     }
 
-    void AssetManager::moveAsset(Asset* asset, const std::string& newPath)
+    bool AssetManager::moveAsset(Asset* asset, const std::string& newPath)
     {
+        if (!asset || mPathAssetMap.contains(newPath))
+            return false; // 目标路径已被占用——不能指望 std::filesystem::rename 帮忙挡,
+                           // Windows 上普通文件的 rename 是允许静默覆盖已存在目标的
+
+        std::filesystem::path newPhysicalPath = convertAssetPathToPhysicalPath(newPath);
+        std::error_code ec;
+        std::filesystem::rename(asset->mPhysicalPath, newPhysicalPath, ec);
+        if (ec)
+            return false;
+
+        mPathAssetMap.erase(asset->mPath);
+        asset->mPath = newPath;
+        asset->mPhysicalPath = newPhysicalPath;
+        asset->refreshNameFromPath();
+        mPathAssetMap[newPath] = asset;
+        return true;
+    }
+
+    bool AssetManager::renameDirectory(const std::string& oldDirPath, const std::string& newDirPath)
+    {
+        std::filesystem::path oldPhysicalPath = convertAssetDirectoryToPhysicalPath(oldDirPath);
+        std::filesystem::path newPhysicalPath = convertAssetDirectoryToPhysicalPath(newDirPath);
+        if (oldPhysicalPath.empty() || newPhysicalPath.empty() || std::filesystem::exists(newPhysicalPath))
+            return false;
+
+        std::error_code ec;
+        std::filesystem::rename(oldPhysicalPath, newPhysicalPath, ec);
+        if (ec)
+            return false;
+
+        // 物理上目录已经连内容一起搬过去了, 这里只需要把内存里所有以 oldDirPath 为前缀的
+        // 资产路径统一改写成 newDirPath 前缀——先收集一遍再改, 不在遍历 mAssets 的同时改
+        // mPathAssetMap(改写路径不影响 mAssets 本身的顺序/内容, 这里其实边遍历边改也安全,
+        // 但先收集更不容易在以后改动时踩坑)。
+        std::string oldPrefix = oldDirPath + "/";
+        std::string newPrefix = newDirPath + "/";
+        std::vector<Asset*> affected;
+        for (const std::unique_ptr<Asset>& assetPtr : mAssets)
+        {
+            if (assetPtr->getPath().starts_with(oldPrefix))
+                affected.push_back(assetPtr.get());
+        }
+
+        for (Asset* asset : affected)
+        {
+            std::string newAssetPath = newPrefix + asset->getPath().substr(oldPrefix.size());
+            mPathAssetMap.erase(asset->getPath());
+            asset->mPath = newAssetPath;
+            asset->mPhysicalPath = convertAssetPathToPhysicalPath(newAssetPath);
+            asset->refreshNameFromPath();
+            mPathAssetMap[newAssetPath] = asset;
+        }
+        return true;
     }
 
     void AssetManager::copyAsset(Asset* asset, const std::string& newPath)
@@ -252,19 +305,44 @@ namespace hyp
             return {};
         }
 
-        std::filesystem::path physicalPath(relative);
+        std::filesystem::path physicalPath(std::u8string(relative.begin(), relative.end()));
         physicalPath += kAssetExtension;
 
         return *root / physicalPath;
+    }
+
+    std::filesystem::path AssetManager::convertAssetDirectoryToPhysicalPath(const std::string& virtualDirPath) const
+    {
+        if (virtualDirPath == "Engine")
+            return mEngineAssetRoot;
+        if (virtualDirPath == "Project")
+            return mProjectAssetRoot;
+        if (virtualDirPath.starts_with(kEnginePrefix))
+        {
+            std::string relative = virtualDirPath.substr(kEnginePrefix.size());
+            return mEngineAssetRoot / std::filesystem::path(std::u8string(relative.begin(), relative.end()));
+        }
+        if (virtualDirPath.starts_with(kProjectPrefix))
+        {
+            std::string relative = virtualDirPath.substr(kProjectPrefix.size());
+            return mProjectAssetRoot / std::filesystem::path(std::u8string(relative.begin(), relative.end()));
+        }
+        return {};
     }
 
     std::string AssetManager::convertPhysicalPathToAssetPath(const std::filesystem::path& physicalPath)
     {
         std::filesystem::path relative;
         if (tryMakeRelative(physicalPath, mEngineAssetRoot, relative))
-            return normalizeAssetPath(std::string(kEnginePrefix) + relative.replace_extension().generic_string());
+        {
+            std::u8string u8 = relative.replace_extension().generic_u8string();
+            return normalizeAssetPath(std::string(kEnginePrefix) + std::string(u8.begin(), u8.end()));
+        }
         if (tryMakeRelative(physicalPath, mProjectAssetRoot, relative))
-            return normalizeAssetPath(std::string(kProjectPrefix) + relative.replace_extension().generic_string());
+        {
+            std::u8string u8 = relative.replace_extension().generic_u8string();
+            return normalizeAssetPath(std::string(kProjectPrefix) + std::string(u8.begin(), u8.end()));
+        }
 
         assert(false && "physical path is not under the engine or project asset root");
         return {};

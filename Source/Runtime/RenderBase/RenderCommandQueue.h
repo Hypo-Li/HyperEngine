@@ -56,9 +56,8 @@ namespace hyp
         }
 
         static constexpr size_t kMaxAlignment = alignof(std::max_align_t);
-        static constexpr size_t kHeaderSize = (sizeof(CommandHeader) + kMaxAlignment - 1) & ~(kMaxAlignment - 1);
-
     public:
+        static constexpr size_t kHeaderSize = (sizeof(CommandHeader) + kMaxAlignment - 1) & ~(kMaxAlignment - 1);
         explicit RenderCommandQueue(size_t bufferSize);
 
         RenderCommandQueue(const RenderCommandQueue&) = delete;

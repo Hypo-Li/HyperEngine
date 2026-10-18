@@ -30,6 +30,7 @@ namespace hyp::rhi
     enum class TextureSampleType
     {
         Float,
+        Unfilterable_Float,
         Uint,
         Sint,
         Depth,
@@ -38,6 +39,7 @@ namespace hyp::rhi
     enum class SamplerBindingType
     {
         Filtering,
+        Non_Filtering,
         Comparison,
     };
 
@@ -90,6 +92,7 @@ namespace hyp::rhi
         TextureViewType textureViewType = TextureViewType::Texture_View_2D;
         TextureFormat storageTextureFormat = TextureFormat::Undefined;
         TextureSampleType textureSampleType = TextureSampleType::Float;
+        bool multiSample = false;
         SamplerBindingType samplerBindingType = SamplerBindingType::Filtering;
         ShaderStage stageFlags = ShaderStage::None;
 
@@ -103,6 +106,7 @@ namespace hyp::rhi
             entry.textureViewType = textureViewType;
             entry.storageTextureFormat = storageTextureFormat;
             entry.textureSampleType = textureSampleType;
+            entry.multiSample = multiSample;
             entry.samplerBindingType = samplerBindingType;
             entry.stageFlags = stageFlags;
             return entry;

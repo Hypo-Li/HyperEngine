@@ -33,10 +33,17 @@ struct AtmosphereParameters
     float3 sun1Intensity;
 };
 
-float3 getWorldPos(in AtmosphereParameters atmosphere, in WorldCoord localPos)
+// 不做贴地 clamp 的版本——供只需要"这个点真实在哪"的高度/阴影测试调用(现推曲面点世界坐标、
+// 直接读 texel 自己的 WorldCoord 等), clamp 会把这类调用的输入悄悄拍到地表线上, 得到错误结果
+float3 getWorldPosUnclamped(in AtmosphereParameters atmosphere, in WorldCoord localPos)
 {
     float3 localPosKm = localPos.tile * (WORLD_TILE_SIZE * 0.001) + localPos.offset * 0.001;
-    float3 worldPos = localPosKm + float3(0, 0, atmosphere.bottomRadiusKm);
+    return localPosKm + float3(0, 0, atmosphere.bottomRadiusKm);
+}
+
+float3 getWorldPos(in AtmosphereParameters atmosphere, in WorldCoord localPos)
+{
+    float3 worldPos = getWorldPosUnclamped(atmosphere, localPos);
     float viewHeight = length(worldPos);
     float3 upVector = worldPos / viewHeight;
     return upVector * max(viewHeight, atmosphere.bottomRadiusKm + 0.005);
@@ -115,7 +122,7 @@ void transmittanceLutParametersToUV(in AtmosphereParameters atmosphere, float vi
     uv = float2(u, v); 
 }
 
-void uvToSkyViewLutParameters(in AtmosphereParameters atmosphere, float viewHeight, float2 uv, out float viewZenithCos, out float lightViewCos)
+void uvToSkyViewLutParameters(in AtmosphereParameters atmosphere, float viewHeight, float2 uv, out float viewZenithCos, out float lightViewCos, out float lightViewSin)
 {
     static constexpr float4 sizeAndInvSize = float4(192, 104, 1.0 / 192.0, 1.0 / 104.0);
     uv = (uv - 0.5 * sizeAndInvSize.zw) * (sizeAndInvSize.xy / (sizeAndInvSize.xy - 1.0));
@@ -138,9 +145,16 @@ void uvToSkyViewLutParameters(in AtmosphereParameters atmosphere, float viewHeig
         coord *= coord;
         viewZenithCos = cos(zenithHorizonAngle + beta * coord);
     }
-    float coord = uv.x;
-    coord *= coord;
-    lightViewCos = -(coord * 2.0 - 1.0);
+    // uv.x == sin(theta/2), theta 是光源方向和视线在水平面上的夹角(skyViewLutParametersToUV 里的
+    // 正向推导)。lightViewCos = cos(theta) 直接用半角公式展开, 和以前等价; 但 lightViewSin = sin(theta)
+    // 不能像 SkyViewLut.slang 曾经那样再用 sqrt(1 - lightViewCos * lightViewCos) 反解——lightViewCos
+    // 在太阳附近趋近于 1, 这个反解是两个接近 1 的数相减, 在 LUT 分辨率下会灾难性抵消精度, 表现为
+    // 太阳周围一圈圈的噪声环。这里直接用半角 sin/cos 相乘给出 sin(theta), halfAngleSin(=uv.x) 在
+    // 太阳附近趋近于 0, 不存在这个问题。
+    float halfAngleSin = uv.x;
+    float halfAngleCos = sqrt(max(1.0 - halfAngleSin * halfAngleSin, 0.0));
+    lightViewCos = 1.0 - 2.0 * halfAngleSin * halfAngleSin;
+    lightViewSin = 2.0 * halfAngleSin * halfAngleCos;
 }
 
 void skyViewLutParametersToUV(in AtmosphereParameters atmosphere, bool intersectGround, float viewZenithCos, float lightViewCos, float viewHeight, out float2 uv)
@@ -174,6 +188,25 @@ float3 getTransmittance(in AtmosphereParameters atmosphere, in Texture2D transmi
     float2 uv;
     transmittanceLutParametersToUV(atmosphere, height, lightZenithCos, uv);
     return transmittanceLut.SampleLevel(sampler, uv, 0.0).rgb;
+}
+
+// 太阳视半径(角度)——太阳是有角大小的圆盘光源, 不是点光源, 贴地平线时应该有一段半影而不是
+// 硬边界, 见下面 getEarthShadow() 用它做渐变宽度。跟 Atmosphere.slang 里画太阳本体圆盘用的是
+// 同一个值
+static constexpr float kSunAngularRadiusDeg = 0.53;
+
+// 光源方向和着色点上轴夹角超过 90°+太阳视半径时完全在阴影里, 小于 90°-太阳视半径时完全见光,
+// 中间线性渐变, 模拟太阳圆盘被地平线逐渐遮住的半影(TransmittanceLut 只覆盖"从这个高度往上
+// 能看到天空"的上半球, getTransmittance() 本身不做地平线判断, 需要调用方自己测, 见该函数
+// 调用方注释)。给 DirectLighting.slang/CardDirectLighting.slang/Translucent.slang 三个直接
+// 光照 pass 用, 着色点高度相对 bottomRadiusKm(~6371km 量级)可忽略不计, 不需要
+// rayMarchAtmosphere() 里那套按实际球面几何求交的曲率修正(那是给可能远高于地表的天空
+// ray-march 采样点用的)。cos 在 90° 附近对角度几乎线性(d(cosθ)/dθ|_90°=-1), 太阳视半径只有
+// 零点几度, 直接对 dot 值线性插值等价于对夹角本身线性插值, 不需要求 acos
+float getEarthShadow(float3 lightDirWS, float3 upVector)
+{
+    float sinHalfApex = sin(kSunAngularRadiusDeg * DEG_TO_RAD);
+    return saturate((dot(lightDirWS, upVector) + sinHalfApex) / (2.0 * sinHalfApex));
 }
 
 float3 getMultiScattering(in AtmosphereParameters atmosphere, in Texture2D multiScatteringLut, in SamplerState sampler, float lightZenithCos, float height)

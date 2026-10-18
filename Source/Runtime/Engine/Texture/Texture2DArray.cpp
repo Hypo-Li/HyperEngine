@@ -1,7 +1,7 @@
 #include "Texture2DArray.h"
 
 #include "../Context.h"
-#include <RenderBase/RenderSystem.h>
+#include <RenderBase/RenderFrontend.h>
 #include <RenderBase/TextureProxy.h>
 
 namespace hyp
@@ -21,19 +21,14 @@ namespace hyp
         uint32_t height,
         uint32_t layers,
         PixelFormat format,
-        bool isSRGB,
-        CompressionPreset compressionPreset,
-        bool generateMips)
+        uint32_t mipLevels)
     {
         Description description;
         description.format = format;
-        description.isSRGB = isSRGB;
-        description.compressionPreset = compressionPreset;
-        description.generateMips = generateMips;
         description.width = width;
         description.height = height;
         description.depth = 1;
-        description.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+        description.mipLevels = computeMipLevels(std::max(width, height), mipLevels);
         description.arrayLayers = layers;
         setDescription(description);
     }
@@ -43,11 +38,12 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [handle,
-            desc = getDescription()](FrameContext& context)
+            desc = getDescription(),
+            rhiFormat = getRHITextureFormat()](FrameContext& context)
             {
                 rhi::TextureDesc textureDesc;
-                textureDesc.type = rhi::TextureType::Texture_2D;
-                textureDesc.format = convertToRHITextureFormat(desc.format, desc.compressionPreset, desc.compressionFormatFamily, desc.isSRGB);
+                textureDesc.type = rhi::TextureType::Texture_2D_Array;
+                textureDesc.format = rhiFormat;
                 textureDesc.extent = { desc.width, desc.height, 1 };
                 textureDesc.mipCount = desc.mipLevels;
                 textureDesc.layerCount = desc.arrayLayers;
@@ -61,6 +57,7 @@ namespace hyp
     template <> Type* Reflection::createType<Texture2DArray>()
     {
         auto c = new TClass<Texture2DArray, Texture>("Texture2DArray");
+        c->setDisplayName("Texture 2D Array");
         return c;
     }
 

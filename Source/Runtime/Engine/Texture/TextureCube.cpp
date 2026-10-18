@@ -2,7 +2,7 @@
 
 #include "../Context.h"
 #include <Core/Math/Math.h>
-#include <RenderBase/RenderSystem.h>
+#include <RenderBase/RenderFrontend.h>
 #include <RenderBase/TextureProxy.h>
 
 #include <algorithm>
@@ -26,22 +26,15 @@ namespace hyp
     void TextureCube::initialize(
         uint32_t width,
         PixelFormat format,
-        bool isSRGB,
-        CompressionPreset compressionPreset,
-        bool generateMips,
         uint32_t mipLevels
     )
     {
         Description description;
         description.format = format;
-        description.isSRGB = isSRGB;
-        description.compressionPreset = compressionPreset;
-        description.generateMips = generateMips;
         description.width = width;
         description.height = width;
         description.depth = 1;
-        uint32_t fullMipCount = static_cast<uint32_t>(std::floor(std::log2(width))) + 1;
-        description.mipLevels = mipLevels == 0 ? fullMipCount : std::min(mipLevels, fullMipCount);
+        description.mipLevels = computeMipLevels(width, mipLevels);
         description.arrayLayers = 6;
         description.isCube = true;
         setDescription(description);
@@ -52,11 +45,12 @@ namespace hyp
         auto& renderFrontend = Context::get().getRenderFrontend();
         renderFrontend.enqueueLambda(
             [handle,
-            desc = getDescription()](FrameContext& context)
+            desc = getDescription(),
+            rhiFormat = getRHITextureFormat()](FrameContext& context)
             {
                 rhi::TextureDesc textureDesc;
                 textureDesc.type = rhi::TextureType::Texture_Cube;
-                textureDesc.format = convertToRHITextureFormat(desc.format, desc.compressionPreset, desc.compressionFormatFamily, desc.isSRGB);
+                textureDesc.format = rhiFormat;
                 textureDesc.extent = { desc.width, desc.height, 1 };
                 textureDesc.mipCount = desc.mipLevels;
                 textureDesc.layerCount = desc.arrayLayers;
@@ -70,6 +64,7 @@ namespace hyp
     template <> Type* Reflection::createType<TextureCube>()
     {
         auto c = new TClass<TextureCube, Texture>("TextureCube");
+        c->setDisplayName("Texture Cube");
         return c;
     }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <variant>
 
 #include <Core/Math/Vector.h>
@@ -16,10 +17,23 @@ namespace hyp
     {
         float3x4 worldToViewRot;
         WorldCoord cameraOrigin;
+        // 当时域抗锯齿开启时带 jitter
         float4x4 viewToClip;
         float4x4 clipToView;
+        // 任何时候都不带 jitter
+        float4x4 viewToClipUnjittered;
+        float4x4 clipToViewUnjittered;
         float4 viewport;
         float4 resolution;
+        float4 jitterOffset;
+        float3x4 prevWorldToViewRot;
+        WorldCoord prevCameraOrigin;
+        float4x4 prevViewToClipUnjittered;
+        float4x4 prevClipToViewUnjittered;
+        float preExposure;
+        float oneOverPreExposure;
+        float prevPreExposure;
+        float padding0;
     };
 
     enum class OutputRouting
@@ -38,6 +52,23 @@ namespace hyp
             uint32_t renderMask,
             const double4x4& viewMatrix,
             const float4x4& projectionMatrix,
+            float4 viewport,
+            HString finalRTName,
+            OutputRouting outputRouting,
+            float2 jitterOffset = float2(0.0f, 0.0f),
+            const std::optional<double4x4>& prevViewMatrix = std::nullopt,
+            const std::optional<float4x4>& prevProjectionMatrix = std::nullopt,
+            float preExposure = 1.0f,
+            float prevPreExposure = 1.0f
+        );
+
+        SceneView(
+            uint32_t viewId,
+            uint32_t cullingMask,
+            uint32_t renderMask,
+            const double4x4& viewMatrix,
+            const float4x4& projectionMatrix,
+            const Frustumd& cullingFrustum,
             float4 viewport,
             HString finalRTName,
             OutputRouting outputRouting
@@ -78,7 +109,17 @@ namespace hyp
             return mFinalRTName;
         }
 
+        OutputRouting getOutputRouting() const noexcept
+        {
+            return mOutputRouting;
+        }
+
         ViewData makeViewData() const noexcept;
+
+        float getPreExposure() const noexcept
+        {
+            return mPreExposure;
+        }
 
     private:
         uint32_t mViewId;
@@ -93,10 +134,26 @@ namespace hyp
         float4 mViewport;
         HString mFinalRTName;
         OutputRouting mOutputRouting;
+        float2 mJitterOffset;
+
+        double3 mPrevCameraOrigin;
+        float3x3 mPrevWorldToViewRot;
+        float4x4 mPrevProjectionMatrix;
+        float mPreExposure;
+        float mPrevPreExposure;
+        float4x4 mViewToClip;
     };
 
     class CameraProxy;
     class DirectionalLightProxy;
+
+    using CameraViewSource = const CameraProxy*;
+
+    struct CascadeShadowViewSource
+    {
+        const DirectionalLightProxy* directionalLight;
+        const CameraProxy* camera;
+    };
 
     class SceneViewGroup
     {
@@ -107,36 +164,19 @@ namespace hyp
             Cascade_Shadow,
         };
 
-        using Source = std::variant<
-            std::monostate,
-            const CameraProxy*,
-            const DirectionalLightProxy*
+        using ViewSource = std::variant<
+            CameraViewSource,
+            CascadeShadowViewSource
         >;
 
-        SceneViewGroup(Type type, std::vector<SceneView>&& sceneViews, Source source = std::monostate{}) :
-            mType(type),
-            mSceneViews(std::move(sceneViews)),
-            mSource(source)
-        {
-        }
+        SceneViewGroup(Type type, std::vector<SceneView>&& sceneViews, ViewSource viewSource);
 
         SceneViewGroup(const SceneViewGroup&) = delete;
         SceneViewGroup& operator=(const SceneViewGroup&) = delete;
 
-        SceneViewGroup(SceneViewGroup&& other) noexcept :
-            mType(other.mType),
-            mSceneViews(std::move(other.mSceneViews)),
-            mSource(other.mSource)
-        {
-        }
+        SceneViewGroup(SceneViewGroup&& other) noexcept;
 
-        SceneViewGroup& operator=(SceneViewGroup&& other) noexcept
-        {
-            std::swap(mType, other.mType);
-            std::swap(mSceneViews, other.mSceneViews);
-            std::swap(mSource, other.mSource);
-            return *this;
-        }
+        SceneViewGroup& operator=(SceneViewGroup&& other) noexcept;
 
         Type getType() const noexcept
         {
@@ -149,17 +189,15 @@ namespace hyp
         }
 
         template <typename T>
-        const T* getSource() const
+        const T getViewSource() const
         {
-            if (const auto* ptr = std::get_if<const T*>(&mSource))
-                return *ptr;
-            return nullptr;
+            return std::get<T>(mViewSource);
         }
 
     private:
         Type mType;
         std::vector<SceneView> mSceneViews;
-        Source mSource;
+        ViewSource mViewSource;
     };
 
     class ViewDataManager
@@ -168,6 +206,18 @@ namespace hyp
         ViewDataManager(RenderBackend& renderBackend);
 
         ~ViewDataManager() = default;
+
+        static TRef<rhi::BindGroupLayout> createBindGroupLayout(BindGroupLayoutCache& cache);
+
+        const rhi::BindGroupLayout& getBindGroupLayout() const noexcept
+        {
+            return *mBindGroupLayout;
+        }
+
+        const rhi::BindGroup& getBindGroup() const noexcept
+        {
+            return *mBindGroup;
+        }
 
         uint32_t getViewDataAlignedSize() const noexcept
         {
@@ -189,7 +239,7 @@ namespace hyp
         void releaseViewId(uint32_t viewId);
 
         void updateViewData(
-            rhi::CommandList& cmd,
+            rhi::CommandList& cmdList,
             std::span<const uint32_t> viewIds,
             std::span<const ViewData> viewData
         );
@@ -198,9 +248,11 @@ namespace hyp
         RenderBackend& mRenderBackend;
         uint32_t mViewDataAlignedSize = 0;
         TRef<rhi::Buffer> mViewDataBuffer;
+        TRef<rhi::BindGroupLayout> mBindGroupLayout;
+        TRef<rhi::BindGroup> mBindGroup;
         uint32_t mNextViewId = 0;
         std::vector<uint32_t> mFreeViewIds;
         static constexpr uint32_t kMaxViews = 64;
-        static constexpr uint32_t kStorageBufferOffsetAlignment = 256;
+        static constexpr uint32_t kDynamicBufferOffsetAlignment = 256;
     };
 }

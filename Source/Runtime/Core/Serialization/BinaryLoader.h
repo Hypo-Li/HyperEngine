@@ -7,9 +7,7 @@ namespace hyp
     class BinaryLoader : public BinaryArchive
     {
     public:
-        BinaryLoader() = default;
-
-        bool isLoading() const override;
+        BinaryLoader(bool isCooking = false);
 
         void serialize(bool* value, size_t count = 1) override;
         void serialize(char* value, size_t count = 1) override;

@@ -4,22 +4,58 @@
 
 namespace hyp
 {
-    uint64_t Hash::compute(const void* data, size_t size, Algorithm algo) noexcept
+    template <> Type* Reflection::createType<uint128_t>()
+    {
+        auto s = new TStructure<uint128_t>("uint128_t");
+        s->addProperty("low", &uint128_t::low);
+        s->addProperty("high", &uint128_t::high);
+        return s;
+    }
+
+    uint32_t Hash::compute(const void* data, size_t size, Algorithm32 algo) noexcept
     {
         switch (algo)
         {
-        case Algorithm::FNV1a32: return fnv1a32(data, size);
-        case Algorithm::FNV1a64: return fnv1a64(data, size);
-        case Algorithm::Murmur3_32: return murmur3_32(data, size);
-        case Algorithm::Murmur3_64: return murmur3_64(data, size);
-        case Algorithm::xxHash32: return xxHash32(data, size);
-        case Algorithm::xxHash64: return xxHash64(data, size);
-        case Algorithm::CityHash64: return cityHash64(data, size);
+        case Algorithm32::FNV1a: return fnv1a32(data, size);
+        case Algorithm32::Murmur3: return murmur3_32(data, size);
+        case Algorithm32::xxHash: return xxHash32(data, size);
+        case Algorithm32::CityHash: return cityHash32(data, size);
         default: return 0;
         }
     }
 
-    uint64_t Hash::compute(std::string_view str, Algorithm algo) noexcept
+    uint32_t Hash::compute(std::string_view str, Algorithm32 algo) noexcept
+    {
+        return compute(str.data(), str.size(), algo);
+    }
+
+    uint64_t Hash::compute(const void* data, size_t size, Algorithm64 algo) noexcept
+    {
+        switch (algo)
+        {
+        case Algorithm64::FNV1a: return fnv1a64(data, size);
+        case Algorithm64::Murmur3: return murmur3_64(data, size);
+        case Algorithm64::xxHash: return xxHash64(data, size);
+        case Algorithm64::CityHash: return cityHash64(data, size);
+        default: return 0;
+        }
+    }
+
+    uint64_t Hash::compute(std::string_view str, Algorithm64 algo) noexcept
+    {
+        return compute(str.data(), str.size(), algo);
+    }
+
+    uint128_t Hash::compute(const void* data, size_t size, Algorithm128 algo) noexcept
+    {
+        switch (algo)
+        {
+        case Algorithm128::xxHash: return xxHash128(data, size);
+        default: return uint128_t{};
+        }
+    }
+
+    uint128_t Hash::compute(std::string_view str, Algorithm128 algo) noexcept
     {
         return compute(str.data(), str.size(), algo);
     }
@@ -60,6 +96,12 @@ namespace hyp
     uint64_t Hash::xxHash64(const void* data, size_t size) noexcept
     {
         return XXH64(data, size, 0);
+    }
+
+    uint128_t Hash::xxHash128(const void* data, size_t size) noexcept
+    {
+        XXH128_hash_t h = XXH3_128bits(data, size);
+        return uint128_t{ h.low64, h.high64 };
     }
 
     uint32_t Hash::murmur3_32(const void* data, size_t size) noexcept

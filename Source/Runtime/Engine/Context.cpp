@@ -15,11 +15,11 @@ namespace hyp
 
     Context::~Context()
     {
+        mPhysicsSystem = nullptr;
         mRenderTagRegistry = nullptr;
         mAssetManager = nullptr;
         mRendererContext = nullptr;
         mRenderFrontend = nullptr;
-        mSampleStateManager = nullptr;
         mInputSystem = nullptr;
     }
 }

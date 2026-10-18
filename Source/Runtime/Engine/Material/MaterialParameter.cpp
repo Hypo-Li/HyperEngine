@@ -1,6 +1,8 @@
 #include "MaterialParameter.h"
 
+#include "../Config.h"
 #include "../Context.h"
+#include <RenderBase/RenderFrontend.h>
 
 namespace hyp
 {
@@ -36,6 +38,13 @@ namespace hyp
         return s;
     }
 
+    template <> Type* Reflection::createType<SampledFont>()
+    {
+        auto s = new TStructure<SampledFont>("SampledFont");
+        s->addProperty("Font", &SampledFont::font);
+        return s;
+    }
+
     template <> Type* Reflection::createType<MaterialParameterValue>()
     {
         auto s = new TStructure<MaterialParameterValue>("MaterialParameterValue");
@@ -48,7 +57,16 @@ namespace hyp
         auto s = new TStructure<MaterialParameter>("MaterialParameter");
         s->addProperty("Name", &MaterialParameter::name);
         s->addProperty("Value", &MaterialParameter::value);
+        s->addProperty("Group", &MaterialParameter::group);
         return s;
+    }
+
+    std::pair<TextureProxyHandle, SamplerProxyHandle> makeTextureBinding(Texture& texture, const std::optional<SampleState>& sampleStateOverride)
+    {
+        SampleState sampleState = sampleStateOverride ? *sampleStateOverride : texture.getSampleState();
+        SamplerProxyHandle samplerProxyHandle = Context::get().getRenderFrontend().getOrCreateSamplerProxy(
+            makeSamplerDesc(sampleState, Context::get().getConfig().getGlobalSamplerSettings()));
+        return { texture.getOrCreateTextureProxy(), samplerProxyHandle };
     }
 
     void makeMaterialProxyParameters(
@@ -61,30 +79,54 @@ namespace hyp
         outTextureBindings.reserve(parameters.size());
         for (auto& parameter : parameters)
         {
+            if (parameter.value.getType() == MaterialParameterType::Font)
+            {
+                const Font& font = *parameter.value.get<SampledFont>().font.get();
+                Texture2DArray& pages = *font.getPages();
+                const FontParameterNames names = makeFontParameterNames(parameter.name);
+
+                auto& pagesParam = outProxyParameters.emplace_back();
+                pagesParam.type = MaterialParameterType::Texture_2D_Array;
+                pagesParam.name = names.pages;
+                outTextureBindings.emplace_back(makeTextureBinding(pages, std::nullopt));
+
+                auto& sdfTypeParam = outProxyParameters.emplace_back();
+                sdfTypeParam.type = MaterialParameterType::Int;
+                sdfTypeParam.name = names.sdfType;
+                sdfTypeParam.value = static_cast<int>(font.getSdfType());
+
+                auto& spreadUvParam = outProxyParameters.emplace_back();
+                spreadUvParam.type = MaterialParameterType::Float;
+                spreadUvParam.name = names.spreadUv;
+                spreadUvParam.value = font.getSpreadTexels() / static_cast<float>(pages.getDescription().width);
+                continue;
+            }
+
             auto& proxyParam = outProxyParameters.emplace_back();
             proxyParam.type = parameter.value.getType();
             proxyParam.name = parameter.name;
 
-            auto& sampleStateManager = Context::get().getSampleStateManager();
             parameter.value.visit(
-                [&proxyParam, &outTextureBindings, &sampleStateManager](auto&& value)
+                [&proxyParam, &outTextureBindings](auto&& value)
                 {
                     using ValueType = std::decay_t<decltype(value)>;
                     if constexpr (is_sampled_texture_v<ValueType>)
                     {
-                        TextureProxyHandle textureProxyHandle = value.texture->getOrCreateTextureProxy();
-                        SampleState sampleState = value.sampleStateOverride ?
-                            *value.sampleStateOverride : value.texture->getSampleState();
-                        SamplerProxyHandle samplerProxyHandle = sampleStateManager.getOrCreateSamplerProxy(sampleState);
-                        outTextureBindings.emplace_back(textureProxyHandle, samplerProxyHandle);
+                        outTextureBindings.emplace_back(makeTextureBinding(*value.texture.get(), value.sampleStateOverride));
                     }
-                    else
+                    else if constexpr (!std::is_same_v<ValueType, SampledFont>)
                     {
                         proxyParam.value = value;
                     }
                 }
             );
         }
+    }
+
+    FontParameterNames makeFontParameterNames(HString fontParameterName)
+    {
+        const std::string baseName(fontParameterName.toStringView());
+        return { fontParameterName, HString(baseName + "SdfType"), HString(baseName + "SpreadUv") };
     }
 
     void resolveTextureBindings(

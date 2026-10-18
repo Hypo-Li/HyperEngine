@@ -3,8 +3,9 @@
 
 namespace hyp
 {
-    PipelineCache::PipelineCache(const rhi::Device& device) :
-        mDevice(device)
+    PipelineCache::PipelineCache(const rhi::Device& device, BindGroupLayoutCache& bindGroupLayoutCache) :
+        mDevice(device),
+        mBindGroupLayoutCache(bindGroupLayoutCache)
     {
     }
 
@@ -16,7 +17,7 @@ namespace hyp
         return true;
     }
 
-    TRef<rhi::PipelineLayout> PipelineCache::getOrCreate(const PipelineLayoutKey& key)
+    TRef<rhi::PipelineLayout> PipelineCache::getOrCreateLayout(const PipelineLayoutKey& key)
     {
         auto it = mPipelineLayoutMap.find(key);
         if (it != mPipelineLayoutMap.end())
@@ -63,12 +64,36 @@ namespace hyp
 
     TRef<rhi::PipelineLayout> PipelineCache::createPipelineLayout(const PipelineLayoutKey& key)
     {
-        rhi::PipelineLayoutDesc pipelineLayoutDesc;
-        for (size_t i = 0; i < PipelineLayoutKey::kMaxBindGroupLayoutCount; ++i)
+        // 找最高的非空下标——中间(比如 set2 材质参数为空、set3 蒙皮不为空)不能留洞: 每个
+        // 后端的 pipeline layout 构造都要求 [0, setLayoutCount) 范围内每一项都是合法 handle,
+        // 不接受"跳过某个下标"这种表示法
+        int highestNonNullIndex = -1;
+        for (int i = static_cast<int>(PipelineLayoutKey::kMaxBindGroupLayoutCount) - 1; i >= 0; --i)
         {
-            if (key.bindGroupLayouts[i] == nullptr)
+            if (key.bindGroupLayouts[i] != nullptr)
+            {
+                highestNonNullIndex = i;
                 break;
-            pipelineLayoutDesc.bindGroupLayouts[i] = key.bindGroupLayouts[i];
+            }
+        }
+
+        // 内容寻址、全局共享的空 BindGroupLayout, 只用来填补最高非空下标之前的洞——不是
+        // "真的需要绑定什么", 纯粹是满足"每个下标都得有合法 handle"这条约束
+        TRef<rhi::BindGroupLayout> emptyLayout;
+
+        rhi::PipelineLayoutDesc pipelineLayoutDesc;
+        for (int i = 0; i <= highestNonNullIndex; ++i)
+        {
+            if (key.bindGroupLayouts[i] != nullptr)
+            {
+                pipelineLayoutDesc.bindGroupLayouts[i] = key.bindGroupLayouts[i];
+            }
+            else
+            {
+                if (!emptyLayout)
+                    emptyLayout = mBindGroupLayoutCache.getOrCreate({});
+                pipelineLayoutDesc.bindGroupLayouts[i] = emptyLayout.get();
+            }
         }
 
         return mDevice.createPipelineLayout(pipelineLayoutDesc);
@@ -91,9 +116,9 @@ namespace hyp
         pipelineDesc.inputAssemblyState.topology = static_cast<rhi::PrimitiveTopology>(pipelineState.topology);
 
         auto& rasterState = pipelineDesc.rasterizationState;
-        rasterState.polygonMode = static_cast<rhi::PolygonMode>(pipelineState.polygonMode);
         rasterState.cullMode = static_cast<rhi::CullMode>(pipelineState.cullMode);
         rasterState.frontFace = static_cast<rhi::FrontFace>(pipelineState.frontFace);
+        rasterState.depthClampEnable = pipelineState.depthClampEnable;
 
         pipelineDesc.multisampleState.sampleCount = static_cast<uint8_t>(1u << pipelineState.samples);
 

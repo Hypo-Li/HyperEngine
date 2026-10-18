@@ -29,6 +29,7 @@ namespace hyp::vk
         case rhi::TextureType::Texture_3D:
             return VK_IMAGE_TYPE_3D;
         case rhi::TextureType::Texture_Cube:
+        case rhi::TextureType::Texture_2D_Array:
             return VK_IMAGE_TYPE_2D;
         default:
             return VK_IMAGE_TYPE_2D;
@@ -156,7 +157,7 @@ namespace hyp::vk
         }
     }
 
-    TRef<rhi::TextureView> Texture::createView(const rhi::TextureViewDesc& desc)
+    TRef<rhi::TextureView> Texture::createViewImpl(const rhi::TextureViewDesc& desc)
     {
         incViewCount();
         return new TextureView(*this, desc);

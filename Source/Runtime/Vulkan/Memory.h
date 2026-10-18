@@ -1,10 +1,16 @@
 #pragma once
 #include <RHI/Memory.h>
 
-#include <volk.h>
+#include "VolkInclude.h"
 #define NOMINMAX
 #define VK_NO_PROTOTYPES
+// vcpkg 的 vulkan-memory-allocator port 在不同 triplet 下头文件安装路径不一致:
+// x64-windows 装到 include/vma/vk_mem_alloc.h, x64-linux 直接装到 include/vk_mem_alloc.h。
+#ifdef _WIN32
 #include <vma/vk_mem_alloc.h>
+#else
+#include <vk_mem_alloc.h>
+#endif
 
 namespace hyp::vk
 {

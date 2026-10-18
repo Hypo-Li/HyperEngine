@@ -6,6 +6,11 @@ namespace hyp
     class BinaryArchive : public Archive
     {
     protected:
+        BinaryArchive(bool isLoading, bool isCooking) :
+            Archive(isLoading, isCooking)
+        {
+        }
+
         struct ObjectBuffer
         {
             std::vector<uint8_t> buffer;

@@ -1,11 +1,11 @@
 #pragma once
-#include <volk.h>
+#include "VolkInclude.h"
 
 namespace hyp::vk
 {
     class Device;
 
-    // 持久化到磁盘(DERIVED_DATA_DIR/PipelineCache)的 VkPipelineCache 包装, 纯粹是驱动内部
+    // 持久化到磁盘(可执行文件所在目录下的 Cache/PipelineCache)的 VkPipelineCache 包装, 纯粹是驱动内部
     // pipeline 编译结果的加速缓存, 不影响任何正确性——删掉磁盘上的文件不会导致功能问题,
     // 只是下次冷启动时 pipeline 又要重新走一遍驱动编译。不对外(RHI 接口)暴露, 仅在
     // Vulkan 后端内部创建 VkPipeline 时使用

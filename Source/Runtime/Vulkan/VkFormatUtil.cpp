@@ -2,7 +2,7 @@
 
 namespace hyp::vk
 {
-    VkFormat hyp::vk::convertToVkFormat(rhi::TextureFormat format)
+    VkFormat convertToVkFormat(rhi::TextureFormat format)
     {
         switch (format)
         {

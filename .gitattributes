@@ -1,0 +1,2 @@
+# Normalize text in the repository and use CRLF in working trees.
+* text=auto eol=crlf

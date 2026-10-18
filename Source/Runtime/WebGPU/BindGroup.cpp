@@ -25,12 +25,16 @@ namespace hyp::wgpu
         return result;
     }
 
-    static WGPUTextureSampleType convertTextureSampleType(rhi::TextureSampleType sampleType) noexcept
+    // 多重采样纹理只能 textureLoad、不能做双线性采样, WebGPU 规范不允许它的 sampleType 标成
+    // 可过滤的 Float, 必须是 UnfilterableFloat
+    static WGPUTextureSampleType convertTextureSampleType(rhi::TextureSampleType sampleType, bool multiSample) noexcept
     {
         switch (sampleType)
         {
         case rhi::TextureSampleType::Float:
-            return WGPUTextureSampleType_Float;
+            return multiSample ? WGPUTextureSampleType_UnfilterableFloat : WGPUTextureSampleType_Float;
+        case rhi::TextureSampleType::Unfilterable_Float:
+            return WGPUTextureSampleType_UnfilterableFloat;
         case rhi::TextureSampleType::Uint:
             return WGPUTextureSampleType_Uint;
         case rhi::TextureSampleType::Sint:
@@ -73,6 +77,8 @@ namespace hyp::wgpu
             return WGPUSamplerBindingType_Comparison;
         case rhi::SamplerBindingType::Filtering:
             return WGPUSamplerBindingType_Filtering;
+        case rhi::SamplerBindingType::Non_Filtering:
+            return WGPUSamplerBindingType_NonFiltering;
         default:
             return WGPUSamplerBindingType_Undefined;
         }
@@ -131,7 +137,7 @@ namespace hyp::wgpu
             }
             case rhi::BindingType::Sampled_Texture:
             {
-                wgpuEntry.texture.sampleType = convertTextureSampleType(entry.textureSampleType);
+                wgpuEntry.texture.sampleType = convertTextureSampleType(entry.textureSampleType, entry.multiSample);
                 wgpuEntry.texture.viewDimension = convertTextureViewType(entry.textureViewType);
                 wgpuEntry.texture.multisampled = entry.multiSample ? WGPU_TRUE : WGPU_FALSE;
                 break;

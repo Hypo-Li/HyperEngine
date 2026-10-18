@@ -16,14 +16,32 @@ namespace hyp::rg
         {
             friend class RenderGraph;
         public:
-            BufferHandle createBuffer(HString name, const rhi::BufferDesc& desc);
+            // maxUnusedFrames: 这个资源连续多少帧没被任何 pass 用到才允许 TransientResources 池
+            // 回收它, 默认 TransientResources::kDefaultMaxUnusedFrames。给那些"是否需要"会随场景
+            // 内容(而非分辨率/画质设置)逐帧变化、且变化频率可能比默认冷却期长的资源调大这个值,
+            // 避免反复创建销毁造成的显存分配抖动——例子见 DirectLightingPass 里 LightVolumeDepth
+            // 的用法
+            BufferHandle createBuffer(HString name, const rhi::BufferDesc& desc, uint32_t maxUnusedFrames = TransientResources::kDefaultMaxUnusedFrames);
 
             BufferHandle importBuffer(HString name, BufferResource::PhysicalResource* physicalResource);
 
             BufferHandle accessBuffer(BufferHandle handle, rhi::BufferUsage usage, AccessType accessType);
 
-            TextureHandle createTexture(HString name, const rhi::TextureDesc& desc);
+            TextureHandle createTexture(HString name, const rhi::TextureDesc& desc, uint32_t maxUnusedFrames = TransientResources::kDefaultMaxUnusedFrames);
 
+            // 把一张不由 render graph 创建、生命周期由外部持有的物理纹理接入图里。defaultState
+            // 是调用方对 render graph 许下的一份双向承诺，不是"render graph 会自动帮你查/转换到
+            // 这个状态"：
+            //   - 进入本帧第一个使用该纹理的 pass 之前，调用方必须保证它已经真实处于 defaultState
+            //     （首次导入的纹理如果物理初始状态不是 defaultState——比如刚创建、真实布局是
+            //     UNDEFINED——调用方要在 render graph 之外先用一次性 barrier 把它转过去，参考
+            //     DefaultResources::ensureCreated 的写法）；
+            //   - 作为回报，render graph 保证在本帧最后一个使用它的 pass 结束后，把它转回
+            //     defaultState，这样下一帧的这份承诺才继续成立。
+            // 只要某一帧这份承诺没有兑现（真实状态跟声明的 defaultState 对不上），效果是那一帧里
+            // 第一次访问该纹理时插入的 barrier 会基于错误的 oldState 去转换，物理布局和 Vulkan
+            // 校验层跟踪到的布局就会分道扬镳，通常在后续某次描述符访问时才会暴露出来
+            // （VUID-vkCmdDraw-None-09600 一类的报错）。
             TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, rhi::ResourceState defaultState);
 
             TextureHandle createSubTexture(HString name, TextureHandle handle, const rhi::TextureViewDesc& desc);
@@ -111,6 +129,8 @@ namespace hyp::rg
 
         BufferHandle importBuffer(HString name, BufferResource::PhysicalResource* physicalResource);
 
+        // defaultState 的语义见上面 Builder::importTexture 的注释——这里是给不经过 Setup
+        // lambda、直接持有 RenderGraph 引用的调用方（而不是 Builder）用的同一个入口，语义完全一致
         TextureHandle importTexture(HString name, TextureResource::PhysicalResource* physicalResource, rhi::ResourceState defaultState);
 
         VirtualResource* getResource(ResourceHandle handle) const noexcept
@@ -218,6 +238,8 @@ namespace hyp::rg
             return newHandle;
         }
 
+        // By the time a pass's `execute` runs — inside RenderGraph::execute() — every pass
+        // added this frame has already run its `setup`.
         template <template<typename, typename> typename PASS, typename Data, typename Setup, typename Execute>
         PASS<Data, Execute>& addPass(HString name, PassFlags flags, Setup&& setup, Execute&& execute) noexcept
         {

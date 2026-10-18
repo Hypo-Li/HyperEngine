@@ -5,6 +5,7 @@
 namespace hyp
 {
     static constexpr uint32_t kMaxFramesInFlight = 2;
+    static constexpr uint32_t kMaxQueuedFrames = 2;
     template <typename T>
     using InFlightArray = std::array<T, kMaxFramesInFlight>;
 

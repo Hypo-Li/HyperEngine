@@ -9,7 +9,7 @@
 
 namespace hyp
 {
-    void AtmospherePass::addToRenderGraph(
+    void AtmosphereLutPass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -21,7 +21,6 @@ namespace hyp
         addMultiScatteringLutPass(renderGraph, rendererContext, scene, atmosphere);
         addSkyViewLutPass(renderGraph, rendererContext, scene, view, atmosphere);
         addAerialPerspectiveLutPass(renderGraph, rendererContext, scene, view, atmosphere);
-        addAtmospherePass(renderGraph, rendererContext, scene, view, atmosphere);
     }
 
     struct TransmittanceLutData
@@ -39,7 +38,7 @@ namespace hyp
         TRef<rhi::Pipeline> pipeline;
     };
 
-    void AtmospherePass::addTransmittanceLutPass(
+    void AtmosphereLutPass::addTransmittanceLutPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -75,7 +74,7 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, TransmittanceLutData& data)
             {
-                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, TransmittanceLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmosphereLutPass, TransmittanceLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -124,16 +123,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline);
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline);
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.dispatch(32, 8, 1);
+                cmdList.dispatch(32, 8, 1);
             }
         );
     }
@@ -154,7 +153,7 @@ namespace hyp
         TRef<rhi::Pipeline> pipeline;
     };
 
-    void AtmospherePass::addMultiScatteringLutPass(
+    void AtmosphereLutPass::addMultiScatteringLutPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -195,7 +194,7 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, MultiScatteringLutData& data)
             {
-                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, MultiScatteringLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmosphereLutPass, MultiScatteringLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -249,16 +248,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline);
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline);
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.dispatch(4, 4, 1);
+                cmdList.dispatch(4, 4, 1);
             }
         );
     }
@@ -280,7 +279,7 @@ namespace hyp
         TRef<rhi::Pipeline> pipeline;
     };
 
-    void AtmospherePass::addSkyViewLutPass(
+    void AtmosphereLutPass::addSkyViewLutPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -316,7 +315,7 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, SkyViewLutData& data)
             {
-                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, SkyViewLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmosphereLutPass, SkyViewLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -372,16 +371,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline);
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline);
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.dispatch(24, 13, 1);
+                cmdList.dispatch(24, 13, 1);
             }
         );
     }
@@ -403,7 +402,7 @@ namespace hyp
         TRef<rhi::Pipeline> pipeline;
     };
 
-    void AtmospherePass::addAerialPerspectiveLutPass(
+    void AtmosphereLutPass::addAerialPerspectiveLutPass(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -439,7 +438,7 @@ namespace hyp
             },
             [&rendererContext](rg::ExecuteContext& context, AerialPerspectiveLutData& data)
             {
-                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmospherePass, AerialPerspectiveLutStorage>();
+                static auto& storage = rendererContext.getPassStorage().getOrCreate<AtmosphereLutPass, AerialPerspectiveLutStorage>();
                 auto& renderBackend = context.getRenderBackend();
 
                 if (!storage.shader)
@@ -495,16 +494,16 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
-                cmd.bindPipeline(storage.pipeline);
-                cmd.setBindGroup(
+                auto& cmdList = context.getCommandList();
+                cmdList.bindPipeline(storage.pipeline);
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Compute,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.dispatch(8, 8, 8);
+                cmdList.dispatch(8, 8, 8);
             }
         );
     }
@@ -530,7 +529,7 @@ namespace hyp
         TRef<rhi::Pipeline> pipeline;
     };
 
-    void AtmospherePass::addAtmospherePass(
+    void AtmospherePass::addToRenderGraph(
         rg::RenderGraph& renderGraph,
         RendererContext& rendererContext,
         const SceneProxy& scene,
@@ -635,19 +634,19 @@ namespace hyp
                     );
                 }
 
-                auto& cmd = context.getCommandList();
+                auto& cmdList = context.getCommandList();
 
-                setViewportAndScissor(cmd, data.viewport);
+                setViewportAndScissor(cmdList, data.viewport);
 
-                cmd.bindPipeline(storage.pipeline);
-                cmd.setBindGroup(
+                cmdList.bindPipeline(storage.pipeline);
+                cmdList.setBindGroup(
                     2,
                     rhi::PipelineBindPoint::Graphics,
                     &storage.pipeline->getLayout(),
                     bindGroupCache.getBindGroup(),
                     {}
                 );
-                cmd.draw(3, 1, 0, 0);
+                cmdList.draw(3, 1, 0, 0);
             }
         );
     }
@@ -665,7 +664,7 @@ namespace hyp
         pipelineKey.pipelineState = PipelineStatePresets::fullscreenTriangle();
         pipelineKey.pipelineState.shader = shaderVariant;
         pipelineKey.pipelineState.colorBlendState = ColorBlendState::get<
-            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::One, rhi::BlendFactor::One, rhi::BlendOp::Add, rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add, 0xFF }
+            rhi::ColorBlendAttachmentState{ true, rhi::BlendFactor::One, rhi::BlendFactor::Src_Alpha, rhi::BlendOp::Add, rhi::BlendFactor::Zero, rhi::BlendFactor::One, rhi::BlendOp::Add, 0xFF }
         >();
         pipelineKey.pipelineState.attachmentFormats = AttachmentFormats::get<
             rhi::TextureFormat::Undefined,

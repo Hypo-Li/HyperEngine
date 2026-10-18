@@ -15,9 +15,7 @@ namespace hyp
             uint32_t width,
             uint32_t height,
             PixelFormat format,
-            bool isSRGB,
-            CompressionPreset compressionPreset,
-            bool generateMips = true
+            uint32_t mipLevels = 0
         );
 
     protected:

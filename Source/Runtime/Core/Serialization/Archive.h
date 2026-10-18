@@ -6,7 +6,21 @@ namespace hyp
     class Archive
     {
     public:
-        virtual bool isLoading() const = 0;
+        Archive(bool isLoading, bool isCooking) :
+            mIsLoading(isLoading),
+            mIsCooking(isCooking)
+        {
+        }
+
+        bool isLoading() const noexcept
+        {
+            return mIsLoading;
+        }
+
+        bool isCooking() const noexcept
+        {
+            return mIsCooking;
+        }
 
         virtual void serialize(bool* value, size_t count = 1) = 0;
         virtual void serialize(char* value, size_t count = 1) = 0;
@@ -36,5 +50,8 @@ namespace hyp
         virtual void beginPair() = 0;
         virtual void endPair() = 0;
 
+    private:
+        bool mIsLoading = false;
+        bool mIsCooking = false;
     };
 }

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <cassert>
 #include <vector>
 #include <array>
 #include <mutex>
@@ -11,17 +13,30 @@ namespace hyp
         Sampler,
         Material,
         Geometry,
+        Mesh_Shape,
 
         Scene,
         Camera,
         Mesh_Render,
         Directional_Light,
+        Point_Light,
+        Spot_Light,
         Atmosphere,
         Sky_Light,
+        Sky_Background,
 
         GSplat_Render,
+        Quad_Render,
 
         Count,
+    };
+
+    // Renderer(InstanceProxy)和 Engine(Entity)都要用这个概念——定义在两层共同依赖的
+    // RenderBase 里, 避免 Renderer 反过来依赖 Engine 造成依赖倒置
+    enum class Mobility
+    {
+        Static,
+        Dynamic,
     };
 
     class ProxyHandle
@@ -87,6 +102,8 @@ namespace hyp
 
     using GeometryProxyHandle = TProxyHandle<ProxyType::Geometry>;
 
+    using MeshShapeProxyHandle = TProxyHandle<ProxyType::Mesh_Shape>;
+
     using SceneProxyHandle = TProxyHandle<ProxyType::Scene>;
 
     using CameraProxyHandle = TProxyHandle<ProxyType::Camera>;
@@ -95,11 +112,19 @@ namespace hyp
 
     using DirectionalLightProxyHandle = TProxyHandle<ProxyType::Directional_Light>;
 
+    using PointLightProxyHandle = TProxyHandle<ProxyType::Point_Light>;
+
+    using SpotLightProxyHandle = TProxyHandle<ProxyType::Spot_Light>;
+
     using AtmosphereProxyHandle = TProxyHandle<ProxyType::Atmosphere>;
 
     using SkyLightProxyHandle = TProxyHandle<ProxyType::Sky_Light>;
 
+    using SkyBackgroundProxyHandle = TProxyHandle<ProxyType::Sky_Background>;
+
     using GSplatRenderProxyHandle = TProxyHandle<ProxyType::GSplat_Render>;
+
+    using QuadRenderProxyHandle = TProxyHandle<ProxyType::Quad_Render>;
 
     class ProxyHandleAllocator
     {

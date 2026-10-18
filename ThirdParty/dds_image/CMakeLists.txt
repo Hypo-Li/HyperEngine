@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 4.2.3)
 project(dds_image LANGUAGES CXX)
 
 add_library(dds_image INTERFACE dds.hpp dds_formats.hpp)
